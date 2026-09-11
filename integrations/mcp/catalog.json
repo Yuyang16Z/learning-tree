@@ -1,0 +1,8 @@
+[
+  {"key":"fetch","label":"网页阅读","purpose":"提取网页正文","package":"mcp-server-fetch","version":"2026.8.18","source":"https://github.com/modelcontextprotocol/servers/tree/main/src/fetch"},
+  {"key":"filesystem","label":"学习资料","purpose":"读取和整理学习资料目录","package":"@modelcontextprotocol/server-filesystem","version":"2026.8.31","source":"https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem"},
+  {"key":"memory","label":"知识记忆","purpose":"保存和检索明确需要记住的知识关系","package":"@modelcontextprotocol/server-memory","version":"2026.8.31","source":"https://github.com/modelcontextprotocol/servers/tree/main/src/memory"},
+  {"key":"sequential-thinking","label":"分步思考","purpose":"辅助拆解复杂问题","package":"@modelcontextprotocol/server-sequential-thinking","version":"2026.8.31","source":"https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking"},
+  {"key":"playwright","label":"浏览器","purpose":"打开网页、读取页面结构并连续操作","package":"@playwright/mcp","version":"0.0.80","source":"https://github.com/microsoft/playwright-mcp"},
+  {"key":"time","label":"时间查询","purpose":"查询时间和转换时区","package":"mcp-server-time","version":"2026.8.18","source":"https://github.com/modelcontextprotocol/servers/tree/main/src/time"}
+]

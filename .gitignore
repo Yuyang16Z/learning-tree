@@ -1,0 +1,44 @@
+# Local environments and credentials
+.venv/
+.env*
+!.env.example
+!**/.env.example
+*.pem
+*.key
+*.p12
+
+# Private application data and machine-specific records
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+.backups/
+.runtime/
+.local/
+mcp-data/
+学习资料/*
+!学习资料/使用说明.md
+artifacts/
+优化交付记录.md
+更新记录*.md
+
+# Generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+coverage/
+node_modules/
+dist/
+build/
+*.egg-info/
+*.log
+playwright-report/
+test-results/
+.DS_Store
+.idea/
+.vscode/

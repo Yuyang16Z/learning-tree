@@ -1,0 +1,11 @@
+{
+  "name": "learning-tree-mcp-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@modelcontextprotocol/server-filesystem": "2026.8.31",
+    "@modelcontextprotocol/server-memory": "2026.8.31",
+    "@modelcontextprotocol/server-sequential-thinking": "2026.8.31",
+    "@playwright/mcp": "0.0.80"
+  }
+}

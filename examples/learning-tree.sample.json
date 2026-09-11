@@ -1,0 +1,15 @@
+{
+  "format": "branch-learning",
+  "version": 1,
+  "tree": { "title": "How does a learning tree work?" },
+  "nodes": [
+    { "id": 1, "parent_id": null, "title": "How does a learning tree work?", "kind": "root", "status": "complete" },
+    { "id": 2, "parent_id": 1, "title": "What is a branch?", "seed_text": "branch", "kind": "branch", "status": "complete", "source_node_id": 1, "source_message_id": 2 }
+  ],
+  "messages": [
+    { "id": 1, "node_id": 1, "role": "user", "content": "How does a learning tree work?" },
+    { "id": 2, "node_id": 1, "role": "assistant", "content": "Start with one question. Continue the main thread, or create a **branch** when a term needs a closer look. Each branch keeps a link to the answer it came from, so you can return after exploring.\n\nThis is a hand-written example, not a live AI answer.", "answered_by": "Example" },
+    { "id": 3, "node_id": 2, "role": "user", "content": "What is a branch?" },
+    { "id": 4, "node_id": 2, "role": "assistant", "content": "A branch is a separate line of questions attached to a source answer. You can explore a term here while preserving your place in the main discussion.", "answered_by": "Example" }
+  ]
+}

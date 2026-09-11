@@ -1,0 +1,57 @@
+.learning-map.right { position: relative; display: flex; flex: none; flex-direction: column; min-width: 240px; min-height: 0; overflow: hidden; background: var(--panel); border-left: 1px solid var(--border); }
+.lm-header { display: flex; align-items: center; justify-content: space-between; flex: none; height: 65px; padding: 0 15px 0 20px; gap: 10px; }
+.lm-heading { display: flex; align-items: baseline; gap: 9px; font-size: 13px; font-weight: 600; letter-spacing: .025em; }
+.lm-heading > span { color: var(--muted); font-size: 11px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.lm-header-actions, .lm-tools { display: flex; align-items: center; gap: 3px; }
+.learning-map button { color: var(--muted); }
+.learning-map button:focus-visible, .lm-viewport:focus-visible { outline: 2px solid var(--teal); outline-offset: 3px; }
+.learning-map button:disabled { cursor: default; opacity: .35; }
+.learning-map .lm-icon { border: 0; background: transparent; display: inline-flex; width: 30px; height: 30px; flex: none; align-items: center; justify-content: center; padding: 0; border-radius: 7px; }
+.learning-map .lm-icon:hover:not(:disabled), .learning-map .lm-icon.active { color: var(--text); background: var(--panel-2); }
+.lm-search { position: absolute; top: 55px; left: 12px; right: 12px; z-index: 4; padding: 7px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); box-shadow: 0 8px 24px #0000000a; }
+.lm-search-field { display: flex; align-items: center; gap: 7px; padding-left: 7px; color: var(--muted); }
+.lm-search-field input { border: 0; outline: 0; background: transparent; min-width: 0; height: 34px; flex: 1; color: var(--text); font: inherit; font-size: 13px; }
+.lm-results { max-height: 280px; overflow: auto; border-top: 1px solid var(--border); margin-top: 5px; padding-top: 6px; }
+.lm-result-count { display: block; color: var(--muted); padding: 7px 8px; font-size: 11px; }
+.lm-results button { display: block; width: 100%; padding: 9px 8px; border: 0; border-radius: 6px; background: transparent; text-align: left; font-size: 12px; }
+.lm-results button > span { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.6; }
+.lm-results button:hover { background: var(--panel); color: var(--text); }
+.lm-viewport { flex: 1; min-height: 0; overflow: hidden; position: relative; touch-action: none; cursor: grab; overscroll-behavior: contain; background-image: radial-gradient(var(--border-strong) .65px, transparent .65px); background-size: 18px 18px; }
+.lm-viewport.dragging { cursor: grabbing; }
+.lm-viewport.dragging * { cursor: grabbing; }
+.lm-empty { display: grid; place-items: center; height: 100%; color: var(--muted); font-size: 13px; }
+.lm-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+.lm-connections { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
+.lm-connections path { fill: none; stroke: var(--border-strong); stroke-width: 1.5; stroke-linejoin: round; }
+.lm-connections path.current { stroke: var(--teal); opacity: .5; }
+.lm-card { position: absolute; border: 1px solid var(--border); border-radius: 11px; background: var(--bg); box-shadow: 0 2px 5px #00000003; overflow: hidden; cursor: default; }
+.lm-card.current { border-color: var(--teal); box-shadow: 0 0 0 2px color-mix(in srgb, var(--teal) 10%, transparent); }
+.lm-card.ancestor { border-color: color-mix(in srgb, var(--teal) 28%, var(--border)); }
+.learning-map .lm-topic { display: flex; align-items: flex-start; gap: 8px; width: 100%; height: 55px; padding: 12px 12px 0; border: 0; background: transparent; color: var(--text); text-align: left; }
+.lm-topic:hover .lm-title { color: var(--teal); }
+.lm-node-mark { display: block; flex: none; width: 6px; height: 6px; margin-top: 6px; border: 1px solid var(--border-strong); border-radius: 50%; }
+.current .lm-node-mark { background: var(--teal); border-color: var(--teal); }
+.ancestor .lm-node-mark { border-color: var(--teal); }
+.lm-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; font-size: 12px; line-height: 18px; font-weight: 500; overflow-wrap: anywhere; }
+.lm-card-meta { display: flex; align-items: center; gap: 5px; padding: 2px 10px 5px 26px; height: 30px; font-size: 10px; color: var(--muted); }
+.learning-map .lm-round-toggle { border: 0; background: transparent; font: inherit; padding: 4px 0; display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.lm-round-toggle:hover { color: var(--teal); }
+.lm-round-toggle span { font-size: 12px; }
+.lm-card-state { display: flex; align-items: center; justify-content: flex-end; flex: 1; min-width: 0; }
+.lm-current-label { color: var(--teal); font-size: 10px; }
+.lm-error-dot { display: block; width: 5px; height: 5px; border-radius: 50%; background: var(--danger); }
+.lm-pending { color: var(--teal); font-size: 16px; line-height: 12px; }
+.learning-map .lm-fold { display: flex; align-items: center; justify-content: center; min-width: 21px; height: 21px; padding: 0 3px; border-radius: 5px; background: transparent; border: 0; font-size: 11px; margin-left: 3px; }
+.lm-fold:hover:not(:disabled) { background: var(--panel-2); color: var(--text); }
+.lm-rounds { border-top: 1px solid var(--border); padding: 5px 6px; }
+.learning-map .lm-rounds button { display: flex; width: 100%; gap: 7px; align-items: center; height: 32px; border: 0; border-radius: 5px; padding: 0 6px; text-align: left; background: transparent; font-size: 11px; }
+.lm-rounds button > span:first-child { width: 14px; flex: none; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.lm-rounds button > span:last-child { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.learning-map .lm-rounds button.selected { background: var(--teal-bg); color: var(--teal); }
+.lm-rounds button:hover { background: var(--panel); color: var(--text); }
+.lm-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 16px; flex: none; border-top: 1px solid var(--border); }
+.lm-zoom { display: flex; align-items: center; gap: 1px; }
+.learning-map .lm-zoom button { min-width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; background: transparent; font-size: 16px; }
+.learning-map .lm-zoom .lm-percent { min-width: 45px; font-size: 10px; font-variant-numeric: tabular-nums; }
+.lm-zoom button:hover:not(:disabled) { background: var(--panel-2); color: var(--text); }
+@media (prefers-reduced-motion: reduce) { .lm-world { will-change: auto; } }

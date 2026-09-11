@@ -1,0 +1,4 @@
+/* Keep the English brand inside the compact sidebar without changing user titles. */
+html[lang="en"] .brand { font-size: 16px; letter-spacing: 0; gap: 7px; }
+.brand-mark { flex-shrink: 0; }
+.settings-nav button { overflow-wrap: anywhere; }
