@@ -8,6 +8,7 @@ A personal workspace for learning with AI. Ask a question, explore unfamiliar id
 
 - A continuous conversation alongside an interactive topic map: jump to any turn, pan, zoom and return to your previous view after centering.
 - Select text for a quick explanation or create a branch from an answer. Return to the exact source passage when you finish.
+- Branch titles summarize the first question you ask, rather than copying the source answer. A new empty branch shows “New branch”.
 - Save your understanding and bring it into the main conversation as an editable draft.
 - Edit a question as a new version, retry interrupted answers, and keep the original record.
 - Switch **English / 中文** in **Settings → 语言 / Language**. Labels change immediately; your conversations and notes keep their original language.
@@ -50,6 +51,8 @@ No `.env` is needed for normal use. Configure models in Settings. To select anot
 | Web search | DDGS by default; `TAVILY_API_KEY` opts into Tavily. Errors are reported explicitly. |
 
 Capabilities depend on the provider and model. Native OpenAI Responses and Gemini protocols are not implemented. UI language does not translate saved content; quick explanations follow the selected language, and normal answers depend on the prompt and model.
+
+Each new branch's first question uses one additional short title request to the selected model, in the background, without tools or images. Only the question and a short source excerpt are sent. This does not delay the answer; unavailable, slow or invalid results keep a question-based label. Custom/imported titles are preserved, and ordinary follow-ups do not rename an established branch.
 
 ## Development and checks
 

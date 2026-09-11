@@ -19,6 +19,7 @@ import { Sidebar } from "./components/Sidebar";
 import { ChatPane } from "./components/ChatPane";
 import { LearningMap } from "./components/LearningMap";
 import { NavigationGate, readSaved, saveValue } from "./lib/workspace";
+import { mergePendingTitles, pollPendingTitles } from "./lib/titlePolling";
 import { SettingsModal } from "./components/SettingsModal";
 import { NewTreeModal } from "./components/NewTreeModal";
 import { AddModelModal } from "./components/AddModelModal";
@@ -67,6 +68,21 @@ export default function App() {
   const [recovery, setRecovery] = useState<Record<string, unknown> | null>(() => readSaved('bl-recovery', null));
   const [notice, setNotice] = useState<string | null>(null);
   const importRef = useRef<HTMLInputElement>(null);
+  const pendingTitleIds = treeNodes.filter(node => node.title_state === "pending").map(node => node.id).join(",");
+
+  useEffect(() => {
+    if (activeTreeId == null || !pendingTitleIds) return;
+    const treeId = activeTreeId;
+    return pollPendingTitles({
+      treeId,
+      load: api.getTree,
+      revision: () => mapRevision.current,
+      isActive: id => treeRef.current === id,
+      commit: (nodes, ticket) => setTreeNodes(current =>
+        treeRef.current === treeId && mapRevision.current === ticket
+          ? mergePendingTitles(current, nodes) : current),
+    });
+  }, [activeTreeId, pendingTitleIds]);
 
   async function loadModels() {
     const m = await api.listModels();

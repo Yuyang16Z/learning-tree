@@ -1,5 +1,6 @@
 export interface Tree { id: number; title: string; root_node_id: number }
 export type NodeStatus = 'idle' | 'pending' | 'complete' | 'error' | 'interrupted';
+export type TitleState = 'legacy' | 'manual' | 'empty' | 'pending' | 'ai' | 'fallback';
 export interface SourceAnchor {
   source_message_id?: number;
   source_start?: number;
@@ -10,6 +11,7 @@ export interface NavigationAnchor {
   nodeId: number; messageId?: number; start?: number; end?: number; text?: string; nonce: number;
 }
 export interface LearningFields {
+  title_state?: TitleState;
   kind?: 'root' | 'followup' | 'branch' | 'revision';
   status?: NodeStatus;
   error?: string | null;

@@ -41,7 +41,7 @@ function startsTopic(node: TopicNode): boolean {
 }
 
 /** Group only uninterrupted follow-ups. A branch keeps its original parent Q/A. */
-export function groupTopics(input: TreeNode[], fallbackTitle = "新问题"): TopicTree {
+export function groupTopics(input: TreeNode[], fallbackTitle = "新问题", fallbackBranchTitle = "新分支"): TopicTree {
   const sorted = [...new Map(input.map((node) => [node.id, node])).values()].sort((a, b) => a.id - b.id);
   const nodesById = new Map(sorted.map((node) => [node.id, node]));
   const children = new Map<number, TreeNode[]>();
@@ -74,7 +74,8 @@ export function groupTopics(input: TreeNode[], fallbackTitle = "新问题"): Top
         id: first.id,
         parentId: parent,
         sourceNodeId: parent == null ? null : first.parent_id,
-        title: first.title.trim() || first.seed_text?.trim() || fallbackTitle,
+        // A quotation identifies the source, not the question this branch explores.
+        title: first.title.trim() || (first.kind === "branch" ? fallbackBranchTitle : fallbackTitle),
         nodes: members,
         children: [],
       };

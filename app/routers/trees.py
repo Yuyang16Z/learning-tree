@@ -11,7 +11,7 @@ from ..db import get_session
 from ..models import KnowledgeTree, Memory, Message, Node
 from ..schemas import NodeOut, TreeIn, TreeOut
 from ..service import get_messages
-from .nodes import _GENERATIONS, _REQUEST_LOCK, node_metadata
+from .nodes import _GENERATIONS, _REQUEST_LOCK, _TITLE_JOBS, node_metadata
 
 router = APIRouter(prefix="/trees", tags=["trees"])
 
@@ -150,7 +150,9 @@ def import_tree(body: dict, session: Session = Depends(get_session)) -> TreeOut:
         )
         if values["status"] == "pending":
             values.update(status="interrupted", error="导入了未完成的回答，可重试。")
-        node = Node(tree_id=tree.id, **values)
+        # Imported labels are explicit user data; do not trigger model calls or
+        # overwrite them when opening the tree in a newer version.
+        node = Node(tree_id=tree.id, title_state="manual" if values["title"] else "empty", **values)
         session.add(node)
         session.flush()
         node_map[old.id] = node
@@ -190,7 +192,7 @@ def export_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
         "tree": {"title": tree.title},
         "nodes": [
             {
-                **node.model_dump(exclude={"tree_id", "created_at", "request_id"}),
+                **node.model_dump(exclude={"tree_id", "created_at", "request_id", "title_state"}),
                 "kind": node_metadata(node)["kind"],
             }
             for node in nodes
@@ -208,6 +210,7 @@ def delete_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
     ids = [node.id for node in nodes]
     with _REQUEST_LOCK:
         for nid in ids:
+            _TITLE_JOBS.pop(nid, None)
             if nid in _GENERATIONS:
                 _GENERATIONS[nid].stop.set()
         for message in session.exec(select(Message).where(Message.node_id.in_(ids))).all():

@@ -31,6 +31,26 @@ describe("topic grouping", () => {
     expect(quoted.groups).toHaveLength(2);
   });
 
+  it("uses localized placeholders for empty titles without exposing the quoted answer as a title", () => {
+    const nodes = [node(1, null, { title: "" }), node(2, 1, {
+      kind: "branch", title: "", title_state: "empty", seed_text: "AI 领域的 harness 工程，核心是：模型…",
+    })];
+    const chinese = groupTopics(nodes);
+    expect(chinese.groups.map(group => group.title)).toEqual(["新问题", "新分支"]);
+    const english = groupTopics(nodes, "New question", "New branch");
+    expect(english.groups.map(group => group.title)).toEqual(["New question", "New branch"]);
+  });
+
+  it("uses the branch question summary while retaining the original source anchor", () => {
+    const branch = node(2, 1, {
+      kind: "branch", title: "Eval harness 评估框架入门", title_state: "ai",
+      seed_text: "AI 领域的 harness 工程，核心是：模型…", source_message_id: 9,
+    });
+    const topics = groupTopics([node(1, null), branch]);
+    expect(topics.byId.get(2)?.title).toBe("Eval harness 评估框架入门");
+    expect(topics.byId.get(2)?.nodes[0]).toBe(branch);
+  });
+
   it("keeps cycles, orphan nodes, and self parents navigable without infinite traversal", () => {
     const malformed = groupTopics([node(1, 2), node(2, 1), node(3, 999), node(4, 4)]);
     expect(malformed.nodeToGroup.size).toBe(4);

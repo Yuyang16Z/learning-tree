@@ -27,6 +27,7 @@ _ADDED_COLUMNS = {
         "learning_note": "TEXT",
         "revision_of": "INTEGER",
         "request_id": "TEXT",
+        "title_state": "TEXT NOT NULL DEFAULT 'legacy'",
     },
     "message": {
         "images": "JSON",
@@ -53,13 +54,31 @@ def init_db() -> None:
     # messages and branch attachments; the thread API presents every Q/A pair.
     SQLModel.metadata.create_all(engine)
     _ensure_columns()
-    from .models import Node
+    from .models import Message, Node
+    from .title_generation import fallback_title
 
     with Session(engine) as session:
         for node in session.exec(select(Node).where(Node.status == "pending")).all():
             node.status = "interrupted"
             node.error = "上次生成因服务重启中断，可重试。"
             session.add(node)
+        for node in session.exec(
+            select(Node).where(Node.title_state.in_(["legacy", "pending"]))
+        ).all():
+            # Repair only the recognizable old auto-label, not custom titles.
+            old_source_title = len(node.seed_text or "") > 24 and node.title == node.seed_text[:24]
+            if node.title_state == "pending" or old_source_title:
+                question = session.exec(
+                    select(Message)
+                    .where(Message.node_id == node.id, Message.role == "user")
+                    .order_by(Message.id)
+                ).first()
+                node.title = fallback_title(question.content) if question else ""
+                node.title_state = "fallback" if question else "empty"
+                session.add(node)
+            elif node.kind == "branch" or node.seed_text:
+                node.title_state = "manual" if node.title.strip() else "empty"
+                session.add(node)
         session.commit()
 
 

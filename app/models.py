@@ -63,6 +63,7 @@ class Node(SQLModel, table=True):
     parent_id: int | None = Field(default=None, foreign_key="node.id", index=True)
     title: str
     seed_text: str | None = None  # 从父节点划词开分支时选中的那段概念
+    title_state: str = "legacy"  # empty/pending/ai/fallback/manual; separate from answer status
     summary: str | None = None  # 缓存摘要，喂给子节点当上下文（脊柱用）
     kind: str = "followup"
     status: str = "idle"

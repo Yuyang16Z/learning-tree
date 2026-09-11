@@ -11,6 +11,7 @@ LearningTree uses React + TypeScript and FastAPI + SQLite/SQLModel. Normal start
 | `app/routers/` | Validated endpoints and streaming orchestration. |
 | `app/service.py` | Conversation context and learning memory. |
 | `app/llm.py`, `app/anthropic_provider.py` | Provider request conversion and deterministic demo behavior. |
+| `app/title_generation.py` | Bounded, question-first branch title requests and plain-text fallback. |
 | `app/mcp_client.py` | Persistent process/session lifecycle and serialized tool calls. |
 | `app/db.py`, `app/models.py` | SQLite initialization, additive upgrades and models. |
 
@@ -19,6 +20,8 @@ LearningTree uses React + TypeScript and FastAPI + SQLite/SQLModel. Normal start
 A tree owns nodes. Each node records its parent, kind (`root`, `followup`, `branch`, `revision`), status, source references and learning note. Messages belong to nodes. Legacy multi-turn nodes remain intact; the thread API presents their complete sequence.
 
 The map groups consecutive follow-ups into topic cards; expanded turns navigate to individual questions. Source node/message IDs and character offsets let branches return to their originating passages. Editing creates a revision instead of overwriting messages.
+
+Branch titles have an independent `title_state`: empty, pending, ai, fallback, manual, or legacy. The first branch question immediately supplies a provisional label; a separate worker asks the same model for a short title. A 20-second settlement deadline ignores late results. Title failures never change answer status. The map polls only pending title metadata, with navigation guards and a 30-second limit, without resetting chat state or the camera. Startup replaces recognizable legacy source-prefix labels with the first question, using no model calls. Title job state is internal and excluded from version-1 exports; imported labels are treated as explicit titles.
 
 Context follows the current ancestry. The nearest six ancestors retain full text and images; older content is compacted with an omission marker. The selected passage is included. Factual memory is restricted to the ancestor path, without silently mixing siblings. Understanding is brought back as an editable message draft.
 

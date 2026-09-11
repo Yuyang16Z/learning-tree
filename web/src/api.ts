@@ -96,7 +96,7 @@ export const api = {
   listTrees: () => fetch(`${API}/trees`).then(j<Tree[]>),
   createTree: (title: string, root_question?: string) =>
     jsonPost(`${API}/trees`, { title, root_question: root_question ?? null }).then(j<Tree>),
-  getTree: (id: number) => fetch(`${API}/trees/${id}`).then(j<TreeNode[]>),
+  getTree: (id: number, signal?: AbortSignal) => fetch(`${API}/trees/${id}`, { signal }).then(j<TreeNode[]>),
   deleteTree: (id: number) => fetch(`${API}/trees/${id}`, { method: "DELETE" }).then(j<unknown>),
 
   getNode: (id: number) => fetch(`${API}/nodes/${id}`).then(j<NodeDetail>),

@@ -41,7 +41,7 @@ function Icon({ name }: { name: "search" | "close" | "collapse" | "focus" | "fit
 export function LearningMap({ nodes, activeId, onSelect, onCollapse, width, treeKey }: Props) {
   const { locale, t } = useI18n();
   const identity = treeKey ?? nodes[0]?.tree_id ?? "empty";
-  const tree = useMemo(() => groupTopics(nodes, t("新问题", "New question")), [nodes, locale]);
+  const tree = useMemo(() => groupTopics(nodes, t("新问题", "New question"), t("新分支", "New branch")), [nodes, locale]);
   const ancestors = useMemo(() => groupAncestorIds(tree, activeId), [tree, activeId]);
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
   const [expanded, setExpanded] = useState<Set<number>>(new Set());

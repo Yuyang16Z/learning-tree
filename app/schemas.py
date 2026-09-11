@@ -40,6 +40,7 @@ class NodeOut(BaseModel):
     tree_id: int
     parent_id: int | None
     title: str
+    title_state: str = "legacy"
     seed_text: str | None
     has_summary: bool
     kind: str = "followup"
@@ -120,3 +121,7 @@ class NodePatch(BaseModel):
 
 class StopIn(BaseModel):
     request_id: str | None = Field(default=None, max_length=100)
+
+
+class TitleIn(BaseModel):
+    config_id: int | None = None

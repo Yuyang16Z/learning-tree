@@ -14,9 +14,9 @@ from sqlmodel import Session, select
 
 from ..context import BASE_SYSTEM, build_context
 from ..db import engine, get_session
-from ..llm import complete, run_agent, stream_chat
+from ..llm import LLMSpec, complete, run_agent, stream_chat
 from ..models import Memory, Message, Node
-from ..schemas import AskIn, BranchIn, ExplainIn, NodePatch, StopIn
+from ..schemas import AskIn, BranchIn, ExplainIn, NodePatch, StopIn, TitleIn
 from ..service import (
     assemble_tools,
     extract_and_save,
@@ -28,9 +28,12 @@ from ..service import (
     resolve_config,
     to_spec,
 )
+from ..title_generation import fallback_title, summarize_question
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
 _REQUEST_LOCK = threading.RLock()
+_TITLE_JOBS: dict[int, str] = {}
+TITLE_DEADLINE = 20.0
 
 
 @dataclass
@@ -69,6 +72,7 @@ def node_metadata(node: Node, messages: list[Message] | None = None) -> dict:
         status = "complete"
     return {
         "kind": kind,
+        "title_state": node.title_state,
         "status": status,
         "error": node.error,
         "source_node_id": node.source_node_id or (node.parent_id if node.seed_text else None),
@@ -181,6 +185,7 @@ def delete_node(node_id: int, session: Session = Depends(get_session)) -> dict:
         )
     with _REQUEST_LOCK:
         for nid in ids:
+            _TITLE_JOBS.pop(nid, None)
             if nid in _GENERATIONS:
                 _GENERATIONS[nid].stop.set()
         for message in session.exec(select(Message).where(Message.node_id.in_(ids))).all():
@@ -237,7 +242,8 @@ def branch(node_id: int, body: BranchIn, session: Session = Depends(get_session)
         tree_id=parent.tree_id,
         parent_id=parent.id,
         kind="branch",
-        title=body.title or body.seed_text[:24],
+        title=(body.title or "").strip(),
+        title_state="manual" if (body.title or "").strip() else "empty",
         seed_text=body.seed_text,
         source_node_id=parent.id,
         source_message_id=body.source_message_id,
@@ -255,6 +261,119 @@ def branch(node_id: int, body: BranchIn, session: Session = Depends(get_session)
         "seed_text": child.seed_text,
         **node_metadata(child),
     }
+
+
+def _queue_branch_title(node_id: int, spec: LLMSpec) -> None:
+    """Title work never blocks answer streaming and never shares its failure state."""
+    job_engine = engine
+    with _REQUEST_LOCK, Session(job_engine) as session:
+        node = session.get(Node, node_id)
+        if not node or node.title_state != "pending" or node_id in _TITLE_JOBS:
+            return
+        question = session.exec(
+            select(Message)
+            .where(Message.node_id == node_id, Message.role == "user")
+            .order_by(Message.id)
+        ).first()
+        if (
+            not question
+            or not question.content.strip()
+            or spec.api_key == "mock"
+            or spec.base_url.startswith("mock")
+        ):
+            node.title_state = "fallback"
+            session.add(node)
+            session.commit()
+            return
+        token = str(uuid4())
+        _TITLE_JOBS[node_id] = token
+        identity = (node.tree_id, node.created_at, question.id, question.content)
+        question_text, source = question.content, node.seed_text
+
+    def finish(title: str | None) -> bool:
+        with _REQUEST_LOCK:
+            if _TITLE_JOBS.get(node_id) != token:
+                return True
+            with Session(job_engine) as session:
+                current = session.get(Node, node_id)
+                original = session.get(Message, identity[2])
+                if (
+                    not current
+                    or current.title_state != "pending"
+                    or (current.tree_id, current.created_at) != identity[:2]
+                    or not original
+                    or original.node_id != node_id
+                    or original.content != identity[3]
+                ):
+                    _TITLE_JOBS.pop(node_id, None)
+                    return True
+                current.title = title or fallback_title(question_text)
+                current.title_state = "ai" if title else "fallback"
+                session.add(current)
+                session.commit()
+                _TITLE_JOBS.pop(node_id, None)
+                return True
+
+    def settle(title: str | None) -> bool:
+        try:
+            return finish(title)
+        except Exception:
+            # Database shutdown or deletion must not turn a title failure into
+            # an answer failure or leak a provider configuration into logs.
+            return False
+
+    def deadline() -> None:
+        if not settle(None):
+            with _REQUEST_LOCK:
+                if _TITLE_JOBS.get(node_id) == token:
+                    _TITLE_JOBS.pop(node_id, None)
+
+    timer = threading.Timer(TITLE_DEADLINE, deadline)
+    timer.daemon = True
+
+    def generate() -> None:
+        try:
+            settled = settle(summarize_question(spec, question_text, source))
+        except Exception:
+            settled = settle(None)
+        if settled:
+            timer.cancel()
+
+    timer.start()
+    threading.Thread(target=generate, daemon=True).start()
+
+
+@router.post("/{node_id}/title")
+def generate_branch_title(
+    node_id: int, body: TitleIn, session: Session = Depends(get_session)
+) -> dict:
+    """Explicitly repair a previous automatic label, without generating another answer."""
+    with _REQUEST_LOCK:
+        node = _get(session, node_id)
+        if node.kind != "branch" and not node.seed_text:
+            raise HTTPException(409, "只有分支可以生成话题标题")
+        if node.title_state == "manual":
+            raise HTTPException(409, "保留已有自定义标题")
+        if node.title_state == "ai" or node_id in _TITLE_JOBS:
+            return get_node(node_id, session)
+        question = session.exec(
+            select(Message)
+            .where(Message.node_id == node_id, Message.role == "user")
+            .order_by(Message.id)
+        ).first()
+        if not question or not question.content.strip():
+            raise HTTPException(409, "请先在分支里提出问题")
+        cfg = resolve_config(session, body.config_id)
+        if not cfg:
+            raise HTTPException(400, "请先在设置中添加模型")
+        spec = to_spec(cfg)
+        node.title = fallback_title(question.content)
+        node.title_state = "pending"
+        session.add(node)
+        session.commit()
+    _queue_branch_title(node_id, spec)
+    session.expire_all()
+    return get_node(node_id, session)
 
 
 @router.post("/{node_id}/explain")
@@ -353,6 +472,7 @@ def stop(
 
 @router.post("/{node_id}/ask")
 def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> StreamingResponse:
+    title_needed = False
     with _REQUEST_LOCK:
         node = _get(session, node_id)
         if body.request_id:
@@ -469,6 +589,23 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     target.title = question_text[:24] or "图片提问"
             if body.mode != "revise":
                 current_messages = []
+        is_branch_question = bool(target.seed_text) or target.kind == "branch"
+        old_source_title = (
+            len(target.seed_text or "") > 24 and target.title == target.seed_text[:24]
+        )
+        if (
+            is_branch_question
+            and target.title_state != "manual"
+            and (
+                (not previous_messages and target.title_state in ("empty", "legacy", "fallback"))
+                or (body.mode == "revise" and not current_messages)
+                or old_source_title
+            )
+        ):
+            # The submitted question, not the source answer, is the provisional label.
+            target.title = fallback_title(question_text)
+            target.title_state = "pending" if question_text else "fallback"
+            title_needed = bool(question_text)
         request_id = body.request_id or str(uuid4())
         target.request_id, target.status, target.error = request_id, "pending", None
         target.summary = None
@@ -507,6 +644,9 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
         # tools (listing can start a local process).
         is_mock = spec.api_key == "mock" or spec.base_url.startswith("mock")
         requested_tools = [] if is_mock else (body.tools or [])
+
+    if title_needed:
+        _queue_branch_title(target_id, spec)
 
     def produce():
         stream = None
