@@ -1,0 +1,76 @@
+{
+  "stage": "additional_synthetic_examples_not_used_to_select_first_six",
+  "model": "BAAI/bge-reranker-v2-m3",
+  "revision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+  "license": "apache-2.0",
+  "cpu_threads": 2,
+  "rerank_batch_size": 4,
+  "seconds": 2.3586464999971213,
+  "data": "synthetic only; no personal database",
+  "cases": [
+    {
+      "case": "zh_derivative",
+      "expected_relevant": true,
+      "logit": 0.46522,
+      "sigmoid": 0.61425269,
+      "query": "如何描述曲线在某一点变化得有多快？",
+      "document": "导数描述函数在指定位置的瞬时变化率，其几何意义是曲线在该点处切线的斜率。"
+    },
+    {
+      "case": "en_binary",
+      "expected_relevant": true,
+      "logit": -7.19681,
+      "sigmoid": 0.00074841,
+      "query": "Why does this algorithm halve the remaining possibilities after every step?",
+      "document": "Binary search repeatedly compares against the middle element of a sorted array and discards the half that cannot contain the target."
+    },
+    {
+      "case": "zh_matrix",
+      "expected_relevant": true,
+      "logit": -1.25273,
+      "sigmoid": 0.22222707,
+      "query": "两个矩阵可以相乘需要满足什么条件？",
+      "document": "若 A 的维度是 m×n，B 的维度是 n×p，则乘积 AB 的维度是 m×p；左矩阵列数必须等于右矩阵行数。"
+    },
+    {
+      "case": "cross_language",
+      "expected_relevant": true,
+      "logit": 0.90368,
+      "sigmoid": 0.71170568,
+      "query": "How do we adjust parameters so the objective becomes smaller?",
+      "document": "梯度下降沿损失函数的负梯度方向更新参数，使目标函数逐步减小。"
+    },
+    {
+      "case": "en_low_lexical",
+      "expected_relevant": true,
+      "logit": -8.2276,
+      "sigmoid": 0.0002671,
+      "query": "Why does a model score well on training data but poorly on unseen data?",
+      "document": "Overfitting means learning training-specific patterns that do not generalize."
+    },
+    {
+      "case": "zh_tool_result",
+      "expected_relevant": true,
+      "logit": -1.31501,
+      "sigmoid": 0.21165049,
+      "query": "怎样知道工具调用真的把内容写进数据库了？",
+      "document": "写入调用超时不能直接视为失败；应查询实际记录或调用幂等状态接口，核实已发生的写入效果后再决定是否重试。"
+    },
+    {
+      "case": "en_shared_topic_no_answer",
+      "expected_relevant": false,
+      "logit": -5.93984,
+      "sigmoid": 0.00262554,
+      "query": "Why does binary search require sorted input?",
+      "document": "Binary search functions are sometimes written in Python."
+    },
+    {
+      "case": "zh_shared_generic_no_answer",
+      "expected_relevant": false,
+      "logit": -10.51102,
+      "sigmoid": 2.723e-05,
+      "query": "用户在什么情况下能够删除银行卡并取消自动扣费？",
+      "document": "用户可以在设置中调整头像显示大小和更换主题颜色。"
+    }
+  ]
+}

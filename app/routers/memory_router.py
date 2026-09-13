@@ -1,10 +1,11 @@
 """长期记忆：列 / 删一条 / 清空。自动提炼在 nodes.ask 里后台完成，这里只做管理。"""
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import delete
 from sqlmodel import Session, select
 
 from ..db import get_session
-from ..models import Memory
+from ..models import Memory, MemoryEmbedding
 from ..schemas import MemoryOut
 
 router = APIRouter(prefix="/memories", tags=["memories"])
@@ -21,6 +22,7 @@ def delete_memory(memory_id: int, session: Session = Depends(get_session)) -> di
     m = session.get(Memory, memory_id)
     if not m:
         raise HTTPException(404, "记忆不存在")
+    session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory_id))
     session.delete(m)
     session.commit()
     return {"deleted": memory_id}
@@ -28,9 +30,24 @@ def delete_memory(memory_id: int, session: Session = Depends(get_session)) -> di
 
 @router.delete("")
 def clear_memories(session: Session = Depends(get_session)) -> dict:
+    session.execute(delete(MemoryEmbedding))
     n = 0
     for m in session.exec(select(Memory)).all():
         session.delete(m)
         n += 1
     session.commit()
     return {"cleared": n}
+
+
+@router.get("/retrieval/status")
+def retrieval_status() -> dict:
+    from ..semantic_models import get_status
+
+    return get_status()
+
+
+@router.post("/retrieval/prepare")
+def prepare_retrieval() -> dict:
+    from ..semantic_models import start_prepare
+
+    return start_prepare()

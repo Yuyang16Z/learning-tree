@@ -71,6 +71,11 @@ async function poll(callback) {
       assert.equal(await choice.getAttribute('aria-pressed'), 'true');
       await dialog.getByRole('button', { name: english ? 'Models & API keys' : '模型与 API key', exact: true }).waitFor();
       await assertLocale(locale);
+      await dialog.getByRole('button', { name: english ? 'Memory' : '记忆', exact: true }).click();
+      const retrieval = dialog.locator('[data-memory-retrieval-state]');
+      await poll(async () => ['ready', 'preparing', 'degraded', 'disabled'].includes(await retrieval.getAttribute('data-memory-retrieval-state')));
+      assert((await retrieval.innerText()).includes(english ? 'Memory retrieval' : '记忆检索'));
+      assert((await retrieval.innerText()).includes(english ? 'current learning path' : '当前学习路径'));
       await dialog.getByRole('button', { name: english ? 'Close' : '关闭', exact: true }).click();
       await dialog.waitFor({ state: 'hidden' });
     }
@@ -80,6 +85,35 @@ async function poll(callback) {
     await chooseLocale('en');
     assert.equal(await input.inputValue(), ordinaryDraft);
     checks.push('Settings switches Chinese to English immediately, including LearningTree title, labels and existing draft');
+    checks.push('Memory settings loads real retrieval status with a localized source-boundary explanation');
+
+    // Exercise setup UI with local route fixtures; do not download models or
+    // change retrieval settings as a side effect of browser smoke tests.
+    let retrievalFixture = { state: 'degraded', embedding_ready: false, reranker_ready: false };
+    const retrievalStatusRoute = '**/api/memories/retrieval/status';
+    const retrievalPrepareRoute = '**/api/memories/retrieval/prepare';
+    let prepareCalls = 0;
+    await page.route(retrievalStatusRoute, route => route.fulfill({ json: retrievalFixture }));
+    await page.route(retrievalPrepareRoute, async route => {
+      assert.equal(route.request().method(), 'POST');
+      prepareCalls += 1;
+      await route.fulfill({ json: { state: 'preparing', embedding_ready: false, reranker_ready: false } });
+      retrievalFixture = { state: 'ready', embedding_ready: true, reranker_ready: true };
+    });
+    await page.getByRole('button', { name: '⚙ Settings', exact: true }).click();
+    const memoryDialog = page.getByRole('dialog');
+    await memoryDialog.getByRole('button', { name: 'Memory', exact: true }).click();
+    const retrievalPanel = memoryDialog.locator('[data-memory-retrieval-state]');
+    await poll(async () => (await retrievalPanel.getAttribute('data-memory-retrieval-state')) === 'degraded');
+    assert((await retrievalPanel.innerText()).includes('keyword retrieval is active'));
+    await memoryDialog.getByRole('button', { name: 'Prepare / retry', exact: true }).click();
+    await poll(async () => (await retrievalPanel.getAttribute('data-memory-retrieval-state')) === 'ready');
+    assert.equal(prepareCalls, 1, 'Preparation is requested once; subsequent polls only read status');
+    assert((await retrievalPanel.innerText()).includes('Local semantic retrieval is ready'));
+    await memoryDialog.getByRole('button', { name: 'Close', exact: true }).click();
+    await page.unroute(retrievalStatusRoute);
+    await page.unroute(retrievalPrepareRoute);
+    checks.push('Memory settings explains keyword fallback and progresses from local preparation to ready without downloading test models');
     await page.reload();
     await input.waitFor();
     await assertLocale('en');

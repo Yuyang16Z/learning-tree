@@ -1,7 +1,8 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
+import { api } from "../api";
 import { useI18n } from "../i18n";
 import { localizeError, mcpDisplayName } from "../i18n/workspace";
-import type { McpServer, Memory, ModelCfg } from "../types";
+import type { McpServer, Memory, MemoryRetrievalStatus, ModelCfg } from "../types";
 
 interface Props {
   models: ModelCfg[];
@@ -22,6 +23,92 @@ interface Props {
 }
 
 type Tab = "models" | "mcp" | "memory" | "appearance" | "language";
+
+function MemoryRetrievalPanel() {
+  const { t } = useI18n();
+  const [status, setStatus] = useState<MemoryRetrievalStatus | null>(null);
+  const [action, setAction] = useState({ kind: "status", revision: 0 });
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  const [pollingPaused, setPollingPaused] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let polls = 0;
+    setLoading(true);
+    setFailed(false);
+    setPollingPaused(false);
+
+    async function load(first = false) {
+      try {
+        const next = first && action.kind === "prepare"
+          ? await api.prepareMemoryRetrieval(controller.signal)
+          : await api.memoryRetrievalStatus(controller.signal);
+        if (controller.signal.aborted) return;
+        setStatus(next);
+        setFailed(false);
+        setLoading(false);
+        // Preparation may be slow on the first download. Limit background
+        // polling; closing or switching tabs also cancels in-flight requests.
+        if (next.state === "preparing") {
+          if (polls++ < 12) timer = setTimeout(() => void load(), 2500);
+          else setPollingPaused(true);
+        }
+      } catch {
+        if (controller.signal.aborted) return;
+        setFailed(true);
+        setLoading(false);
+      }
+    }
+
+    void load(true);
+    return () => {
+      controller.abort();
+      if (timer) clearTimeout(timer);
+    };
+  }, [action]);
+
+  const summary = failed
+    ? t("暂时无法读取检索状态。", "Retrieval status is temporarily unavailable.")
+    : !status
+      ? t("正在读取检索状态…", "Checking retrieval status…")
+      : status.state === "ready"
+        ? t("本地语义检索已就绪", "Local semantic retrieval is ready")
+        : status.state === "preparing"
+          ? t("正在准备本地检索模型…", "Preparing local retrieval models…")
+          : status.state === "disabled"
+            ? t("语义检索已停用，当前使用关键词检索", "Semantic retrieval is disabled; keyword retrieval is active")
+            : status.embedding_ready
+              ? t("语义检索已启用，精排暂不可用", "Semantic retrieval is active; reranking is temporarily unavailable")
+              : t("语义检索暂不可用，当前使用关键词检索", "Semantic retrieval is temporarily unavailable; keyword retrieval is active");
+
+  return (
+    <div className="model-row model-config-row" data-memory-retrieval-state={failed ? "error" : status?.state ?? "loading"}>
+      <div className="grow">
+        <div>{t("记忆检索", "Memory retrieval")}</div>
+        <div className="k" role="status" aria-live="polite">{summary}</div>
+        <div className="k">{t("按当前问题查找相关记忆，话题内容仅来自当前学习路径。", "Finds memories relevant to your question, with topic content limited to the current learning path.")}</div>
+        {status?.state === "degraded" && (
+          <div className="k">{t("首次准备需要联网下载模型；检索模型在本机运行，无需额外 API key。", "First-time preparation downloads models. Retrieval runs locally without an extra API key.")}</div>
+        )}
+        {pollingPaused && !failed && (
+          <div className="k">{t("仍在后台准备，可稍后刷新查看。", "Preparation continues in the background. Refresh again shortly.")}</div>
+        )}
+      </div>
+      <div className="model-row-actions">
+        {status?.state === "degraded" && !failed && (
+          <button className="btn" disabled={loading} onClick={() => setAction(previous => ({ kind: "prepare", revision: previous.revision + 1 }))}>
+            {loading ? t("准备中…", "Preparing…") : t("准备 / 重试", "Prepare / retry")}
+          </button>
+        )}
+        <button className="btn" disabled={loading} onClick={() => setAction(previous => ({ kind: "status", revision: previous.revision + 1 }))}>
+          {t("刷新状态", "Refresh status")}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export function SettingsModal(props: Props) {
   const { locale, setLocale, t } = useI18n();
@@ -138,6 +225,7 @@ export function SettingsModal(props: Props) {
                 <div className="sub">
                   {t("AI 会记住你的偏好和话题结论，供相关提问使用。", "AI saves preferences and topic facts for relevant future questions.")}
                 </div>
+                <MemoryRetrievalPanel />
                 {memories.length === 0 && (
                   <div className="hint" style={{ marginBottom: 6 }}>{t("还没有记忆，多聊几轮就有了。", "No memories yet. They will appear as you chat.")}</div>
                 )}

@@ -43,6 +43,7 @@ def isolated_env(database: Path) -> dict[str, str]:
         "DEFAULT_BASE_URL": "https://mock.invalid/v1",
         "DEFAULT_LLM_MODEL": "mock",
         "TAVILY_API_KEY": "",
+        "MEMORY_RETRIEVAL_MODE": "lexical",
         "VITE_API_BASE": "/api",
     }
 
@@ -130,6 +131,7 @@ def wait_ready(base: str, process: subprocess.Popen) -> None:
 def setup() -> None:
     run([executable("uv"), "sync", "--frozen"])
     run([executable("npm"), "ci", "--prefix", "web"])
+    run([sys.executable, str(ROOT / "scripts/prepare_retrieval.py")])
     print("Ready. Run: uv run python scripts/manage.py dev (or start)")
 
 

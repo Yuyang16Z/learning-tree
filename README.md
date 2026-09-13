@@ -11,6 +11,7 @@ A personal workspace for learning with AI. Ask a question, explore unfamiliar id
 - Branch titles summarize the first question you ask, rather than copying the source answer. A new empty branch shows “New branch”.
 - Save your understanding and bring it into the main conversation as an editable draft.
 - Edit a question as a new version, retry interrupted answers, and keep the original record.
+- Recall relevant learning memories with local multilingual search, while keeping topic facts within the current learning path and user preferences separate.
 - Switch **English / 中文** in **Settings → 语言 / Language**. Labels change immediately; your conversations and notes keep their original language.
 - Connect OpenAI-compatible Chat Completions or native Anthropic Messages. Optional MCP tools add web reading, local files, memory, browser actions, thinking steps and time lookup.
 - Export individual trees as JSON and import them without overwriting existing records.
@@ -29,6 +30,8 @@ uv run python scripts/manage.py start --open
 ```
 
 Open **http://127.0.0.1:8099**. Keep the terminal open; Ctrl+C stops the app. On macOS, after setup, you can also double-click `启动学习树.command`.
+
+Setup also downloads pinned local retrieval models: multilingual E5-small embeddings and the multilingual BGE-reranker-v2-m3 cross-encoder, approximately 2.55 GiB of weights in addition to tokenizers and Python dependencies. No extra API key is needed. Normal startup loads cached models in the background and never downloads weights. Missing or unavailable models fall back to keyword retrieval; **Settings → Memory** shows the current status and offers preparation/retry.
 
 In **Settings → Models & API keys**, add your endpoint, model ID and API key. For an offline trial with a preconfigured demo model and separate database:
 
@@ -49,10 +52,13 @@ No `.env` is needed for normal use. Configure models in Settings. To select anot
 | Editing an API key | Leaving it empty retains the existing key. |
 | Optional MCP | Follow the [MCP guide](integrations/mcp/README.md) to install and register six presets, or configure your own server. |
 | Web search | DDGS by default; `TAVILY_API_KEY` opts into Tavily. Errors are reported explicitly. |
+| Learning memory | Source-filtered keyword + vector retrieval runs locally. `MEMORY_RETRIEVAL_MODE=lexical` disables semantic models for offline development or testing. |
 
 Capabilities depend on the provider and model. Native OpenAI Responses and Gemini protocols are not implemented. UI language does not translate saved content; quick explanations follow the selected language, and normal answers depend on the prompt and model.
 
 Each new branch's first question uses one additional short title request to the selected model, in the background, without tools or images. Only the question and a short source excerpt are sent. This does not delay the answer; unavailable, slow or invalid results keep a question-based label. Custom/imported titles are preserved, and ordinary follow-ups do not rename an established branch.
+
+Memory retrieval first limits topic facts to valid sources on the active path, then combines BM25 keyword matching and E5 vector similarity with reciprocal rank fusion (RRF). A local cross-encoder reranks candidates when needed. Duplicate content is removed, and a character budget selects complete memory entries without cutting off conditions or negations. Stable preferences use a separate budget; recent full conversation context is retained. This searches built-in learning memory, not MCP knowledge graphs or files in `学习资料/`. Retrieval ranks relevance; it does not verify whether a saved conclusion is true. See the [memory architecture](docs/architecture.md#learning-memory-retrieval).
 
 ## Development and checks
 
@@ -65,7 +71,15 @@ node web/node_modules/playwright/cli.js install chromium --only-shell
 uv run python scripts/manage.py e2e
 ```
 
-Development uses a separate SQLite file and seeds an offline demo on first use. Models you later add to that development database remain available and may make real requests. Tests use fixed mock providers; browser tests use a temporary database and random loopback port without personal data or paid calls. GitHub Actions runs these checks on pushes and pull requests.
+Development uses a separate SQLite file and seeds an offline demo on first use. Models you later add to that development database remain available and may make real requests. Development, `check` and `e2e` force lexical retrieval, so they do not load or download semantic models. Tests use fixed mock providers; browser tests use a temporary database and random loopback port without personal data or paid calls. GitHub Actions runs these checks on pushes and pull requests.
+
+To download/repair the local model cache and test actual embedding and reranking inference with synthetic Chinese and English examples:
+
+```sh
+uv run python scripts/prepare_retrieval.py --smoke
+```
+
+Run this with hybrid retrieval enabled. It does not open your chat database or call an answer-model API. It checks local model inference separately from the offline regression suite; it is not a broad answer-quality benchmark. See the [synthetic model validation](docs/memory-retrieval-validation.md) for pinned versions, measured costs and retained relevance counterexamples.
 
 ```text
 app/                 FastAPI routes, providers, context, persistence and MCP runtime
@@ -84,6 +98,8 @@ See [architecture](docs/architecture.md), [operation and backups](docs/operation
 The default data file is `branch_learning.db`; the legacy filename and JSON format identifier are retained for compatibility. Startup backs up an existing database into `.backups/` before building the UI. Run only one backend per database.
 
 Chats, notes, model keys and tool configuration are stored locally. Keys are in the private SQLite file, **not encrypted at rest**. Drafts and reading positions stay in browser storage. Tree exports omit model keys and server configuration but contain the exported conversation and attachments. MCP memory and learning files require separate backups.
+
+Existing memory IDs and content are preserved. SQLite adds a rebuildable `MemoryEmbedding` cache keyed by memory and model revision, with a content hash to detect stale text; deleting memories or their source nodes removes the associated cache entries. Public model weights live in `.runtime/retrieval/models/`. Deleting a memory does not delete the original conversation: the same information may still appear in active-path chat history. Local retrieval does not send text to a separate retrieval service; selected memories still accompany the prompt sent to your configured answer model.
 
 The API has no account authentication; configured MCP servers can execute local programs. Supplied commands bind to `127.0.0.1`. Internet or shared-server deployment requires additional access controls and is outside this release's scope. See [security policy](SECURITY.md).
 

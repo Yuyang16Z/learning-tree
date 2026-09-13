@@ -5,10 +5,11 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from sqlalchemy import delete
 from sqlmodel import Session, select
 
 from ..db import get_session
-from ..models import KnowledgeTree, Memory, Message, Node
+from ..models import KnowledgeTree, Memory, MemoryEmbedding, Message, Node
 from ..schemas import NodeOut, TreeIn, TreeOut
 from ..service import get_messages
 from .nodes import _GENERATIONS, _REQUEST_LOCK, _TITLE_JOBS, node_metadata
@@ -203,12 +204,12 @@ def export_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
 
 @router.delete("/{tree_id}")
 def delete_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
-    tree = session.get(KnowledgeTree, tree_id)
-    if not tree:
-        raise HTTPException(404, "知识树不存在")
-    nodes = session.exec(select(Node).where(Node.tree_id == tree_id)).all()
-    ids = [node.id for node in nodes]
     with _REQUEST_LOCK:
+        tree = session.get(KnowledgeTree, tree_id)
+        if not tree:
+            raise HTTPException(404, "知识树不存在")
+        nodes = session.exec(select(Node).where(Node.tree_id == tree_id)).all()
+        ids = [node.id for node in nodes]
         for nid in ids:
             _TITLE_JOBS.pop(nid, None)
             if nid in _GENERATIONS:
@@ -218,6 +219,7 @@ def delete_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
         for memory in session.exec(
             select(Memory).where((Memory.tree_id == tree_id) | Memory.source_node_id.in_(ids))
         ).all():
+            session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory.id))
             session.delete(memory)
         for node in nodes:
             session.delete(node)

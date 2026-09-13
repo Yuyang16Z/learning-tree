@@ -5,6 +5,7 @@ import type {
   McpInput,
   McpServer,
   Memory,
+  MemoryRetrievalStatus,
   ModelCfg,
   ModelInput,
   NodeDetail,
@@ -90,6 +91,10 @@ export const api = {
     jsonPost(`${API}/mcp/${id}/test`, {}).then(j<{ ok: boolean; detail: string; tools: string[] }>),
 
   listMemories: () => fetch(`${API}/memories`).then(j<Memory[]>),
+  memoryRetrievalStatus: (signal?: AbortSignal) =>
+    fetch(`${API}/memories/retrieval/status`, { signal }).then(j<MemoryRetrievalStatus>),
+  prepareMemoryRetrieval: (signal?: AbortSignal) =>
+    fetch(`${API}/memories/retrieval/prepare`, { method: "POST", signal }).then(j<MemoryRetrievalStatus>),
   deleteMemory: (id: number) => fetch(`${API}/memories/${id}`, { method: "DELETE" }).then(j<unknown>),
   clearMemories: () => fetch(`${API}/memories`, { method: "DELETE" }).then(j<unknown>),
 

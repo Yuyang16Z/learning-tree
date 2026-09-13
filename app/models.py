@@ -36,6 +36,15 @@ class Memory(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now)
 
 
+class MemoryEmbedding(SQLModel, table=True):
+    """Rebuildable local vectors; original Memory records remain authoritative."""
+
+    memory_id: int = Field(foreign_key="memory.id", primary_key=True)
+    model_key: str = Field(primary_key=True)
+    content_hash: str
+    vector: list[float] = Field(sa_column=Column(JSON, nullable=False))
+
+
 class McpServer(SQLModel, table=True):
     """用户配置的一个 MCP server（stdio 传输）。启用后，它暴露的工具会进 agent 回合。"""
 

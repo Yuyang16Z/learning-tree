@@ -37,6 +37,9 @@ def seed_default_model() -> None:
 async def lifespan(app: FastAPI):
     init_db()
     seed_default_model()
+    from .semantic_models import warm_cached
+
+    warm_cached()
     try:
         yield
     finally:

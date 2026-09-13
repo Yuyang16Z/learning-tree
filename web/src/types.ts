@@ -52,3 +52,8 @@ export interface ModelInput { label: string; base_url: string; llm_model: string
 export interface McpServer { id: number; label: string; command: string; args: string[]; enabled: boolean }
 export interface McpInput { label: string; command: string; args: string[]; enabled: boolean }
 export interface Memory { id: number; kind: string; content: string; tree_id: number | null }
+export interface MemoryRetrievalStatus {
+  state: 'ready' | 'preparing' | 'degraded' | 'disabled';
+  embedding_ready: boolean;
+  reranker_ready: boolean;
+}

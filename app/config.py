@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -7,6 +9,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "sqlite:///./branch_learning.db"
+    memory_retrieval_mode: Literal["hybrid", "lexical"] = "hybrid"
 
     # 启动时如果 default_api_key 非空、且库里还没有任何模型，就自动写入这一条默认模型。
     default_label: str = "DeepSeek"

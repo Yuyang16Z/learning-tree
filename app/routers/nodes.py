@@ -10,12 +10,13 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from sqlalchemy import delete
 from sqlmodel import Session, select
 
 from ..context import BASE_SYSTEM, build_context
 from ..db import engine, get_session
 from ..llm import LLMSpec, complete, run_agent, stream_chat
-from ..models import Memory, Message, Node
+from ..models import Memory, MemoryEmbedding, Message, Node
 from ..schemas import AskIn, BranchIn, ExplainIn, NodePatch, StopIn, TitleIn
 from ..service import (
     assemble_tools,
@@ -173,17 +174,17 @@ def patch_node(node_id: int, body: NodePatch, session: Session = Depends(get_ses
 
 @router.delete("/{node_id}")
 def delete_node(node_id: int, session: Session = Depends(get_session)) -> dict:
-    _get(session, node_id)
-    ids, stack = set(), [node_id]
-    while stack:
-        current = stack.pop()
-        if current in ids:
-            continue
-        ids.add(current)
-        stack.extend(
-            n.id for n in session.exec(select(Node).where(Node.parent_id == current)).all()
-        )
     with _REQUEST_LOCK:
+        _get(session, node_id)
+        ids, stack = set(), [node_id]
+        while stack:
+            current = stack.pop()
+            if current in ids:
+                continue
+            ids.add(current)
+            stack.extend(
+                n.id for n in session.exec(select(Node).where(Node.parent_id == current)).all()
+            )
         for nid in ids:
             _TITLE_JOBS.pop(nid, None)
             if nid in _GENERATIONS:
@@ -191,6 +192,7 @@ def delete_node(node_id: int, session: Session = Depends(get_session)) -> dict:
         for message in session.exec(select(Message).where(Message.node_id.in_(ids))).all():
             session.delete(message)
         for memory in session.exec(select(Memory).where(Memory.source_node_id.in_(ids))).all():
+            session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory.id))
             session.delete(memory)
         # References outside the deleted subtree must not point to nonexistent nodes.
         for node in session.exec(select(Node)).all():
@@ -236,31 +238,35 @@ def _validate_source(
 
 @router.post("/{node_id}/branch")
 def branch(node_id: int, body: BranchIn, session: Session = Depends(get_session)) -> dict:
-    parent = _get(session, node_id)
-    _validate_source(session, parent, body.source_message_id, body.source_start, body.source_end)
-    child = Node(
-        tree_id=parent.tree_id,
-        parent_id=parent.id,
-        kind="branch",
-        title=(body.title or "").strip(),
-        title_state="manual" if (body.title or "").strip() else "empty",
-        seed_text=body.seed_text,
-        source_node_id=parent.id,
-        source_message_id=body.source_message_id,
-        source_start=body.source_start,
-        source_end=body.source_end,
-        learning_note=body.learning_note,
-    )
-    session.add(child)
-    session.commit()
-    session.refresh(child)
-    return {
-        "id": child.id,
-        "parent_id": child.parent_id,
-        "title": child.title,
-        "seed_text": child.seed_text,
-        **node_metadata(child),
-    }
+    # Serialize parent/source validation and insertion with subtree/tree deletion.
+    with _REQUEST_LOCK:
+        parent = _get(session, node_id)
+        _validate_source(
+            session, parent, body.source_message_id, body.source_start, body.source_end
+        )
+        child = Node(
+            tree_id=parent.tree_id,
+            parent_id=parent.id,
+            kind="branch",
+            title=(body.title or "").strip(),
+            title_state="manual" if (body.title or "").strip() else "empty",
+            seed_text=body.seed_text,
+            source_node_id=parent.id,
+            source_message_id=body.source_message_id,
+            source_start=body.source_start,
+            source_end=body.source_end,
+            learning_note=body.learning_note,
+        )
+        session.add(child)
+        session.commit()
+        session.refresh(child)
+        return {
+            "id": child.id,
+            "parent_id": child.parent_id,
+            "title": child.title,
+            "seed_text": child.seed_text,
+            **node_metadata(child),
+        }
 
 
 def _queue_branch_title(node_id: int, spec: LLMSpec) -> None:
@@ -634,9 +640,20 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
         session.commit()
         target_id, tree_id = target.id, target.tree_id
         ancestors = get_ancestors(session, target)
-        memory = fetch_memory_note(session, tree_id, [n.id for n, _ in ancestors] + [target_id])
+        memory_source_ids = [n.id for n, _ in ancestors] + [target_id]
+        memory_quote = target.seed_text or ""
         system, llm_messages = build_context(
-            ancestors, target, current_messages, question_text, question_images, memory
+            ancestors, target, current_messages, question_text, question_images
+        )
+        # Only actual included background is used for deduplication, never the user's new question.
+        existing_context = (
+            system
+            + "\n"
+            + "\n".join(
+                message["content"]
+                for message in llm_messages[:-1]
+                if isinstance(message["content"], str)
+            )
         )
         generation = Generation(request_id, label=spec.label)
         _GENERATIONS[target_id] = generation
@@ -652,6 +669,24 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
         stream = None
         last_checkpoint = time.monotonic()
         try:
+            request_system = system
+            if generation.stop.is_set():
+                return
+            # Local inference must not hold _REQUEST_LOCK: stop/retry remain responsive.
+            if not is_mock:
+                with Session(engine) as memory_session:
+                    memory = fetch_memory_note(
+                        memory_session,
+                        tree_id,
+                        memory_source_ids,
+                        query=question_text,
+                        quoted_text=memory_quote,
+                        existing_text=existing_context,
+                    )
+                if memory:
+                    request_system += "\n" + memory
+            if generation.stop.is_set():
+                return
             with Session(engine) as tool_session:
                 tool_defs, tool_router = assemble_tools(tool_session, requested_tools)
             if generation.stop.is_set():
@@ -664,11 +699,13 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                         raise RuntimeError("generation cancelled before tool execution")
                     return execute(name, arguments)
 
-                stream = run_agent(spec, system, llm_messages, tool_defs, guarded_execute)
+                stream = run_agent(spec, request_system, llm_messages, tool_defs, guarded_execute)
             else:
                 stream = (
                     {"type": kind, "text": chunk}
-                    for kind, chunk in stream_chat(spec, system, llm_messages, deep=body.deep_think)
+                    for kind, chunk in stream_chat(
+                        spec, request_system, llm_messages, deep=body.deep_think
+                    )
                 )
             for event in stream:
                 if generation.stop.is_set():

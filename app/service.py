@@ -111,35 +111,19 @@ def make_executor(router: dict) -> Callable[[str, dict], str]:
 
 
 def fetch_memory_note(
-    session: Session, tree_id: int | None, source_node_ids: list[int] | None = None
+    session: Session,
+    tree_id: int | None,
+    source_node_ids: list[int] | None = None,
+    query: str = "",
+    quoted_text: str = "",
+    existing_text: str = "",
 ) -> str:
-    """把相关记忆拼成一段，注入脊柱 system：全局偏好 + 本知识树的事实。"""
-    prefs = session.exec(
-        select(Memory).where(Memory.kind == "preference").order_by(Memory.id.desc())
-    ).all()[:8]
-    facts = (
-        session.exec(
-            select(Memory)
-            .where(
-                Memory.kind == "fact",
-                Memory.tree_id == tree_id,
-                Memory.source_node_id.in_(source_node_ids or []),
-            )
-            .order_by(Memory.id.desc())
-        ).all()[:8]
-        if tree_id is not None
-        else []
-    )
-    if not prefs and not facts:
-        return ""
-    lines: list[str] = []
-    if prefs:
-        lines.append("【关于用户（长期记忆，自然体现即可，别生硬复述）】")
-        lines += [f"- {m.content}" for m in reversed(prefs)]
-    if facts:
-        lines.append("【本主题已知（记忆）】")
-        lines += [f"- {m.content}" for m in reversed(facts)]
-    return "\n".join(lines)
+    """Choose relevant memories within the allowed source path, independently of preferences."""
+    from .retrieval import retrieve_memory
+
+    return retrieve_memory(
+        session, tree_id, source_node_ids, query, quoted_text, existing_text
+    ).text
 
 
 def extract_and_save(
