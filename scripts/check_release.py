@@ -7,11 +7,23 @@ This is a project guardrail, not a complete secret scanner.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
+# Only visually reviewed, synthetic demo assets may enter a release. Re-recording
+# requires reviewing the new frames and updating the exact content digest here.
+# Other binary files, including screenshots of private sessions, remain blocked.
+REVIEWED_MEDIA = {
+    "docs/assets/learning-tree-overview.png": (
+        "c9ec9b8694ce6bff87a69e6a445cf9152f33acc3c1c7ca34fb502955a2d1baaf"
+    ),
+    "docs/assets/learning-tree-demo.gif": (
+        "4cef37b63207ca010f0d7d2deccae4bec963b1d0b02986dc6b5b09d2834035f4"
+    ),
+}
 PRIVATE_DIRS = {
     ".backups",
     ".runtime",
@@ -65,6 +77,10 @@ def main() -> int:
         content = git("cat-file", "blob", oid)
         if content.startswith(b"SQLite format 3"):
             errors.append(f"{name}: SQLite data must not be published")
+            continue
+        if name in REVIEWED_MEDIA:
+            if hashlib.sha256(content).hexdigest() != REVIEWED_MEDIA[name]:
+                errors.append(f"{name}: media changed; explicit visual/privacy review required")
             continue
         try:
             source = content.decode("utf-8")

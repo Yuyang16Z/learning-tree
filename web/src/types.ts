@@ -53,7 +53,7 @@ export interface McpServer { id: number; label: string; command: string; args: s
 export interface McpInput { label: string; command: string; args: string[]; enabled: boolean }
 export interface Memory { id: number; kind: string; content: string; tree_id: number | null }
 export interface MemoryRetrievalStatus {
-  state: 'ready' | 'preparing' | 'degraded' | 'disabled';
+  state: 'ready' | 'preparing' | 'degraded' | 'disabled' | 'not_installed';
   embedding_ready: boolean;
   reranker_ready: boolean;
 }

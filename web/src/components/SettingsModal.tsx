@@ -79,7 +79,9 @@ function MemoryRetrievalPanel() {
           ? t("正在准备本地检索模型…", "Preparing local retrieval models…")
           : status.state === "disabled"
             ? t("语义检索已停用，当前使用关键词检索", "Semantic retrieval is disabled; keyword retrieval is active")
-            : status.embedding_ready
+            : status.state === "not_installed"
+              ? t("当前使用轻量关键词检索", "Lightweight keyword retrieval is active")
+              : status.embedding_ready
               ? t("语义检索已启用，精排暂不可用", "Semantic retrieval is active; reranking is temporarily unavailable")
               : t("语义检索暂不可用，当前使用关键词检索", "Semantic retrieval is temporarily unavailable; keyword retrieval is active");
 
@@ -89,6 +91,13 @@ function MemoryRetrievalPanel() {
         <div>{t("记忆检索", "Memory retrieval")}</div>
         <div className="k" role="status" aria-live="polite">{summary}</div>
         <div className="k">{t("按当前问题查找相关记忆，话题内容仅来自当前学习路径。", "Finds memories relevant to your question, with topic content limited to the current learning path.")}</div>
+        {status?.state === "not_installed" && (
+          <div className="k">
+            {t("语义检索为可选增强。在项目目录运行以下命令安装，然后重启应用：", "Semantic retrieval is optional. Run this in the project directory, then restart the app:")}
+            <div style={{ overflowWrap: "anywhere" }}><code>uv run python scripts/manage.py retrieval</code></div>
+            <a href="https://github.com/Yuyang16Z/learning-tree/blob/main/docs/operations.md" target="_blank" rel="noopener noreferrer">{t("安装说明与资源需求", "Installation and resource requirements")}</a>
+          </div>
+        )}
         {status?.state === "degraded" && (
           <div className="k">{t("首次准备需要联网下载模型；检索模型在本机运行，无需额外 API key。", "First-time preparation downloads models. Retrieval runs locally without an extra API key.")}</div>
         )}

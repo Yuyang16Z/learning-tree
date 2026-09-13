@@ -470,6 +470,7 @@ def test_missing_semantic_models_never_download_during_query(monkeypatch):
     from app import semantic_models
 
     monkeypatch.setattr(semantic_models, "_enabled", lambda: True)
+    monkeypatch.setattr(semantic_models, "_dependencies_available", lambda: True)
     backend = semantic_models.SemanticBackend()
     monkeypatch.setattr(
         backend, "_load", lambda *args, **kwargs: pytest.fail("query-time model download")
@@ -508,6 +509,7 @@ def test_explicit_prepare_is_not_lost_during_cached_model_warmup(monkeypatch):
     from app import semantic_models
 
     monkeypatch.setattr(semantic_models, "_enabled", lambda: True)
+    monkeypatch.setattr(semantic_models, "_dependencies_available", lambda: True)
     backend = semantic_models.SemanticBackend()
     entered = threading.Event()
     release = threading.Event()
@@ -536,6 +538,24 @@ def test_explicit_prepare_is_not_lost_during_cached_model_warmup(monkeypatch):
     assert not worker.is_alive()
     assert loads == [False, True]
     assert backend.status()["state"] == "ready"
+
+
+def test_missing_optional_components_report_install_action_without_loading_models(api, monkeypatch):
+    from app import semantic_models
+
+    monkeypatch.setattr(semantic_models, "_enabled", lambda: True)
+    monkeypatch.setattr(semantic_models, "_dependencies_available", lambda: False)
+    backend = semantic_models.SemanticBackend()
+    monkeypatch.setattr(semantic_models, "_BACKEND", backend)
+    monkeypatch.setattr(
+        backend, "_load", lambda *args, **kwargs: pytest.fail("uninstalled model preparation")
+    )
+    expected = {"state": "not_installed", "embedding_ready": False, "reranker_ready": False}
+    assert backend.prepare(allow_download=True) == expected
+    assert semantic_models.warm_cached() == expected
+    assert api.get("/api/memories/retrieval/status").json() == expected
+    assert api.post("/api/memories/retrieval/prepare").json() == expected
+    assert backend._worker is None
 
 
 def test_single_candidate_obeys_explicit_rerank_relevance_threshold(session):

@@ -904,7 +904,7 @@ wheels = [
 
 [[package]]
 name = "learning-tree"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
@@ -914,10 +914,14 @@ dependencies = [
     { name = "mcp" },
     { name = "openai" },
     { name = "pydantic-settings" },
-    { name = "sentence-transformers" },
     { name = "sqlmodel" },
-    { name = "transformers" },
     { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.optional-dependencies]
+retrieval = [
+    { name = "sentence-transformers" },
+    { name = "transformers" },
 ]
 
 [package.dev-dependencies]
@@ -935,11 +939,12 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.28.1" },
     { name = "openai", specifier = ">=1.40" },
     { name = "pydantic-settings", specifier = ">=2.4" },
-    { name = "sentence-transformers", specifier = ">=5.1,<6" },
+    { name = "sentence-transformers", marker = "extra == 'retrieval'", specifier = ">=5.1,<6" },
     { name = "sqlmodel", specifier = ">=0.0.22" },
-    { name = "transformers", specifier = ">=4.53,<5" },
+    { name = "transformers", marker = "extra == 'retrieval'", specifier = ">=4.53,<5" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
+provides-extras = ["retrieval"]
 
 [package.metadata.requires-dev]
 dev = [

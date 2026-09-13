@@ -48,7 +48,7 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(close_all)
 
 
-app = FastAPI(title="LearningTree", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="LearningTree", version="0.2.0", lifespan=lifespan)
 
 # 本地工具，前端跨端口访问，放开 CORS 即可。
 app.add_middleware(

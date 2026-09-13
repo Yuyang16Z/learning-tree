@@ -4,6 +4,17 @@
 
 一个给自己用的 AI 学习空间：围绕主问题连续聊天，不懂的概念展开分支，弄懂后回到原句继续。
 
+![LearningTree 主界面：连续对话与学习分支](docs/assets/learning-tree-overview.png)
+
+<details>
+<summary>查看演示：划词解释 → 分支追问 → 带着理解返回</summary>
+
+![离线演示：展开分支并返回原文](docs/assets/learning-tree-demo.gif)
+
+</details>
+
+图片使用虚构内容与离线演示模型，展示产品交互，不代表 AI 回答质量；真实回答需要自行配置模型。
+
 ## 能做什么
 
 - 连续问答与话题树并排展示，点击节点跳到对应轮次。地图支持拖动、缩放、定位，并能恢复定位前的视角。
@@ -26,20 +37,30 @@
 git clone https://github.com/Yuyang16Z/learning-tree.git
 cd learning-tree
 uv run python scripts/manage.py setup
-uv run python scripts/manage.py start --open
-```
-
-打开 **http://127.0.0.1:8099**，保留终端运行，Ctrl+C 停止。macOS 安装后也可以双击 `启动学习树.command`。
-
-首次 `setup` 会下载固定版本的多语言 E5-small 向量模型和 BGE-reranker-v2-m3 重排模型，权重约 2.55 GiB，另需分词器与 Python 依赖空间，不需要额外 API Key。模型缓存在 `.runtime/retrieval/models/`，常规启动仅后台加载缓存，不自动联网下载；未准备好时使用关键词检索，设置页会显示状态并提供准备/重试入口。
-
-在「设置 → 模型与 API key」添加地址、模型 ID 和 API Key。想先离线体验，可运行带演示模型的独立开发环境：
-
-```sh
 uv run python scripts/manage.py dev
 ```
 
-打开 **http://127.0.0.1:5174**。也可以导入 [`examples/learning-tree.sample.json`](examples/learning-tree.sample.json) 查看示例，不需要密钥。演示回复目前使用中文。
+打开 **http://127.0.0.1:5174**，无需 API Key 即可体验离线演示。也可以导入 [`examples/learning-tree.sample.json`](examples/learning-tree.sample.json) 查看示例。演示回复目前使用中文。保留终端运行，Ctrl+C 停止。
+
+基础安装不安装 PyTorch、Transformers，也不下载本地模型权重；记忆使用关键词检索，语义检索可以之后按需添加。
+
+开始自己的学习时，先停止演示，再运行：
+
+```sh
+uv run python scripts/manage.py start --open
+```
+
+打开 **http://127.0.0.1:8099**，在「设置 → 模型与 API key」添加地址、模型 ID 和 API Key。正式使用与演示使用不同数据库。macOS 安装后也可以双击 `启动学习树.command`。
+
+### 可选：语义记忆检索
+
+```sh
+uv run python scripts/manage.py retrieval
+```
+
+此命令安装 `retrieval` 可选依赖，并准备固定版本的 E5-small 向量模型与 BGE-reranker-v2-m3 重排模型。权重约 **2.55 GiB**，另需分词器、Python 依赖和运行内存，不需要额外 API Key。完成后重启应用，在「设置 → 记忆」查看状态；准备失败时，基础聊天与关键词检索仍可使用。
+
+全新安装也可用 `setup --with-retrieval` 一并准备。若 `.env` 显式设置了 `MEMORY_RETRIEVAL_MODE=lexical`，需改为 `hybrid` 才会启用语义检索。常规启动只后台加载缓存，不自动下载权重。详见[模型准备与故障处理](docs/operations.md#local-memory-retrieval)。
 
 ## 配置
 
@@ -52,11 +73,11 @@ uv run python scripts/manage.py dev
 | 编辑模型密钥 | 留空保留原密钥。 |
 | MCP 工具 | 按 [MCP 说明](integrations/mcp/README.md) 安装、注册六个可选预设，或自行添加服务。 |
 | 联网搜索 | 默认 DDGS，配置 `TAVILY_API_KEY` 时使用 Tavily，失败明确提示。 |
-| 记忆检索 | 默认混合检索；`MEMORY_RETRIEVAL_MODE=lexical` 可只用关键词检索，不加载或下载语义模型。 |
+| 记忆检索 | 基础安装使用关键词检索；可选本地向量与重排增强语义检索。`MEMORY_RETRIEVAL_MODE=lexical` 可停用语义模型。 |
 
 能力取决于供应商与模型。尚未支持原生 Responses、Gemini 协议。切换界面语言不自动翻译历史内容；划词解释跟随所选语言，常规回复由问题和模型决定。
 
-新分支的首个问题会使用当前模型额外发起一次简短的标题请求，后台完成，不阻塞回答。只传入问题与少量来源摘录，不调用工具或发送图片；超时、失败或结果无效时保留问题文本。自定义、导入的标题保持原样，后续追问不会反复改名。
+新分支的首个问题会额外发起一次简短的后台标题请求，只传入问题与来源摘录，不调用工具或发送图片；失败时保留问题文本。已有、自定义和导入的标题不会因普通追问改名。
 
 ## 开发与验证
 
@@ -71,11 +92,11 @@ uv run python scripts/manage.py e2e
 
 开发环境使用独立数据库，首次初始化离线演示模型；之后自行添加的真实模型会保留，也可能发起实际请求。测试固定使用模拟模型；浏览器检查使用临时数据库和随机本机端口，不依赖个人聊天库或付费模型。GitHub Actions 在推送和合并请求时自动运行相同检查。
 
-`dev`、`check`、`e2e` 的隔离环境固定使用关键词检索，不下载或加载检索模型。验证真实本地语义模型可运行 `uv run python scripts/prepare_retrieval.py --smoke`；它只使用固定的虚构中英文样例，不读取个人聊天数据库。[合成模型核查记录](docs/memory-retrieval-validation.md)保留了固定版本、实测开销与相关性反例。
+`dev`、`check`、`e2e` 的隔离环境固定使用关键词检索，不下载或加载检索模型。安装语义检索后，可运行 `uv run python scripts/prepare_retrieval.py --smoke` 验证真实本地推理；它只使用固定的虚构中英文样例，不读取个人聊天数据库。[合成模型核查记录](docs/memory-retrieval-validation.md)保留了固定版本、实测开销与相关性反例。
 
 ## 记忆如何参与回答
 
-完成的问答会在后台提炼用户偏好和主题事实。偏好独立选择；主题事实先按当前知识树和来源节点过滤，再以 BM25（中文双字片段与英文术语）和 E5 向量混合召回，通过 RRF 合并候选、按需进行语义重排序。选中条目去重并在长度预算内完整保留，附上记忆 ID 与来源节点。近期完整对话仍然进入上下文，不被检索结果替换。
+完成的非演示问答会在后台提炼用户偏好和主题事实。偏好独立选择；主题事实先按当前学习路径限定来源。可选语义检索结合 BM25 与 E5，通过 RRF 合并候选并用 BGE 重排，保留来源与完整条目。近期对话仍然进入上下文。
 
 SQLite 中原有记忆及节点 ID 保持不变，只新增可重建的 `MemoryEmbedding` 缓存。删除记忆、来源分支或整棵树会同步删除对应向量；每次检索仍以原始记录和来源范围为准。设置里清空长期记忆不会删除原始聊天记录，也不会清除独立 MCP 知识图谱。
 
@@ -92,6 +113,8 @@ docs/                架构和本机运行说明
 ```
 
 详见 [架构说明](docs/architecture.md)、[运行与备份](docs/operations.md) 和 [贡献指南](CONTRIBUTING.md)。
+
+版本改动与升级步骤：[v0.2.0](docs/releases/v0.2.0.md) · [更新日志](CHANGELOG.md)。
 
 ## 数据与使用范围
 

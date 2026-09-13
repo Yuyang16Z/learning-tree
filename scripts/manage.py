@@ -128,11 +128,34 @@ def wait_ready(base: str, process: subprocess.Popen) -> None:
     raise RuntimeError("Local server did not become ready within 30 seconds.")
 
 
-def setup() -> None:
-    run([executable("uv"), "sync", "--frozen"])
+def setup(with_retrieval: bool = False) -> None:
+    # A regular setup must not remove an existing optional retrieval install.
+    run([executable("uv"), "sync", "--frozen", "--inexact"])
     run([executable("npm"), "ci", "--prefix", "web"])
-    run([sys.executable, str(ROOT / "scripts/prepare_retrieval.py")])
-    print("Ready. Run: uv run python scripts/manage.py dev (or start)")
+    print("Basic installation is ready; keyword memory retrieval needs no local models.")
+    if with_retrieval:
+        try:
+            retrieval()
+        except (RuntimeError, subprocess.CalledProcessError):
+            print(
+                "Optional semantic retrieval preparation did not finish. "
+                "The basic app remains usable. Retry: uv run python scripts/manage.py retrieval",
+                file=sys.stderr,
+            )
+    print("Run: uv run python scripts/manage.py dev (or start)")
+
+
+def retrieval() -> None:
+    """Explicitly install the optional runtime and prepare public model weights."""
+    uv = executable("uv")
+    run([uv, "sync", "--frozen", "--inexact", "--extra", "retrieval"])
+    run(
+        [uv, "run", "--frozen", "--extra", "retrieval", "python", "scripts/prepare_retrieval.py"],
+        # An explicit install may prepare models while normal runtime remains
+        # deliberately lexical. Never edit the user's .env or provider settings.
+        env={**os.environ, "MEMORY_RETRIEVAL_MODE": "hybrid"},
+    )
+    print("Local retrieval models are prepared. Restart the app to load them.")
 
 
 def build() -> None:
@@ -225,12 +248,21 @@ def main() -> None:
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "command", choices=("setup", "dev", "start", "check", "e2e", "build", "backup")
+        "command", choices=("setup", "retrieval", "dev", "start", "check", "e2e", "build", "backup")
     )
     parser.add_argument("--open", action="store_true", help="Open the browser after start is ready")
+    parser.add_argument(
+        "--with-retrieval",
+        action="store_true",
+        help="Also install optional local models during setup",
+    )
     args = parser.parse_args()
+    if args.with_retrieval and args.command != "setup":
+        parser.error("--with-retrieval is only valid with setup")
     try:
-        if args.command == "start":
+        if args.command == "setup":
+            setup(args.with_retrieval)
+        elif args.command == "start":
             start(args.open)
         elif args.command == "backup":
             run([sys.executable, str(ROOT / "scripts/backup_data.py")])

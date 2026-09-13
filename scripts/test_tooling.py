@@ -2,6 +2,8 @@
 
 import json
 import sqlite3
+import subprocess
+import tomllib
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
@@ -26,6 +28,70 @@ def test_dev_overrides_production_settings(tmp_path, monkeypatch):
     assert env["DATABASE_URL"] == f"sqlite:///{(tmp_path / 'dev.db').as_posix()}"
     assert env["DEFAULT_API_KEY"] == "mock"
     assert env["VITE_API_BASE"] == "/api"
+
+
+def test_basic_dependency_manifest_excludes_local_model_runtime():
+    manifest = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    project = manifest["project"]
+    heavy = ("torch", "transformers", "sentence-transformers")
+    assert not any(name in requirement for requirement in project["dependencies"] for name in heavy)
+    retrieval = project["optional-dependencies"]["retrieval"]
+    assert any(requirement.startswith("sentence-transformers") for requirement in retrieval)
+
+
+def test_default_setup_never_prepares_models_or_removes_installed_extras(monkeypatch):
+    manage = load("scripts/manage.py")
+    commands = []
+    monkeypatch.setattr(manage, "executable", lambda name: name)
+    monkeypatch.setattr(manage, "run", lambda args, **kwargs: commands.append(args))
+    monkeypatch.setattr(manage, "retrieval", lambda: pytest.fail("unsolicited model installation"))
+    manage.setup()
+    assert ["uv", "sync", "--frozen", "--inexact"] in commands
+    assert ["npm", "ci", "--prefix", "web"] in commands
+    assert not any(
+        "retrieval" in part or "prepare_retrieval" in part for args in commands for part in args
+    )
+
+
+@pytest.mark.parametrize("failure", ["dependencies", "weights"])
+def test_optional_setup_failure_keeps_basic_app_ready_and_is_retryable(
+    monkeypatch, capsys, failure
+):
+    manage = load("scripts/manage.py")
+    commands = []
+    monkeypatch.setattr(manage, "executable", lambda name: name)
+
+    def failing_run(args, **kwargs):
+        commands.append(args)
+        if (failure == "dependencies" and "--extra" in args) or (
+            failure == "weights" and "scripts/prepare_retrieval.py" in args
+        ):
+            raise subprocess.CalledProcessError(1, args)
+
+    monkeypatch.setattr(manage, "run", failing_run)
+    manage.setup(with_retrieval=True)
+    output = capsys.readouterr()
+    assert "Basic installation is ready" in output.out
+    assert "basic app remains usable" in output.err
+    assert "scripts/manage.py retrieval" in output.err
+    assert commands.index(["npm", "ci", "--prefix", "web"]) < next(
+        index for index, args in enumerate(commands) if "--extra" in args
+    )
+    with pytest.raises(subprocess.CalledProcessError):
+        manage.retrieval()
+
+
+@pytest.mark.parametrize("state", ["not_installed", "degraded", "disabled"])
+def test_retrieval_smoke_is_nonzero_when_inference_cannot_be_verified(monkeypatch, state):
+    prepare = load("scripts/prepare_retrieval.py")
+    monkeypatch.setattr(prepare.sys, "argv", ["prepare_retrieval.py", "--smoke"])
+    monkeypatch.setattr(
+        prepare,
+        "prepare",
+        lambda: {"state": state, "embedding_ready": False, "reranker_ready": False},
+    )
+    monkeypatch.setattr(prepare, "smoke", lambda: pytest.fail("inference with unavailable models"))
+    assert prepare.main() == 1
 
 
 def test_dev_refuses_symlinked_database(tmp_path):

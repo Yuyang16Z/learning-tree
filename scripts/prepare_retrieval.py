@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Download pinned public retrieval models and optionally verify local inference.
 
-Run: uv run python scripts/prepare_retrieval.py --smoke
+Install components first: uv run python scripts/manage.py retrieval
+Then verify: uv run python scripts/prepare_retrieval.py --smoke
 The smoke uses fixed synthetic examples only and never opens the chat database.
 """
 
@@ -59,7 +60,13 @@ def main() -> int:
     args = parser.parse_args()
     status = prepare()
     print(json.dumps({"status": status}, ensure_ascii=False))
+    if status["state"] == "not_installed":
+        print("Install optional components: uv run python scripts/manage.py retrieval")
+        return 1
     if status["state"] == "disabled":
+        if args.smoke:
+            print("Semantic retrieval is disabled; inference was not verified.")
+            return 1
         return 0
     if not status["embedding_ready"] or not status["reranker_ready"]:
         print("Local models are unavailable. Check network access and retry preparation.")

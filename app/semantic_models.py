@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import threading
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,15 @@ _MODEL_FILES = [
 
 class SemanticUnavailable(Exception):
     """The caller should use lexical retrieval; messages never contain user text."""
+
+
+def _dependencies_available() -> bool:
+    # Inspect top-level module specs without importing native libraries. The
+    # basic installation never needs to import Torch or download model weights.
+    return all(
+        find_spec(name) is not None
+        for name in ("torch", "transformers", "sentence_transformers", "huggingface_hub")
+    )
 
 
 def _enabled() -> bool:
@@ -64,6 +74,8 @@ class SemanticBackend:
             reranker_ready = enabled and self._reranker is not None
             if not enabled:
                 state = "disabled"
+            elif not _dependencies_available():
+                state = "not_installed"
             elif self._preparing:
                 state = "preparing"
             elif embedding_ready and reranker_ready:
@@ -201,7 +213,7 @@ class SemanticBackend:
                 continue
 
     def prepare(self, allow_download: bool) -> dict:
-        if not _enabled():
+        if not _enabled() or not _dependencies_available():
             return self.status()
         with self._prepare_lock:
             with self._state_lock:
@@ -232,7 +244,7 @@ class SemanticBackend:
                 return
 
     def start(self, allow_download: bool) -> dict:
-        if not _enabled():
+        if not _enabled() or not _dependencies_available():
             return self.status()
         with self._state_lock:
             if self._worker is not None and self._worker.is_alive():

@@ -4,6 +4,17 @@
 
 A personal workspace for learning with AI. Ask a question, explore unfamiliar ideas in branches, and return to the original explanation without losing your place.
 
+![LearningTree: a conversation beside its learning branches](docs/assets/learning-tree-overview.png)
+
+<details>
+<summary>Watch: explain a term → explore a branch → return with your understanding</summary>
+
+![Offline demonstration of exploring a branch and returning to its source](docs/assets/learning-tree-demo.gif)
+
+</details>
+
+The images use synthetic content and the offline demo model. They demonstrate the interface, not AI answer quality; real answers require your own model configuration.
+
 ## Features
 
 - A continuous conversation alongside an interactive topic map: jump to any turn, pan, zoom and return to your previous view after centering.
@@ -26,20 +37,30 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and [Node.
 git clone https://github.com/Yuyang16Z/learning-tree.git
 cd learning-tree
 uv run python scripts/manage.py setup
-uv run python scripts/manage.py start --open
-```
-
-Open **http://127.0.0.1:8099**. Keep the terminal open; Ctrl+C stops the app. On macOS, after setup, you can also double-click `启动学习树.command`.
-
-Setup also downloads pinned local retrieval models: multilingual E5-small embeddings and the multilingual BGE-reranker-v2-m3 cross-encoder, approximately 2.55 GiB of weights in addition to tokenizers and Python dependencies. No extra API key is needed. Normal startup loads cached models in the background and never downloads weights. Missing or unavailable models fall back to keyword retrieval; **Settings → Memory** shows the current status and offers preparation/retry.
-
-In **Settings → Models & API keys**, add your endpoint, model ID and API key. For an offline trial with a preconfigured demo model and separate database:
-
-```sh
 uv run python scripts/manage.py dev
 ```
 
-Open **http://127.0.0.1:5174**. You can also import [`examples/learning-tree.sample.json`](examples/learning-tree.sample.json) to explore a conversation without an API key. The demo's example responses are currently in Chinese.
+Open **http://127.0.0.1:5174** to try the offline demo without an API key. You can also import [`examples/learning-tree.sample.json`](examples/learning-tree.sample.json). Demo replies currently use Chinese. Keep the terminal open; Ctrl+C stops the app.
+
+Basic setup installs the application dependencies without PyTorch, Transformers or local model weights. It uses keyword memory retrieval; semantic retrieval is optional.
+
+For your own learning workspace, stop the demo and run:
+
+```sh
+uv run python scripts/manage.py start --open
+```
+
+Open **http://127.0.0.1:8099** and add your endpoint, model ID and API key in **Settings → Models & API keys**. This workspace uses a separate database from the demo. On macOS, after setup, you can also double-click `启动学习树.command`.
+
+### Optional semantic memory
+
+```sh
+uv run python scripts/manage.py retrieval
+```
+
+This installs the `retrieval` extra and prepares pinned local E5-small embeddings and BGE-reranker-v2-m3 reranking. Allow approximately **2.55 GiB of model weights**, plus tokenizers and Python dependencies; inference also needs RAM. No additional API key is needed. Restart the app afterward and check **Settings → Memory**. Basic chat and keyword retrieval remain available if preparation fails.
+
+For a new full installation, use `setup --with-retrieval`. If `.env` explicitly selects `MEMORY_RETRIEVAL_MODE=lexical`, change it to `hybrid` to enable semantic retrieval. Normal startup loads cached models in the background and never downloads weights. See [model setup and troubleshooting](docs/operations.md#local-memory-retrieval).
 
 ## Configuration
 
@@ -52,13 +73,13 @@ No `.env` is needed for normal use. Configure models in Settings. To select anot
 | Editing an API key | Leaving it empty retains the existing key. |
 | Optional MCP | Follow the [MCP guide](integrations/mcp/README.md) to install and register six presets, or configure your own server. |
 | Web search | DDGS by default; `TAVILY_API_KEY` opts into Tavily. Errors are reported explicitly. |
-| Learning memory | Source-filtered keyword + vector retrieval runs locally. `MEMORY_RETRIEVAL_MODE=lexical` disables semantic models for offline development or testing. |
+| Learning memory | Keyword retrieval works in the basic installation. Optional local vectors and reranking add semantic retrieval; `MEMORY_RETRIEVAL_MODE=lexical` disables them. |
 
 Capabilities depend on the provider and model. Native OpenAI Responses and Gemini protocols are not implemented. UI language does not translate saved content; quick explanations follow the selected language, and normal answers depend on the prompt and model.
 
-Each new branch's first question uses one additional short title request to the selected model, in the background, without tools or images. Only the question and a short source excerpt are sent. This does not delay the answer; unavailable, slow or invalid results keep a question-based label. Custom/imported titles are preserved, and ordinary follow-ups do not rename an established branch.
+Each branch's first question triggers one short background title request with the question and a source excerpt, without tools or images. Failures keep a question-based label. Established, custom and imported titles are preserved.
 
-Memory retrieval first limits topic facts to valid sources on the active path, then combines BM25 keyword matching and E5 vector similarity with reciprocal rank fusion (RRF). A local cross-encoder reranks candidates when needed. Duplicate content is removed, and a character budget selects complete memory entries without cutting off conditions or negations. Stable preferences use a separate budget; recent full conversation context is retained. This searches built-in learning memory, not MCP knowledge graphs or files in `学习资料/`. Retrieval ranks relevance; it does not verify whether a saved conclusion is true. See the [memory architecture](docs/architecture.md#learning-memory-retrieval).
+Memory facts are limited to valid sources on the active path. Optional semantic retrieval combines BM25 and E5 with reciprocal rank fusion (RRF), then BGE reranking. Preferences use a separate budget, and recent conversation context is retained. This searches built-in memory, not MCP graphs or learning files; relevance is not a truth check. See the [memory architecture](docs/architecture.md#learning-memory-retrieval).
 
 ## Development and checks
 
@@ -73,7 +94,7 @@ uv run python scripts/manage.py e2e
 
 Development uses a separate SQLite file and seeds an offline demo on first use. Models you later add to that development database remain available and may make real requests. Development, `check` and `e2e` force lexical retrieval, so they do not load or download semantic models. Tests use fixed mock providers; browser tests use a temporary database and random loopback port without personal data or paid calls. GitHub Actions runs these checks on pushes and pull requests.
 
-To download/repair the local model cache and test actual embedding and reranking inference with synthetic Chinese and English examples:
+After installing optional semantic retrieval, download/repair its model cache and test actual inference with synthetic Chinese and English examples:
 
 ```sh
 uv run python scripts/prepare_retrieval.py --smoke
@@ -92,6 +113,8 @@ docs/                Architecture and local operation guide
 ```
 
 See [architecture](docs/architecture.md), [operation and backups](docs/operations.md), and [contribution guidelines](CONTRIBUTING.md).
+
+Changes and upgrade notes: [v0.2.0](docs/releases/v0.2.0.md) · [Changelog](CHANGELOG.md).
 
 ## Your data
 

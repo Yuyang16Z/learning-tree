@@ -1,6 +1,6 @@
 [project]
 name = "learning-tree"
-version = "0.1.0"
+version = "0.2.0"
 description = "LearningTree: a local-first branching workspace for learning with AI"
 readme = "README.md"
 license = "MIT"
@@ -16,6 +16,10 @@ dependencies = [
     "ddgs==9.16.0",
     "anthropic>=0.84,<1",
     "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+retrieval = [
     "sentence-transformers>=5.1,<6",
     "transformers>=4.53,<5",
 ]

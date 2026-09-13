@@ -4,13 +4,15 @@ Run commands from the repository root with uv and Node.js 24 installed.
 
 | Command | Purpose |
 | --- | --- |
-| `uv run python scripts/manage.py setup` | Install dependencies from lockfiles and prepare pinned local retrieval models. |
+| `uv run python scripts/manage.py setup` | Install basic dependencies from lockfiles; no PyTorch, Transformers or model-weight download. Preserve any optional dependencies already installed. |
+| `uv run python scripts/manage.py setup --with-retrieval` | Install the application, then optional semantic dependencies and weights. A retrieval-preparation failure warns without failing the completed basic installation. |
+| `uv run python scripts/manage.py retrieval` | Install or retry the optional semantic dependencies and weights; returns a failure status if preparation cannot complete. |
 | `uv run python scripts/manage.py start --open` | Back up data, build and start on `127.0.0.1:8099`; open an existing app if already running. |
 | `uv run python scripts/manage.py dev` | Isolated development on 8100/5174 with `.runtime/dev.db`; initially seeds a demo model, retains later user configurations, and uses lexical retrieval. |
 | `uv run python scripts/manage.py backup` | Online SQLite backup to `.backups/`. |
 | `uv run python scripts/manage.py check` | Lint, format, unit/regression tests and frontend build; temporary test database and lexical retrieval. |
 | `uv run python scripts/manage.py e2e` | UI checks with a temporary database, random local port and lexical retrieval. |
-| `uv run python scripts/prepare_retrieval.py --smoke` | Prepare/download local retrieval models and verify real inference on synthetic Chinese/English examples. |
+| `uv run python scripts/prepare_retrieval.py --smoke` | With optional dependencies installed, prepare/download weights and verify real inference on synthetic Chinese/English examples; fails if dependencies or models are unavailable. |
 
 An occupied port is not forcibly freed. Ctrl+C stops the app. Use one backend per database; the standard launcher guards its port, but cannot police custom commands on other ports.
 
@@ -30,13 +32,21 @@ These local data files are excluded from Git. `DATABASE_URL` may select another 
 
 ## Local memory retrieval
 
-Hybrid retrieval is enabled by default and needs no additional API key. Initial setup downloads multilingual E5-small and BGE-reranker-v2-m3, approximately 2.55 GiB of public weights in addition to tokenizers and runtime dependencies. Both run on CPU with two PyTorch compute threads; loaded models also consume memory, so weight-file size is not a RAM limit. See [measured local costs and relevance limitations](memory-retrieval-validation.md). Normal startup only warms cached models in the background; neither startup nor answering a question downloads missing weights.
+The basic installation uses keyword retrieval and needs no model weights. The default `hybrid` configuration adds vectors and reranking when their optional dependencies and models are available; it does not require a separate API key. To enable them:
 
-Open **Settings → Memory** to inspect readiness. While local models are being prepared, or if embeddings are unavailable, answers can continue using keyword retrieval. If embeddings are ready but the reranker is unavailable, hybrid retrieval still works without the second-stage rerank. The panel reports these states rather than silently claiming semantic search is ready. **Prepare / retry** explicitly starts a background download/load attempt; it does not send chat content to a retrieval service. Selected memories are still included in prompts sent to the configured answer model.
+```sh
+uv run python scripts/manage.py retrieval
+```
 
-The management API uses `GET /api/memories/retrieval/status` for read-only status and `POST /api/memories/retrieval/prepare` to prepare models. Both return `state`, `embedding_ready` and `reranker_ready`; the status route itself never downloads models. The settings panel polls briefly during preparation, then offers manual refresh if the background work takes longer.
+The command installs the `retrieval` extra, then downloads pinned multilingual E5-small and BGE-reranker-v2-m3 weights. Allow approximately 2.55 GiB for weights, plus tokenizers and runtime dependencies. Both models run on CPU with two PyTorch compute threads; loaded models also consume memory, so weight-file size is not a RAM limit. See [measured local costs and relevance limitations](memory-retrieval-validation.md). Restart the app after installing dependencies. This explicit preparation temporarily enables hybrid mode for its subprocess but does not rewrite `.env`: if you previously selected `MEMORY_RETRIEVAL_MODE=lexical`, change it to `hybrid` to enable semantic retrieval in the app. Normal startup only warms cached models in the background; neither startup nor answering a question downloads missing weights.
 
-For keyword-only operation, set `MEMORY_RETRIEVAL_MODE=lexical` in `.env` and restart. Setting this before setup skips retrieval-model preparation. Development, unit/regression checks and browser tests force lexical mode in their isolated environment and do not download weights. For real local model validation, use `prepare_retrieval.py --smoke` with hybrid mode enabled. This command uses synthetic examples and never opens the chat database; its successful result does not establish real-answer quality or factual correctness.
+Open **Settings → Memory** to inspect readiness. If optional dependencies are missing, the panel shows the installation command above. Once dependencies are installed, **Prepare / retry** explicitly starts a background weight download/load attempt. While preparation runs, or if embeddings are unavailable, answers can continue using keyword retrieval. If embeddings are ready but the reranker is unavailable, hybrid retrieval still works without the second-stage rerank. Local retrieval does not send chat content to a retrieval service; selected memories are still included in prompts sent to the configured answer model.
+
+The management API uses `GET /api/memories/retrieval/status` for read-only status and `POST /api/memories/retrieval/prepare` to prepare models. Both return `state`, `embedding_ready` and `reranker_ready`; `not_installed` distinguishes missing optional Python components from unavailable weights. Neither endpoint installs Python packages, and the status route never downloads models. The settings panel polls briefly during preparation, then offers manual refresh if the background work takes longer.
+
+For keyword-only operation, set `MEMORY_RETRIEVAL_MODE=lexical` in `.env` and restart. This disables semantic loading even when optional dependencies are installed. Development, unit/regression checks and browser tests force lexical mode in their isolated environment and do not download weights. For real local model validation after installation, use `prepare_retrieval.py --smoke` with hybrid mode enabled. It uses synthetic examples and never opens the chat database; success does not establish real-answer quality or factual correctness.
+
+Ordinary `uv run` commands and the setup command preserve installed optional dependencies. If you maintain the environment with a manual exact `uv sync`, include `--extra retrieval` to retain the semantic packages, or use `--inexact` to preserve additional packages. Removing Python dependencies does not delete existing model weights or chat records.
 
 Existing memories do not need to be imported again. Their IDs and content are unchanged, and missing embedding-cache entries are generated lazily during retrieval. The cache is derived data: a restored database without these vectors can rebuild them from its memory records. A missing model-weight cache is restored by preparation. If you prepare weights with the CLI while the app is already running, use **Prepare / retry** in that process or restart to load them.
 
@@ -49,6 +59,8 @@ Deleting one memory, clearing memory, or deleting a source branch/tree also remo
 3. Pull the update; run `uv run python scripts/manage.py setup`.
 4. Start again and refresh the browser. Additive upgrades preserve existing IDs and records.
 
+For a tagged version, see the corresponding [release notes](releases/v0.2.0.md). Basic setup preserves previously installed semantic dependencies and existing model caches. New users can add semantic retrieval separately; upgrading does not require downloading models merely to use chat or keyword memory.
+
 For full recovery, stop the app, keep a copy of the current data file, and copy a chosen private backup to the configured database path. Start one backend. A database restore does not restore browser drafts, learning files or MCP memory; back those up separately when moving machines.
 
 Tree JSON import creates a new tree and remaps references. Limits are 25 MB, 2,000 nodes and 12,000 messages. Automatic preference/factual memory and MCP memory are not included. Exported conversations can still be private even though model keys are excluded.
@@ -57,7 +69,8 @@ Tree JSON import creates a new tree and remaps references. Limits are 25 MB, 2,0
 
 - **No model:** add one in Settings, or run `manage.py dev` for the offline demo.
 - **Old UI:** refresh after rebuilding/restarting. Clearing browser storage also removes drafts and preferences.
-- **Semantic retrieval is unavailable:** check Settings → Memory and use **Prepare / retry**, or run `uv run python scripts/prepare_retrieval.py --smoke`. Initial preparation needs access to public Hugging Face model files. Keyword retrieval remains available if preparation fails; no new model API key is required.
+- **Semantic retrieval is not installed:** run `uv run python scripts/manage.py retrieval` and restart. This installs optional Python packages as well as weights; the settings page does not install Python packages.
+- **Semantic models are unavailable:** after installing the optional packages, use **Settings → Memory → Prepare / retry**, or run `uv run python scripts/prepare_retrieval.py --smoke`. Preparation needs access to public Hugging Face model files. If a network or model error occurs, basic chat and keyword retrieval remain available. Retry later; no new model API key is required.
 - **MCP path errors:** install dependencies and re-register from the current checkout. See the [MCP guide](../integrations/mcp/README.md).
 - **Missing test browser:** run `node web/node_modules/playwright/cli.js install chromium --only-shell`; on Linux add `--with-deps` if system libraries are missing.
 - **Windows:** use the terminal commands with uv/Node on PATH; `.command` is macOS-only. Browser and process behavior should be verified on your Windows environment; automated browser checks run on Linux.
