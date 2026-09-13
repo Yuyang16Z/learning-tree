@@ -26,6 +26,7 @@ def to_spec(cfg: ModelConfig) -> LLMSpec:
         api_key=cfg.api_key,
         protocol=cfg.protocol,
         max_tokens=cfg.max_tokens,
+        context_window=cfg.context_window,
     )
 
 

@@ -22,6 +22,7 @@ export function AddModelModal({ isFirst, model, onClose, onAdd }: Props) {
     llm_model: model?.llm_model ?? "deepseek-chat",
     api_key: "",
     max_tokens: model?.max_tokens ?? 4096,
+    context_window: model?.context_window ?? 32768,
     is_default: model?.is_default ?? isFirst,
   });
   const [busy, setBusy] = useState(false);
@@ -51,7 +52,15 @@ export function AddModelModal({ isFirst, model, onClose, onAdd }: Props) {
       if (!["http:", "https:"].includes(url.protocol)) throw new Error();
     } catch { setError(t("API 地址需要以 https:// 或 http:// 开头。", "The API URL must start with https:// or http://.")); return; }
     if (!Number.isInteger(payload.max_tokens) || payload.max_tokens < 1 || payload.max_tokens > 131072) {
-      setError(t("最大输出长度应为 1–131072 之间的整数。", "Max output tokens must be an integer between 1 and 131072.")); return;
+      setError(payload.protocol === "anthropic"
+        ? t("最大输出长度应为 1–131072 之间的整数。", "Max output tokens must be an integer between 1 and 131072.")
+        : t("回答预留应为 1–131072 之间的整数。", "Answer reserve must be an integer between 1 and 131072.")); return;
+    }
+    if (!Number.isInteger(payload.context_window) || payload.context_window < 8192 || payload.context_window > 2097152) {
+      setError(t("上下文窗口应为 8192–2097152 之间的整数。", "Context window must be an integer between 8192 and 2097152.")); return;
+    }
+    if (payload.context_window - payload.max_tokens - Math.max(512, Math.floor(payload.context_window / 20)) < 1024) {
+      setError(t("扣除回答预留和预算余量后，须至少保留 1024 的输入空间。", "Context window must exceed the answer reserve plus headroom by at least 1024.")); return;
     }
     setBusy(true);
     try { await onAdd(payload); onClose(); }
@@ -73,7 +82,19 @@ export function AddModelModal({ isFirst, model, onClose, onAdd }: Props) {
       <div className="field"><label htmlFor={`${id}-model`}>{t("模型 ID", "Model ID")}</label><input id={`${id}-model`} placeholder={t("填写服务商提供的模型 ID", "Model ID from your provider")} value={form.llm_model} onChange={set("llm_model")} disabled={busy} required spellCheck={false} /></div>
       <div className="field"><label htmlFor={`${id}-url`}>{t("API 地址", "API URL")}</label><input id={`${id}-url`} type="url" placeholder={defaultUrls[form.protocol]} value={form.base_url} onChange={set("base_url")} disabled={busy} required spellCheck={false} /></div>
       <div className="field"><label htmlFor={`${id}-key`}>API Key</label><input id={`${id}-key`} type="password" autoComplete="new-password" placeholder={model ? t("留空保留当前密钥 {hint}", "Leave blank to keep the current key {hint}", { hint: model.key_hint }) : t("输入密钥", "Enter your API key")} value={form.api_key} onChange={set("api_key")} disabled={busy} required={!model} /></div>
-      {form.protocol === "anthropic" && <details className="model-advanced"><summary>{t("高级设置", "Advanced")}</summary><div className="field"><label htmlFor={`${id}-tokens`}>{t("最大输出长度（tokens）", "Max output tokens")}</label><input id={`${id}-tokens`} type="number" min={1} max={131072} step={1} value={form.max_tokens || ""} onChange={event => setForm(current => ({ ...current, max_tokens: Number(event.target.value) }))} disabled={busy} /></div></details>}
+      <details className="model-advanced">
+        <summary>{t("高级设置", "Advanced")}</summary>
+        <div className="field">
+          <label htmlFor={`${id}-context`}>{t("上下文窗口（tokens）", "Context window (tokens)")}</label>
+          <input id={`${id}-context`} type="number" min={8192} max={2097152} step={1} value={form.context_window || ""} onChange={event => setForm(current => ({ ...current, context_window: Number(event.target.value) }))} disabled={busy} />
+          <div className="hint">{t("按服务商提供的模型上下文容量填写。", "Use the model context capacity specified by your provider.")}</div>
+        </div>
+        <div className="field">
+          <label htmlFor={`${id}-tokens`}>{form.protocol === "anthropic" ? t("最大输出长度（tokens）", "Max output tokens") : t("回答预留（tokens）", "Answer reserve (tokens)")}</label>
+          <input id={`${id}-tokens`} type="number" min={1} max={131072} step={1} value={form.max_tokens || ""} onChange={event => setForm(current => ({ ...current, max_tokens: Number(event.target.value) }))} disabled={busy} />
+          {form.protocol === "openai" && <div className="hint">{t("用于本地输入预算；实际输出长度由服务商控制。", "Used for the local input budget; actual output length is controlled by the provider.")}</div>}
+        </div>
+      </details>
       {error && <div className="test-bad" role="alert">{localizeError(error, locale)}</div>}
       <div className="modal-foot"><label className="hint"><input type="checkbox" checked={form.is_default} onChange={event => setForm(current => ({ ...current, is_default: event.target.checked }))} disabled={busy} /> {t("设为默认", "Set as default")}</label><div className="model-form-actions"><button type="button" className="btn" onClick={close} disabled={busy}>{t("取消", "Cancel")}</button><button type="submit" className="btn btn-primary" disabled={busy}>{busy ? t("保存中…", "Saving…") : model ? t("保存", "Save") : t("添加", "Add")}</button></div></div>
     </form>

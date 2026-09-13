@@ -187,10 +187,13 @@ def stream_chat(
             _check_stop(reason)
 
 
-def chat_once(spec, conversation: list[dict], tools: list[dict]) -> dict:
+def chat_once(spec, conversation: list[dict], tools: list[dict], deep: bool = False) -> dict:
+    kwargs = _kwargs(spec, conversation, tools)
+    if deep:
+        kwargs["thinking"] = _thinking(spec)
     with client(spec) as api:
         # Streaming internally avoids SDK limits on long non-streaming requests.
-        with api.messages.stream(**_kwargs(spec, conversation, tools)) as stream:
+        with api.messages.stream(**kwargs) as stream:
             stopped = any(event.type == "message_stop" for event in stream)
             if not stopped:
                 raise RuntimeError("模型连接在回答完成前断开，可以重试。")
@@ -205,6 +208,11 @@ def chat_once(spec, conversation: list[dict], tools: list[dict]) -> dict:
         raise RuntimeError("模型没有返回完整的工具参数，可以重试。")
     return {
         "content": "".join(block.text for block in response.content if block.type == "text"),
+        # Opaque redacted-thinking data and signatures are retained only in the
+        # protocol blocks below, never exposed as user-visible reasoning.
+        "reasoning": "".join(
+            block.thinking for block in response.content if block.type == "thinking"
+        ),
         "tool_calls": calls,
         "_anthropic_content": [
             block.model_dump(mode="json", exclude_none=True) for block in response.content

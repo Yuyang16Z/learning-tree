@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ModelConfigIn(BaseModel):
@@ -10,7 +10,17 @@ class ModelConfigIn(BaseModel):
     api_key: str
     protocol: Literal["openai", "anthropic"] = "openai"
     max_tokens: int = Field(default=4096, ge=1, le=131072)
+    context_window: int = Field(default=32768, ge=8192, le=2097152)
     is_default: bool = False
+
+    @model_validator(mode="after")
+    def validate_context_budget(self):
+        headroom = max(512, self.context_window // 20)
+        if self.context_window - self.max_tokens - headroom < 1024:
+            raise ValueError(
+                "context_window must leave at least 1024 input units after answer reserve and headroom"
+            )
+        return self
 
 
 class ModelConfigOut(BaseModel):
@@ -21,6 +31,7 @@ class ModelConfigOut(BaseModel):
     key_hint: str  # 脱敏后的 key，只露后 4 位
     protocol: Literal["openai", "anthropic"] = "openai"
     max_tokens: int = 4096
+    context_window: int = 32768
     is_default: bool
 
 

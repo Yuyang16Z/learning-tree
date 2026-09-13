@@ -21,6 +21,7 @@ class ModelConfig(SQLModel, table=True):
         default="openai", sa_column=Column(String, nullable=False, default="openai")
     )
     max_tokens: int = 4096
+    context_window: int = 32768
     is_default: bool = False
     created_at: datetime = Field(default_factory=_now)
 

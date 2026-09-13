@@ -46,9 +46,9 @@ export interface ThreadNode extends LearningFields {
 export type ModelProtocol = 'openai' | 'anthropic';
 export interface ModelCfg {
   id: number; label: string; base_url: string; llm_model: string; key_hint: string; is_default: boolean;
-  protocol: ModelProtocol; max_tokens: number;
+  protocol: ModelProtocol; max_tokens: number; context_window: number;
 }
-export interface ModelInput { label: string; base_url: string; llm_model: string; api_key: string; is_default: boolean; protocol: ModelProtocol; max_tokens: number }
+export interface ModelInput { label: string; base_url: string; llm_model: string; api_key: string; is_default: boolean; protocol: ModelProtocol; max_tokens: number; context_window: number }
 export interface McpServer { id: number; label: string; command: string; args: string[]; enabled: boolean }
 export interface McpInput { label: string; command: string; args: string[]; enabled: boolean }
 export interface Memory { id: number; kind: string; content: string; tree_id: number | null }

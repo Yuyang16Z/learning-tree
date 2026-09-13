@@ -21,6 +21,7 @@ def _out(cfg: ModelConfig) -> ModelConfigOut:
         key_hint=mask_key(cfg.api_key),
         protocol=cfg.protocol,
         max_tokens=cfg.max_tokens,
+        context_window=cfg.context_window,
         is_default=cfg.is_default,
     )
 

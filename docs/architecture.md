@@ -10,6 +10,9 @@ LearningTree uses React + TypeScript and FastAPI + SQLite/SQLModel. Normal start
 | `web/src/i18n/` | Locale resolution, persistence and translation helpers. |
 | `app/routers/` | Validated endpoints and streaming orchestration. |
 | `app/service.py` | Conversation context and learning memory. |
+| `app/context.py` | Budget-aware active-path assembly and scoped source rereading. |
+| `app/context_budget.py` | Local request-size estimates and protocol-preserving fitting before provider calls. |
+| `app/context_compaction.py` | Cited, complete-sentence extraction and a bounded process-local cache. |
 | `app/retrieval.py` | Source filtering, keyword/vector ranking, fusion, deduplication and memory budgets. |
 | `app/semantic_models.py` | Pinned local embedding/reranker models, cached startup and explicit preparation. |
 | `app/llm.py`, `app/anthropic_provider.py` | Provider request conversion and deterministic demo behavior. |
@@ -25,7 +28,19 @@ The map groups consecutive follow-ups into topic cards; expanded turns navigate 
 
 Branch titles have an independent `title_state`: empty, pending, ai, fallback, manual, or legacy. The first branch question immediately supplies a provisional label; a separate worker asks the same model for a short title. A 20-second settlement deadline ignores late results. Title failures never change answer status. The map polls only pending title metadata, with navigation guards and a 30-second limit, without resetting chat state or the camera. Startup replaces recognizable legacy source-prefix labels with the first question, using no model calls. Title job state is internal and excluded from version-1 exports; imported labels are treated as explicit titles.
 
-Context follows the current ancestry. The nearest six ancestors retain full text and images; older content is compacted with an omission marker. The selected passage is included. Factual memory is restricted to the ancestor path, without silently mixing siblings. Understanding is brought back as an editable message draft.
+Context follows the current ancestry. Short eligible histories remain complete. Longer histories retain recent complete question/answer groups within the selected model's input budget; older sources contribute categorized original sentences with provenance and explicit omission notices. The current question, its images, selected passage and current learning note remain mandatory. Factual memory is restricted to the ancestor path, without silently mixing siblings. Understanding is brought back as an editable message draft.
+
+## Context budgeting and compaction
+
+Each `ModelConfig` stores `context_window` (default 32,768) and `max_tokens` (default 4,096). The local input budget subtracts the answer reserve and `max(512, context_window // 20)` headroom. UTF-8 byte counts, fixed image reservations and protocol overhead approximate request size without downloading tokenizers or calling another model. These estimates do not reproduce provider tokenization or guarantee acceptance by every service.
+
+`context_compaction.py` performs deterministic extractive compaction: it ranks complete source sentences about corrections, conditions, unresolved questions, learning goals, definitions and user notes, then includes fitting excerpts with node/message/section/character references. Partial answers remain stored but are not promoted into these extracts. Historical images omitted from the request are explicitly described as unseen. The algorithm does not invent a free-form summary, rewrite the database or guarantee lossless compression. The disposable process-local LRU holds at most 64 source-extraction entries, keyed by source-content hash and algorithm version; source edits change the cache key.
+
+`read_learning_source` offers the answer model a read-only way to page through eligible originals on the active path. It is enabled when initial context has been compressed, or when the user selected tools whose later results may require runtime compaction. Short requests without user-selected tools retain the plain streaming path. Reader execution revalidates the current path and source instead of trusting the model's supplied IDs. This is separate from MCP and semantic memory retrieval. It does not expose sibling branches, another tree or arbitrary files.
+
+Before each answer-provider request, including continuation after a tool result, `fit_request` estimates the full request with system text, messages, images and tool definitions. It drops older history as complete protocol groups when necessary, adds an explicit omission notice with a source-rereading reminder, and preserves the current question and current tool-call IDs, arguments and native signed blocks. Oversized tool-result bodies may retain only the beginning and end, with an explicit omission warning. Rereading a source must not be implemented by replaying a side-effecting tool action. If mandatory input cannot fit, the request fails with actionable guidance instead of silently cutting it.
+
+OpenAI-compatible requests keep their existing wire behavior without a new output-token cap: `max_tokens` supplies the local answer reservation, while actual output length remains provider-controlled. Native Anthropic requests still send `max_tokens` as their output limit. See [configuration, examples and limitations](context-budget.md).
 
 ## Learning memory retrieval
 
@@ -39,7 +54,7 @@ For each question, the built-in memory pipeline runs as follows:
 4. **Deduplicate and budget complete entries.** Normalize duplicate memory text and omit facts already present in the supplied conversation context. Select complete entries within a character budget; an entry that would exceed the budget is skipped rather than cut through a negation or precondition. This is a character budget, not a tokenizer-wide context-window guarantee.
 5. **Revalidate and attach provenance.** Recheck selected records against current stored content and source eligibility before assembling the memory note. Each entry carries its memory ID and source node. The note labels historical material as potentially wrong or outdated and tells the answer model to prioritize the user's current explicit request.
 
-User preferences are handled separately: valid recent preferences are deduplicated and placed in their own small budget, without requiring semantic similarity to the current technical question. Memory retrieval supplements the existing path context; it does not replace recent full question/answer turns, selected source passages or learning notes.
+User preferences are handled separately: valid recent preferences are deduplicated and placed in their own small budget, without requiring semantic similarity to the current technical question. Memory retrieval supplements the budgeted path context; it does not determine which original messages are preserved in the database or replace the current question and selected source passage. The final request budget also accounts for the memory note, selecting or omitting whole entries including multiline conditions. Deduplication against supplied context uses the mandatory quotation and current note, avoiding the loss of a memory solely because it duplicated older history that was subsequently compressed away.
 
 `MemoryEmbedding` is an additive SQLite cache of normalized document vectors. Its composite key identifies the memory and pinned embedding-model revision, and a content hash detects stale text. Existing `Memory` IDs and content remain unchanged. Missing vectors are rebuilt lazily from eligible records; deleted memories, branches and trees remove associated vectors. SQLite remains the authority for eligibility, not the vector cache. This local implementation scans eligible cached vectors without requiring a separate vector database.
 

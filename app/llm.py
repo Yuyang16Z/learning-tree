@@ -16,6 +16,7 @@ from typing import Literal
 from openai import OpenAI
 
 from . import anthropic_provider
+from .context_budget import ContextPolicy, fit_request
 
 MOCK_ANSWER = (
     "（mock 模型）我收到的上下文只有从根节点到当前节点这一条脊柱，"
@@ -31,6 +32,7 @@ class LLMSpec:
     api_key: str
     protocol: Literal["openai", "anthropic"] = "openai"
     max_tokens: int = 4096
+    context_window: int = 32768
 
 
 def _is_mock(spec: LLMSpec) -> bool:
@@ -90,6 +92,10 @@ def stream_chat(
             yield ("text", ch)
         return
 
+    prepared = fit_request(
+        system, messages, policy=ContextPolicy.from_spec(spec), protocol=spec.protocol
+    )
+    system, messages = prepared.system, prepared.messages
     if spec.protocol == "anthropic":
         yield from anthropic_provider.stream_chat(spec, system, messages, deep)
         return
@@ -122,8 +128,8 @@ def stream_chat(
 
 
 # ---------- 工具调用：agent 回合制 ----------
-def _chat_once(spec: LLMSpec, convo: list[dict], tools: list[dict]) -> dict:
-    """一次非流式调用，返回 {content, tool_calls:[{id,name,args}]}。"""
+def _chat_once(spec: LLMSpec, convo: list[dict], tools: list[dict], deep: bool = False) -> dict:
+    """一次非流式调用，返回正文、工具调用及可选的可见思考文本。"""
     if _is_mock(spec):
         has_tool_result = any(m.get("role") == "tool" for m in convo)
         if tools and not has_tool_result:
@@ -151,6 +157,8 @@ def _chat_once(spec: LLMSpec, convo: list[dict], tools: list[dict]) -> dict:
         return {"content": "（mock 模型）我调用工具拿到结果后，据此作答。", "tool_calls": []}
 
     if spec.protocol == "anthropic":
+        if deep:
+            return anthropic_provider.chat_once(spec, convo, tools, deep=True)
         return anthropic_provider.chat_once(spec, convo, tools)
 
     resp = _client(spec).chat.completions.create(
@@ -166,7 +174,11 @@ def _chat_once(spec: LLMSpec, convo: list[dict], tools: list[dict]) -> dict:
         {"id": tc.id, "name": tc.function.name, "args": json.loads(tc.function.arguments or "{}")}
         for tc in (msg.tool_calls or [])
     ]
-    return {"content": msg.content, "tool_calls": tcs}
+    return {
+        "content": msg.content,
+        "tool_calls": tcs,
+        "reasoning": getattr(msg, "reasoning_content", None) or "",
+    }
 
 
 def run_agent(
@@ -176,8 +188,9 @@ def run_agent(
     tool_defs: list[dict],
     execute: Callable[[str, dict], str],
     max_rounds: int = 4,
+    deep: bool = False,
 ) -> Iterator[dict]:
-    """产出事件：{"type":"tool_start"|"tool_end"|"delta", ...}。
+    """产出事件：{"type":"tool_start"|"tool_end"|"reasoning"|"delta", ...}。
 
     tool_defs：OpenAI 兼容的工具定义（内置 + MCP 混在一起）。
     execute(name, args)：由上层提供的路由执行器（内置直调、MCP 转发）。
@@ -187,10 +200,21 @@ def run_agent(
         for ch in _chunks(MOCK_ANSWER + "（演示模式未执行外部工具。）"):
             yield {"type": "delta", "text": ch}
         return
-    convo: list[dict] = [{"role": "system", "content": system}, *messages]
+    # Preserve the original history and tool results locally. Budget only request
+    # copies, including newly returned tool output before every model call.
+    convo: list[dict] = list(messages)
+    policy = ContextPolicy.from_spec(spec)
 
     for _ in range(max_rounds):
-        r = _chat_once(spec, convo, tool_defs)
+        prepared = fit_request(system, convo, tool_defs, policy=policy, protocol=spec.protocol)
+        request = [{"role": "system", "content": prepared.system}, *prepared.messages]
+        r = (
+            _chat_once(spec, request, tool_defs, deep=True)
+            if deep
+            else _chat_once(spec, request, tool_defs)
+        )
+        if deep and r.get("reasoning"):
+            yield {"type": "reasoning", "text": r["reasoning"]}
         if r["tool_calls"]:
             convo.append(
                 {
@@ -231,6 +255,10 @@ def run_agent(
 def complete(spec: LLMSpec, system: str, messages: list[dict]) -> str:
     if _is_mock(spec):
         return "（mock 摘要）本节点讲清了这个概念的关键点，可作为下层分支的背景。"
+    prepared = fit_request(
+        system, messages, policy=ContextPolicy.from_spec(spec), protocol=spec.protocol
+    )
+    system, messages = prepared.system, prepared.messages
     if spec.protocol == "anthropic":
         return anthropic_provider.complete(spec, system, messages)
     resp = _client(spec).chat.completions.create(

@@ -15,6 +15,7 @@ _ADDED_COLUMNS = {
     "modelconfig": {
         "protocol": "TEXT NOT NULL DEFAULT 'openai'",
         "max_tokens": "INTEGER NOT NULL DEFAULT 4096",
+        "context_window": "INTEGER NOT NULL DEFAULT 32768",
     },
     "node": {
         "kind": "TEXT NOT NULL DEFAULT 'followup'",
@@ -47,6 +48,15 @@ def _ensure_columns() -> None:
             for name, sqltype in cols.items():
                 if name not in existing:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {sqltype}"))
+                    if table == "modelconfig" and name == "context_window":
+                        # Existing output limits can exceed the new default.
+                        # Backfill only once; never overwrite a user's later choice.
+                        conn.execute(
+                            text(
+                                "UPDATE modelconfig SET context_window = "
+                                "MAX(32768, COALESCE(max_tokens, 4096) * 2 + 4096)"
+                            )
+                        )
 
 
 def init_db() -> None:

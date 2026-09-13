@@ -22,6 +22,7 @@ The images use synthetic content and the offline demo model. They demonstrate th
 - Branch titles summarize the first question you ask, rather than copying the source answer. A new empty branch shows “New branch”.
 - Save your understanding and bring it into the main conversation as an editable draft.
 - Edit a question as a new version, retry interrupted answers, and keep the original record.
+- Budget long conversations per model: keep recent full turns, extract cited source sentences from older context, and let the agent reread eligible originals when needed.
 - Recall relevant learning memories with local multilingual search, while keeping topic facts within the current learning path and user preferences separate.
 - Switch **English / 中文** in **Settings → 语言 / Language**. Labels change immediately; your conversations and notes keep their original language.
 - Connect OpenAI-compatible Chat Completions or native Anthropic Messages. Optional MCP tools add web reading, local files, memory, browser actions, thinking steps and time lookup.
@@ -71,6 +72,7 @@ No `.env` is needed for normal use. Configure models in Settings. To select anot
 | OpenAI-compatible | Uses Chat Completions; use the base URL and model ID provided by your service. |
 | Anthropic | Native Messages, streaming, images and tool calls. Official base URL: `https://api.anthropic.com`. Output limit defaults to 4,096 tokens. |
 | Editing an API key | Leaving it empty retains the existing key. |
+| Context budget | In the model's **Advanced** settings, set its actual context window and answer reserve. Local estimates and extractive compression need no extra model or download. |
 | Optional MCP | Follow the [MCP guide](integrations/mcp/README.md) to install and register six presets, or configure your own server. |
 | Web search | DDGS by default; `TAVILY_API_KEY` opts into Tavily. Errors are reported explicitly. |
 | Learning memory | Keyword retrieval works in the basic installation. Optional local vectors and reranking add semantic retrieval; `MEMORY_RETRIEVAL_MODE=lexical` disables them. |
@@ -80,6 +82,8 @@ Capabilities depend on the provider and model. Native OpenAI Responses and Gemin
 Each branch's first question triggers one short background title request with the question and a source excerpt, without tools or images. Failures keep a question-based label. Established, custom and imported titles are preserved.
 
 Memory facts are limited to valid sources on the active path. Optional semantic retrieval combines BM25 and E5 with reciprocal rank fusion (RRF), then BGE reranking. Preferences use a separate budget, and recent conversation context is retained. This searches built-in memory, not MCP graphs or learning files; relevance is not a truth check. See the [memory architecture](docs/architecture.md#learning-memory-retrieval).
+
+Long-context handling is separate from memory retrieval: it budgets each request, including tool results, and compresses older conversation into cited original sentences without rewriting stored messages. Estimates are conservative local approximations, not exact provider token counts; compression can omit relevant material. See [context budgets, source rereading and limits](docs/context-budget.md).
 
 ## Development and checks
 

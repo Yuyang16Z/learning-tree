@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add per-model context-window settings and local answer reservations. Estimate complete requests before provider calls, including tool definitions, images and tool results; report mandatory inputs that cannot fit.
+- Replace the fixed recent-history cutoff with budget-aware retention of complete turns and deterministic extraction of cited original sentences from older context. Preserve stored originals and keep the bounded extraction cache in process memory.
+- Offer scoped, read-only original-source pagination for compressed context and tool-enabled turns that may need later compaction. Revalidate the active path at execution; retain tool-call identities and native protocol blocks when fitting requests, and mark omitted history and abbreviated tool results explicitly.
+- Keep this context-management path free of extra dependencies, model downloads and additional summarization-model calls. Estimates are not exact provider token counts, and extraction does not guarantee that every relevant detail survives.
+
 ## 0.2.0 — 2026-09-12
 
 - Add source-scoped learning-memory retrieval: BM25 and optional multilingual E5 vectors, reciprocal rank fusion, optional BGE reranking, complete-entry budgets and source annotations. User preferences remain separate; sibling branches do not silently supply facts.

@@ -52,6 +52,16 @@ Existing memories do not need to be imported again. Their IDs and content are un
 
 Deleting one memory, clearing memory, or deleting a source branch/tree also removes associated cached vectors. Deleting an extracted memory does not delete the original chat messages, which may still enter the current conversation's context. These controls do not clear MCP memory or index/delete files in `学习资料/`; those are independent stores.
 
+## Model context settings
+
+In **Settings → Models & API keys → add/edit a model → Advanced**, set **Context window** to the capacity actually supported by that provider and model. The default is 32,768, with a 4,096 answer reserve and additional estimation headroom. These values are stored per model, not in `.env`; existing configurations receive the default window without changing their credentials or chat records.
+
+For OpenAI-compatible models, **Answer reserve** reduces the local input allowance but does not impose a new provider output cap. For native Anthropic, **Max output tokens** also remains the output limit sent to the provider. Local estimates use UTF-8 byte counts and fixed image reservations, not the provider's exact tokenizer.
+
+Context management requires no optional semantic dependencies or model downloads. Short histories remain complete; long histories keep recent full turns and extract cited original sentences from older sources. Source rereading is available when initial context is compressed, or when selected tools may cause later budget pressure. Stored messages remain intact, and the bounded extraction cache is cleared on restart. This cache is separate from learning memories and needs no backup.
+
+If the app reports that a question, quotation, image or tool information exceeds the budget, shorten that input, reduce attached images or enabled tools, or correct the configured window if the provider supports more. Raising the setting beyond the provider's capacity cannot make the model accept it. Tool outputs may be explicitly shortened in later requests. See [the context-budget guide](context-budget.md) for source references, protocol handling and compression limits.
+
 ## Updating and restoring
 
 1. Let active answers finish and stop the app.
@@ -69,6 +79,7 @@ Tree JSON import creates a new tree and remaps references. Limits are 25 MB, 2,0
 
 - **No model:** add one in Settings, or run `manage.py dev` for the offline demo.
 - **Old UI:** refresh after rebuilding/restarting. Clearing browser storage also removes drafts and preferences.
+- **Context budget exceeded:** review the model's Advanced settings, then reduce oversized mandatory inputs or tools if the configured window is already correct. See [model context settings](#model-context-settings). A provider can still reject a request that passes the local estimate because tokenization and image accounting differ.
 - **Semantic retrieval is not installed:** run `uv run python scripts/manage.py retrieval` and restart. This installs optional Python packages as well as weights; the settings page does not install Python packages.
 - **Semantic models are unavailable:** after installing the optional packages, use **Settings → Memory → Prepare / retry**, or run `uv run python scripts/prepare_retrieval.py --smoke`. Preparation needs access to public Hugging Face model files. If a network or model error occurs, basic chat and keyword retrieval remain available. Retry later; no new model API key is required.
 - **MCP path errors:** install dependencies and re-register from the current checkout. See the [MCP guide](../integrations/mcp/README.md).

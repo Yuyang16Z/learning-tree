@@ -1,6 +1,7 @@
 """Durable Q/A nodes: revisions, retries, source anchors and cancellable streams."""
 
 import asyncio
+import copy
 import json
 import queue
 import threading
@@ -13,7 +14,9 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import delete
 from sqlmodel import Session, select
 
-from ..context import BASE_SYSTEM, build_context
+from ..context import BASE_SYSTEM, build_context, context_messages
+from ..context_budget import ContextBudgetExceeded, ContextPolicy
+from ..context_sources import SOURCE_TOOL_DEF, SOURCE_TOOL_NAME, make_source_reader
 from ..db import engine, get_session
 from ..llm import LLMSpec, complete, run_agent, stream_chat
 from ..models import Memory, MemoryEmbedding, Message, Node
@@ -54,6 +57,14 @@ class Generation:
 
 _GENERATIONS: dict[int, Generation] = {}
 _CANCELLED_REQUESTS: dict[tuple[int, str], float] = {}
+
+
+def _snapshot(model):
+    # Read expired attributes while the session is open, then create a fresh
+    # transient model. Deep-copying ORM state can detach still-expired fields.
+    return type(model)(
+        **{name: copy.deepcopy(getattr(model, name)) for name in type(model).model_fields}
+    )
 
 
 def _sse(obj: dict) -> str:
@@ -395,7 +406,18 @@ def explain(node_id: int, body: ExplainIn, session: Session = Depends(get_sessio
         if body.locale == "en"
         else f"请解释这段引用：{body.text}"
     )
-    system, messages = build_context(ancestors, node, get_messages(session, node_id), question)
+    spec = to_spec(cfg)
+    try:
+        system, messages = build_context(
+            ancestors,
+            node,
+            get_messages(session, node_id),
+            question,
+            policy=ContextPolicy.from_spec(spec),
+            protocol=spec.protocol,
+        )
+    except ContextBudgetExceeded as exc:
+        raise HTTPException(400, str(exc)) from None
     if body.locale == "en":
         # Replace only our language-specific base instructions; preserve the
         # original learning path, quotes and messages in their source language.
@@ -418,7 +440,9 @@ def explain(node_id: int, body: ExplainIn, session: Session = Depends(get_sessio
             "尽量不超过 180 字。不要扩展新话题。"
         )
     try:
-        result = complete(to_spec(cfg), system, messages)
+        result = complete(spec, system, messages)
+    except ContextBudgetExceeded as exc:
+        raise HTTPException(400, str(exc)) from None
     except Exception:
         raise HTTPException(502, "解释未完成，请稍后重试。") from None
     return {"explanation": result}
@@ -639,22 +663,20 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             )
         session.commit()
         target_id, tree_id = target.id, target.tree_id
-        ancestors = get_ancestors(session, target)
+        ancestors = [
+            (_snapshot(node), [_snapshot(m) for m in messages])
+            for node, messages in get_ancestors(session, target)
+        ]
+        context_target = _snapshot(target)
+        context_history = [_snapshot(m) for m in current_messages]
         memory_source_ids = [n.id for n, _ in ancestors] + [target_id]
         memory_quote = target.seed_text or ""
-        system, llm_messages = build_context(
-            ancestors, target, current_messages, question_text, question_images
-        )
-        # Only actual included background is used for deduplication, never the user's new question.
-        existing_context = (
-            system
-            + "\n"
-            + "\n".join(
-                message["content"]
-                for message in llm_messages[:-1]
-                if isinstance(message["content"], str)
-            )
-        )
+        allowed_message_ids = {
+            m.id
+            for _, messages in ancestors + [(context_target, context_history)]
+            for m in context_messages(messages)
+            if m.id is not None
+        }
         generation = Generation(request_id, label=spec.label)
         _GENERATIONS[target_id] = generation
         # Snapshot configuration only. In particular, demo mode never lists MCP
@@ -662,16 +684,28 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
         is_mock = spec.api_key == "mock" or spec.base_url.startswith("mock")
         requested_tools = [] if is_mock else (body.tools or [])
 
-    if title_needed:
-        _queue_branch_title(target_id, spec)
-
     def produce():
         stream = None
+        title_queued = False
         last_checkpoint = time.monotonic()
         try:
-            request_system = system
+            policy = ContextPolicy.from_spec(spec)
             if generation.stop.is_set():
                 return
+            # Source selection/compaction never holds _REQUEST_LOCK. Oversized
+            # mandatory input fails before MCP discovery or any model call.
+            build_context(
+                ancestors,
+                context_target,
+                context_history,
+                question_text,
+                question_images,
+                policy=policy,
+                protocol=spec.protocol,
+            )
+            if generation.stop.is_set():
+                return
+            memory = ""
             # Local inference must not hold _REQUEST_LOCK: stop/retry remain responsive.
             if not is_mock:
                 with Session(engine) as memory_session:
@@ -681,25 +715,80 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                         memory_source_ids,
                         query=question_text,
                         quoted_text=memory_quote,
-                        existing_text=existing_context,
+                        # These sources are mandatory even after compaction.
+                        existing_text=memory_quote + "\n" + (context_target.learning_note or ""),
                     )
-                if memory:
-                    request_system += "\n" + memory
             if generation.stop.is_set():
                 return
             with Session(engine) as tool_session:
                 tool_defs, tool_router = assemble_tools(tool_session, requested_tools)
             if generation.stop.is_set():
                 return
+            context_stats = {}
+            context_defs = tool_defs + ([SOURCE_TOOL_DEF] if tool_defs and not is_mock else [])
+            request_system, llm_messages = build_context(
+                ancestors,
+                context_target,
+                context_history,
+                question_text,
+                question_images,
+                memory,
+                policy=policy,
+                tool_defs=context_defs,
+                protocol=spec.protocol,
+                diagnostics=context_stats,
+            )
+            if context_stats["compacted"] and not context_defs and not is_mock:
+                context_defs = [SOURCE_TOOL_DEF]
+                request_system, llm_messages = build_context(
+                    ancestors,
+                    context_target,
+                    context_history,
+                    question_text,
+                    question_images,
+                    memory,
+                    policy=policy,
+                    tool_defs=context_defs,
+                    protocol=spec.protocol,
+                    diagnostics=context_stats,
+                )
+            source_reader = None
+            # Tool results can force compaction on later rounds even when the
+            # initial history fits. Make read-only history access available then.
+            if (context_stats["compacted"] or tool_defs) and not is_mock:
+                tool_defs = [*tool_defs, SOURCE_TOOL_DEF]
+                source_reader = make_source_reader(
+                    engine,
+                    target_id,
+                    tree_id,
+                    allowed_message_ids,
+                    # Leave result metadata and call IDs room as well as text.
+                    max_page_chars=max(32, min(1200, (policy.tool_reserve - 1024) // 4)),
+                    max_page_items=max(1, min(10, (policy.tool_reserve - 700) // 700)),
+                )
+            if generation.stop.is_set():
+                return
+            if title_needed:
+                _queue_branch_title(target_id, spec)
+                title_queued = True
             if tool_defs:
                 execute = make_executor(tool_router)
 
                 def guarded_execute(name, arguments):
                     if generation.stop.is_set():
                         raise RuntimeError("generation cancelled before tool execution")
+                    if name == SOURCE_TOOL_NAME and source_reader is not None:
+                        return source_reader(arguments)
                     return execute(name, arguments)
 
-                stream = run_agent(spec, request_system, llm_messages, tool_defs, guarded_execute)
+                stream = run_agent(
+                    spec,
+                    request_system,
+                    llm_messages,
+                    tool_defs,
+                    guarded_execute,
+                    **({"deep": True} if body.deep_think else {}),
+                )
             else:
                 stream = (
                     {"type": kind, "text": chunk}
@@ -743,6 +832,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 generation.error = (
                     "已停止，可重试。"
                     if generation.stop.is_set()
+                    else str(exc)
+                    if isinstance(exc, ContextBudgetExceeded)
                     else f"回答未完成（{type(exc).__name__}），可重试。"
                 )
         finally:
@@ -754,6 +845,17 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 except Exception:
                     pass
             try:
+                if title_needed and not title_queued:
+                    with _REQUEST_LOCK, Session(engine) as title_session:
+                        pending_title = title_session.get(Node, target_id)
+                        if (
+                            pending_title
+                            and pending_title.request_id == request_id
+                            and pending_title.title_state == "pending"
+                        ):
+                            pending_title.title_state = "fallback"
+                            title_session.add(pending_title)
+                            title_session.commit()
                 _persist(target_id, generation, spec.label)
             except Exception:
                 generation.status, generation.error = (
