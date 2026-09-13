@@ -32,6 +32,7 @@ _ADDED_COLUMNS = {
     },
     "message": {
         "images": "JSON",
+        "document_ids": "JSON",
         "reasoning": "TEXT",
         "steps": "JSON",
         "status": "TEXT NOT NULL DEFAULT 'complete'",
@@ -60,6 +61,8 @@ def _ensure_columns() -> None:
 
 
 def init_db() -> None:
+    from . import documents  # noqa: F401 -- register the additive document table
+
     # Only additive migrations. Legacy multi-turn nodes keep their original IDs,
     # messages and branch attachments; the thread API presents every Q/A pair.
     SQLModel.metadata.create_all(engine)

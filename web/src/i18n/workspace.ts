@@ -3,6 +3,35 @@ import type { McpServer } from "../types";
 
 /** Translate known application diagnostics only; never run this over conversation text. */
 const diagnostics: [string, string][] = [
+  ["每条消息最多附加 4 个文档。", "Attach up to 4 documents per message."],
+  ["文档不存在或不属于当前学习主题，请重新上传。", "This document is missing or belongs to another topic. Upload it again."],
+  ["文档提取文本超过 200,000 字符，请拆分后上传。", "Extracted text exceeds 200,000 characters. Split the document before uploading."],
+  ["文件内容不是有效的 PDF。", "This file is not a valid PDF."],
+  ["暂不支持加密或密码保护的 PDF，请先解密。", "Encrypted or password-protected PDFs are not supported. Decrypt the file first."],
+  ["PDF 超过 200 页，请拆分后上传。", "This PDF exceeds 200 pages. Split it before uploading."],
+  ["PDF 页面内容过大，请简化或拆分后上传。", "A PDF page is too large to process. Simplify or split the file."],
+  ["PDF 没有可提取的文字，可能是扫描件；暂不支持 OCR，请上传文字版。", "This PDF has no extractable text and may be scanned. OCR is not supported; upload a text-based version."],
+  ["文件内容不是有效的 DOCX；旧版 .doc 请另存为 .docx。", "This file is not a valid DOCX. Save older .doc files as .docx first."],
+  ["文件内容不是有效的 Word DOCX 文档。", "This file is not a valid Word DOCX document."],
+  ["DOCX 解压后内容过大，请精简图片或拆分后上传。", "The expanded DOCX is too large. Reduce images or split the document."],
+  ["暂不支持加密或密码保护的 Word 文档。", "Encrypted or password-protected Word documents are not supported."],
+  ["DOCX 压缩比例异常，请重新保存或拆分后上传。", "The DOCX compression ratio is unusual. Save it again or split the document."],
+  ["DOCX 包含不支持的 XML 声明，请另存文档后上传。", "The DOCX contains unsupported XML declarations. Save a new copy before uploading."],
+  ["Word 文档没有可提取的段落或表格文字；图片中的文字暂不支持 OCR。", "This Word document has no extractable paragraph or table text. OCR for images is not supported."],
+  ["仅提取 Word 段落与表格文字，内嵌图片未进行 OCR。", "Only Word paragraphs and tables were extracted. Embedded images were not processed with OCR."],
+  ["暂不支持旧版 .doc，请在 Word 中另存为 .docx 或 PDF 后上传。", "Older .doc files are not supported. Save as .docx or PDF in Word before uploading."],
+  ["支持 PDF、DOCX、TXT、Markdown、CSV、TSV、JSON 和 LOG 文件。", "Supported formats: PDF, DOCX, TXT, Markdown, CSV, TSV, JSON and LOG."],
+  ["文件为空，请选择有内容的文档。", "The file is empty. Choose a document with content."],
+  ["单个文档不能超过 10 MiB。", "Each document must be 10 MiB or smaller."],
+  ["文本文件需使用 UTF-8 编码，请转换编码后上传。", "Text files must use UTF-8 encoding. Convert the file before uploading."],
+  ["文件包含二进制内容，请上传 UTF-8 纯文本文件。", "The file contains binary data. Upload a UTF-8 plain-text file."],
+  ["文档没有可提取的文字。", "The document has no extractable text."],
+  ["文档已损坏或无法解析，请重新导出为 PDF、DOCX 或 UTF-8 文本。", "The document is damaged or cannot be parsed. Export it again as PDF, DOCX or UTF-8 text."],
+  ["文档解析失败，请精简文档后重试。", "Document parsing failed. Simplify the document and try again."],
+  ["文档解析超时，请拆分或重新导出文档后上传。", "Document parsing timed out. Split or re-export the document before uploading."],
+  ["文档解析失败或资源消耗过大，请拆分后上传。", "Document parsing failed or used too many resources. Split it before uploading."],
+  ["文档不存在。", "Document not found."],
+  ["文档已用于对话，请保留来源记录；删除学习主题时会一并清理。", "This document is used in a conversation. Keep it as a source record; deleting the topic will remove it."],
   ["浏览器空间不足，请先导出备份再删除。", "Browser storage is full. Export a backup before deleting."],
   ["暂时无法解释，请重试。", "Could not explain this selection. Try again."],
   ["分支创建失败，请重试。", "Could not create the branch. Try again."],
@@ -107,6 +136,8 @@ export function localizeError(message: string, locale: Locale = getLocale()): st
   const raw = detail === "Failed to fetch" || detail === "Load failed" ? "网络请求失败，请检查连接后重试。" : detail;
   const pair = diagnostics.find(([zh, en]) => raw === zh || raw === en);
   if (pair) return pair[locale === "en" ? 1 : 0];
+  const documentPages = raw.match(/^第 (.+) 页没有可提取的文字（可能为空白页或扫描图片）；未进行 OCR。$/) ?? raw.match(/^Pages (.+) have no extractable text \(blank or scanned\); OCR was not performed\.$/);
+  if (documentPages) return locale === "en" ? `Pages ${documentPages[1]} have no extractable text (blank or scanned); OCR was not performed.` : `第 ${documentPages[1]} 页没有可提取的文字（可能为空白页或扫描图片）；未进行 OCR。`;
   const http = raw.match(/^HTTP (\d+)[:：](.*)$/s);
   if (http) return `HTTP ${http[1]}: ${localizeError(http[2].trim(), locale)}`;
   const connected = raw.match(/^连上了，发现 (\d+) 个工具$/) ?? raw.match(/^Connected, (\d+) tools available$/);

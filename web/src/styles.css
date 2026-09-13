@@ -954,19 +954,20 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--teal); outline-
 .loading-line { position: absolute; top: 0; left: 0; right: 0; height: 2px; z-index: 10; background: var(--teal-bg); overflow: hidden; }
 .loading-line::after { content: ''; display: block; width: 30%; height: 100%; background: var(--teal); animation: loading-slide 1s ease-in-out infinite alternate; }
 @keyframes loading-slide { to { transform: translateX(230%); } }
-.mobile-sidebar-toggle, .sidebar-scrim { display: none; }
+.mobile-sidebar-toggle, .sidebar-scrim, .map-scrim { display: none; }
 .modal { box-shadow: 0 20px 80px #00000026; padding: 26px; border: 1px solid var(--border); }
 .modal h3 { font-size: 18px; font-weight: 600; margin-bottom: 12px; }
 .modal.modal-sm { width: 380px; }
 @media (max-width: 1100px) { .sidebar { width: 184px; } .brand-sub { display: none; } }
 @media (max-width: 760px) {
-  .sidebar { position: fixed; inset: 0 auto 0 0; width: 240px; z-index: 42; transform: translateX(-100%); transition: transform .18s; }
+  .sidebar { position: fixed; inset: 0 auto 0 0; width: min(240px, calc(100vw - 44px)); z-index: 42; transform: translateX(-100%); }
   .sidebar-visible .sidebar { transform: translateX(0); }
   .sidebar-scrim { display: block; position: fixed; inset: 0; border: 0; background: #0005; z-index: 41; }
   .mobile-sidebar-toggle { display: grid; place-items: center; position: absolute; z-index: 11; top: 16px; left: 10px; width: 31px; height: 30px; border: 0; background: var(--bg); color: var(--muted); border-radius: 7px; font-size: 18px; }
   .center-header, .chat-header { padding-left: 49px !important; }
   .splitter { display: none; }
-  .app > .learning-map { position: absolute; right: 0; top: 0; bottom: 0; width: min(100vw, 370px) !important; z-index: 25; box-shadow: -12px 0 50px #0002; }
+  .map-scrim { display: block; position: fixed; inset: 0; border: 0; background: #0005; z-index: 24; }
+  .app > .learning-map { position: fixed; right: 0; top: 0; bottom: 0; width: min(calc(100vw - 44px), 370px) !important; min-width: 0; z-index: 25; box-shadow: -12px 0 50px #0002; }
   .settings-nav { width: 87px; padding-right: 8px; }
   .settings-body { gap: 10px; }
   .settings-nav button { font-size: 12px; padding: 8px 5px; }

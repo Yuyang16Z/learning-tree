@@ -1,7 +1,12 @@
 """Learning trees and portable, credential-free JSON backups."""
 
+import base64
+import binascii
+import hashlib
 import json
+from pathlib import PurePosixPath
 from typing import Literal
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -9,6 +14,14 @@ from sqlalchemy import delete
 from sqlmodel import Session, select
 
 from ..db import get_session
+from ..documents import (
+    MAX_FILE_BYTES,
+    MEDIA_TYPES,
+    DocumentAttachment,
+    DocumentParseError,
+    parse_document_limited,
+    safe_document_name,
+)
 from ..models import KnowledgeTree, Memory, MemoryEmbedding, Message, Node
 from ..schemas import NodeOut, TreeIn, TreeOut
 from ..service import get_messages
@@ -86,16 +99,25 @@ class PortableMessage(Portable):
     answered_by: str | None = Field(default=None, max_length=200)
     status: Literal["pending", "complete", "error", "interrupted"] = "complete"
     images: list[str] | None = None
+    document_ids: list[str] = Field(default_factory=list, max_length=4)
     reasoning: str | None = Field(default=None, max_length=1000000)
     steps: list[dict] | None = None
 
 
+class PortableDocument(Portable):
+    id: str = Field(min_length=1, max_length=100)
+    name: str = Field(min_length=1, max_length=240)
+    content_base64: str = Field(max_length=14 * 1024 * 1024)
+    sha256: str = Field(min_length=64, max_length=64)
+
+
 class PortableBackup(Portable):
     format: Literal["branch-learning"]
-    version: Literal[1]
+    version: Literal[1, 2]
     tree: PortableTree
     nodes: list[PortableNode] = Field(min_length=1, max_length=2000)
     messages: list[PortableMessage] = Field(max_length=12000)
+    documents: list[PortableDocument] = Field(default_factory=list, max_length=100)
 
 
 @router.post("/import", response_model=TreeOut)
@@ -105,7 +127,7 @@ def import_tree(body: dict, session: Session = Depends(get_session)) -> TreeOut:
     try:
         backup = PortableBackup.model_validate(body)
     except ValidationError:
-        raise HTTPException(422, "备份格式无效：需要学习树版本 1 的学习树 JSON") from None
+        raise HTTPException(422, "备份格式无效：需要学习树版本 1 或 2 的 JSON") from None
     nodes = {node.id: node for node in backup.nodes}
     messages = {message.id: message for message in backup.messages}
     if len(nodes) != len(backup.nodes) or len(messages) != len(backup.messages):
@@ -113,9 +135,20 @@ def import_tree(body: dict, session: Session = Depends(get_session)) -> TreeOut:
     roots = [node for node in backup.nodes if node.parent_id is None]
     if not roots:
         raise HTTPException(422, "备份缺少根节点")
+    documents = {doc.id: doc for doc in backup.documents}
+    if len(documents) != len(backup.documents):
+        raise HTTPException(422, "备份包含重复文档 ID")
+    if backup.version == 1 and (documents or any(m.document_ids for m in backup.messages)):
+        raise HTTPException(422, "文档附件需要版本 2 的备份")
     for message in backup.messages:
         if message.node_id not in nodes:
             raise HTTPException(422, "消息引用了不存在的节点")
+        if len(set(message.document_ids)) != len(message.document_ids) or any(
+            identifier not in documents for identifier in message.document_ids
+        ):
+            raise HTTPException(422, "消息引用了不存在或重复的文档")
+        if message.document_ids and message.role != "user":
+            raise HTTPException(422, "文档只能关联用户问题")
         if message.images and (
             len(message.images) > 8 or any(not x.startswith("data:image/") for x in message.images)
         ):
@@ -139,11 +172,44 @@ def import_tree(body: dict, session: Session = Depends(get_session)) -> TreeOut:
             node.source_start is not None and node.source_end <= node.source_start
         ):
             raise HTTPException(422, "备份的原文位置无效")
+    parsed_documents = []
+    referenced_ids = {identifier for m in backup.messages for identifier in m.document_ids}
+    if set(documents) != referenced_ids:
+        raise HTTPException(422, "备份包含未关联问题的文档")
+    for old in backup.documents:
+        try:
+            content = base64.b64decode(old.content_base64, validate=True)
+            if len(content) > MAX_FILE_BYTES or hashlib.sha256(content).hexdigest() != old.sha256:
+                raise ValueError()
+            name = safe_document_name(old.name)
+            sections, warnings = parse_document_limited(content, name)
+        except DocumentParseError as exc:
+            raise HTTPException(422, str(exc)) from None
+        except (ValueError, binascii.Error):
+            raise HTTPException(422, "备份文档内容或校验摘要无效") from None
+        parsed_documents.append((old, name, content, sections, warnings))
     # All validation happens before this transaction. Imported IDs are remapped,
     # never overwritten; request IDs and model credentials are not portable.
     tree = KnowledgeTree(title=backup.tree.title)
     session.add(tree)
     session.flush()
+    document_map = {}
+    for old, name, content, sections, warnings in parsed_documents:
+        identifier = str(uuid4())
+        document_map[old.id] = identifier
+        session.add(
+            DocumentAttachment(
+                id=identifier,
+                tree_id=tree.id,
+                name=name,
+                media_type=MEDIA_TYPES[PurePosixPath(name).suffix.lower()],
+                size=len(content),
+                sha256=hashlib.sha256(content).hexdigest(),
+                content=content,
+                sections=sections,
+                warnings=warnings,
+            )
+        )
     node_map = {}
     for old in backup.nodes:
         values = old.model_dump(
@@ -160,6 +226,7 @@ def import_tree(body: dict, session: Session = Depends(get_session)) -> TreeOut:
     message_map = {}
     for old in sorted(backup.messages, key=lambda m: m.id):
         values = old.model_dump(exclude={"id", "node_id"})
+        values["document_ids"] = [document_map[identifier] for identifier in old.document_ids]
         if values["status"] == "pending":
             values["status"] = "interrupted"
         message = Message(node_id=node_map[old.node_id].id, **values)
@@ -187,9 +254,15 @@ def export_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
     messages = session.exec(
         select(Message).where(Message.node_id.in_(node_ids)).order_by(Message.id)
     ).all()
-    return {
+    document_ids = {
+        identifier for message in messages for identifier in (message.document_ids or [])
+    }
+    documents = [session.get(DocumentAttachment, identifier) for identifier in sorted(document_ids)]
+    if any(doc is None or doc.tree_id != tree_id for doc in documents):
+        raise HTTPException(409, "文档来源缺失，请先检查附件，未导出不完整备份")
+    backup = {
         "format": "branch-learning",
-        "version": 1,
+        "version": 2 if documents else 1,
         "tree": {"title": tree.title},
         "nodes": [
             {
@@ -198,8 +271,27 @@ def export_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
             }
             for node in nodes
         ],
-        "messages": [message.model_dump(exclude={"created_at"}) for message in messages],
+        "messages": [
+            {
+                **message.model_dump(exclude={"created_at", "document_ids"}),
+                **({"document_ids": message.document_ids or []} if documents else {}),
+            }
+            for message in messages
+        ],
     }
+    if documents:
+        backup["documents"] = [
+            {
+                "id": doc.id,
+                "name": doc.name,
+                "content_base64": base64.b64encode(doc.content).decode("ascii"),
+                "sha256": doc.sha256,
+            }
+            for doc in documents
+        ]
+    if len(json.dumps(backup, ensure_ascii=False).encode()) > 25 * 1024 * 1024:
+        raise HTTPException(413, "备份含附件后超过 25 MB，请分成较小的主题")
+    return backup
 
 
 @router.delete("/{tree_id}")
@@ -223,6 +315,7 @@ def delete_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
             session.delete(memory)
         for node in nodes:
             session.delete(node)
+        session.execute(delete(DocumentAttachment).where(DocumentAttachment.tree_id == tree_id))
         session.delete(tree)
         session.commit()
     return {"deleted": tree_id}

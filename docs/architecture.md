@@ -13,6 +13,7 @@ LearningTree uses React + TypeScript and FastAPI + SQLite/SQLModel. Normal start
 | `app/context.py` | Budget-aware active-path assembly and scoped source rereading. |
 | `app/context_budget.py` | Local request-size estimates and protocol-preserving fitting before provider calls. |
 | `app/context_compaction.py` | Cited, complete-sentence extraction and a bounded process-local cache. |
+| `app/documents.py` | Local document storage, bounded parsing, previews and original downloads. |
 | `app/retrieval.py` | Source filtering, keyword/vector ranking, fusion, deduplication and memory budgets. |
 | `app/semantic_models.py` | Pinned local embedding/reranker models, cached startup and explicit preparation. |
 | `app/llm.py`, `app/anthropic_provider.py` | Provider request conversion and deterministic demo behavior. |
@@ -29,6 +30,14 @@ The map groups consecutive follow-ups into topic cards; expanded turns navigate 
 Branch titles have an independent `title_state`: empty, pending, ai, fallback, manual, or legacy. The first branch question immediately supplies a provisional label; a separate worker asks the same model for a short title. A 20-second settlement deadline ignores late results. Title failures never change answer status. The map polls only pending title metadata, with navigation guards and a 30-second limit, without resetting chat state or the camera. Startup replaces recognizable legacy source-prefix labels with the first question, using no model calls. Title job state is internal and excluded from version-1 exports; imported labels are treated as explicit titles.
 
 Context follows the current ancestry. Short eligible histories remain complete. Longer histories retain recent complete question/answer groups within the selected model's input budget; older sources contribute categorized original sentences with provenance and explicit omission notices. The current question, its images, selected passage and current learning note remain mandatory. Factual memory is restricted to the ancestor path, without silently mixing siblings. Understanding is brought back as an editable message draft.
+
+## Question documents
+
+An uploaded document keeps its original bytes, extracted sections and metadata in SQLite. Messages carry document IDs; upload alone makes no provider request. PDF text layers, Word body paragraphs/tables and UTF-8 text files are parsed locally with size and extraction bounds. Parsed text remains reference material; it is not executable code or an independent instruction source.
+
+Question assembly resolves document references on the current path and passes budgeted excerpts into the configured answer model. Eligible originals can be reread in pages through the source reader, whose allowed document IDs are fixed to the current request. Sibling branches do not gain access through a model-supplied ID. This document path is separate from semantic `Memory` retrieval and MCP learning files.
+
+Retry retains the stored question's document references; revision creates another question with its chosen references. Document-bearing tree exports use version 2 with original bytes and integrity hashes. Import validates and reparses those bytes and remaps IDs, while version-1 backups remain supported. See [formats, storage, sending and limits](documents.md).
 
 ## Context budgeting and compaction
 
@@ -78,12 +87,14 @@ OpenAI-compatible Chat Completions and Anthropic Messages use distinct message, 
 
 MCP sessions persist between calls, preserving browser/thinking state; calls into a session are serialized. A timed-out or uncertain execution is not blindly replayed. Shutdown closes the runtime. Optional dependencies live under `integrations/mcp/node_modules` and `.runtime/mcp-python`. Registration saves machine-specific paths in SQLite; moving the project requires re-registration.
 
-The file preset exposes `学习资料/`; MCP memory and browser output live in `mcp-data/`. SQLite contains conversations, configurations and learning memory. Browser storage contains drafts, positions and the `learning-tree.locale` preference (`zh-CN` or `en`). React context updates labels without remounting the workspace; user content is not translated.
+The file preset exposes `学习资料/`; MCP memory and browser output live in `mcp-data/`. SQLite contains conversations, document originals and extracted sections, configurations and learning memory. Browser storage contains drafts, positions and the `learning-tree.locale` preference (`zh-CN` or `en`). React context updates labels without remounting the workspace; user content is not translated.
 
-Schema upgrades are additive and idempotent. Future complex transformations should use versioned migrations with restore tests. JSON exports retain the `branch-learning` version-1 identifier for compatibility, remap IDs on import, and exclude model credentials and MCP definitions.
+Schema upgrades are additive and idempotent. Future complex transformations should use versioned migrations with restore tests. JSON exports retain the `branch-learning` format identifier, use version 2 when documents are present and version 1 otherwise, remap IDs on import, and exclude model credentials and MCP definitions.
 
 ## Verification
 
 Backend tests cover ancestry, recovery, import/export, provider conversion, search errors, MCP runtime and memory retrieval boundaries. Retrieval regression tests use controlled model fixtures for ranking and failure cases. Frontend tests cover streams, drafts, map state and localization. Browser smoke tests use a temporary database, deterministic answer model and random loopback port; model-setup UI transitions use route fixtures rather than real downloads. `manage.py check` and `e2e` force lexical mode and use isolated databases, without contacting model services. CI installs committed lockfiles and checks both layers.
+
+The document browser smoke uses generated text/Markdown files to check removal, upload progress, previews, exact original downloads, sending, reload, follow-ups, revision and version-2 export/import. PDF/Word parsing and document context/recovery rules are checked separately in backend tests; browser mock answers do not demonstrate document comprehension.
 
 After the optional `retrieval` extra is installed, `uv run python scripts/prepare_retrieval.py --smoke` separately runs actual local embedding and reranking models on fixed synthetic Chinese and English examples. It may download missing public weights during preparation, but never reads the chat database or calls an answer-model API. This is an inference smoke check, not a comprehensive retrieval or answer-quality evaluation.

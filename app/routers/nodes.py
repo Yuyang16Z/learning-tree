@@ -12,12 +12,20 @@ from uuid import uuid4
 from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import delete
+from sqlalchemy.orm import defer
 from sqlmodel import Session, select
 
 from ..context import BASE_SYSTEM, build_context, context_messages
 from ..context_budget import ContextBudgetExceeded, ContextPolicy
 from ..context_sources import SOURCE_TOOL_DEF, SOURCE_TOOL_NAME, make_source_reader
 from ..db import engine, get_session
+from ..document_context import (
+    DOCUMENT_TOOL_DEF,
+    DOCUMENT_TOOL_NAME,
+    document_snapshot,
+    make_document_reader,
+)
+from ..documents import DocumentAttachment, document_summary, resolve_documents
 from ..llm import LLMSpec, complete, run_agent, stream_chat
 from ..models import Memory, MemoryEmbedding, Message, Node
 from ..schemas import AskIn, BranchIn, ExplainIn, NodePatch, StopIn, TitleIn
@@ -97,7 +105,22 @@ def node_metadata(node: Node, messages: list[Message] | None = None) -> dict:
     }
 
 
-def _qa_rows(node: Node, messages: list[Message]) -> list[dict]:
+def _message_documents(session: Session, message: Message | None) -> list[dict]:
+    if message is None:
+        return []
+    return [
+        document_summary(doc).model_dump()
+        for identifier in (message.document_ids or [])
+        if (
+            doc := session.get(
+                DocumentAttachment, identifier, options=[defer(DocumentAttachment.content)]
+            )
+        )
+        is not None
+    ]
+
+
+def _qa_rows(node: Node, messages: list[Message], session: Session) -> list[dict]:
     # Preserve all legacy Q/A pairs without changing message or branch IDs.
     pairs: list[tuple[Message | None, list[Message]]] = []
     for message in messages:
@@ -126,6 +149,7 @@ def _qa_rows(node: Node, messages: list[Message]) -> list[dict]:
                 "answer_message_id": answer.id if answer else None,
                 "question": user.content if user else None,
                 "images": user.images if user else None,
+                "documents": _message_documents(session, user),
                 "answer": answer.content if answer else None,
                 "reasoning": answer.reasoning if answer else None,
                 "steps": answer.steps if answer else None,
@@ -158,7 +182,13 @@ def get_node(node_id: int, session: Session = Depends(get_session)) -> dict:
         "seed_text": node.seed_text,
         "summary": node.summary,
         **node_metadata(node, msgs),
-        "messages": [m.model_dump(exclude={"created_at", "node_id"}) for m in msgs],
+        "messages": [
+            {
+                **m.model_dump(exclude={"created_at", "node_id"}),
+                "documents": _message_documents(session, m),
+            }
+            for m in msgs
+        ],
     }
 
 
@@ -168,7 +198,7 @@ def get_thread_route(node_id: int, session: Session = Depends(get_session)) -> d
         "nodes": [
             row
             for node, messages in get_thread(session, _get(session, node_id))
-            for row in _qa_rows(node, messages)
+            for row in _qa_rows(node, messages, session)
         ]
     }
 
@@ -571,11 +601,17 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 raise HTTPException(409, "修改问题请使用 revise，重试会沿用原问题")
             target = node
             question_text, question_images = question.content, question.images
+            question_documents = resolve_documents(
+                session, question.document_ids or [], node.tree_id
+            )
             current_messages = [m for m in previous_messages if m.id < question.id]
         else:
             question_text, question_images = body.question.strip(), body.images
-            if not question_text and not question_images:
+            question_documents = resolve_documents(session, body.document_ids, node.tree_id)
+            if not question_text and not question_images and not question_documents:
                 raise HTTPException(422, "请输入问题")
+            if not question_text and question_documents:
+                question_text = "请概括所附文档的主要内容，并注明文件名及页码或段落来源。"
             if body.mode == "revise":
                 original_question = next(
                     (
@@ -651,6 +687,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                         status=previous.status,
                         answered_by=previous.answered_by,
                         images=previous.images,
+                        document_ids=previous.document_ids,
                         reasoning=previous.reasoning,
                         steps=previous.steps,
                     )
@@ -658,7 +695,11 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
         if body.mode != "retry":
             session.add(
                 Message(
-                    node_id=target.id, role="user", content=question_text, images=question_images
+                    node_id=target.id,
+                    role="user",
+                    content=question_text,
+                    images=question_images,
+                    document_ids=[doc.id for doc in question_documents],
                 )
             )
         session.commit()
@@ -669,6 +710,30 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
         ]
         context_target = _snapshot(target)
         context_history = [_snapshot(m) for m in current_messages]
+        document_ids = list(
+            dict.fromkeys(
+                [
+                    *[doc.id for doc in question_documents],
+                    *[
+                        identifier
+                        for _, messages in reversed(ancestors + [(context_target, context_history)])
+                        for message in context_messages(messages)
+                        for identifier in (message.document_ids or [])
+                    ],
+                ]
+            )
+        )
+        context_documents = [
+            document_snapshot(doc)
+            for identifier in document_ids
+            if (
+                doc := session.get(
+                    DocumentAttachment, identifier, options=[defer(DocumentAttachment.content)]
+                )
+            )
+            is not None
+            and doc.tree_id == tree_id
+        ]
         memory_source_ids = [n.id for n, _ in ancestors] + [target_id]
         memory_quote = target.seed_text or ""
         allowed_message_ids = {
@@ -702,6 +767,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 question_images,
                 policy=policy,
                 protocol=spec.protocol,
+                documents=context_documents,
             )
             if generation.stop.is_set():
                 return
@@ -722,6 +788,16 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 return
             with Session(engine) as tool_session:
                 tool_defs, tool_router = assemble_tools(tool_session, requested_tools)
+            document_reader = None
+            if context_documents and not is_mock:
+                tool_defs = [*tool_defs, DOCUMENT_TOOL_DEF]
+                document_reader = make_document_reader(
+                    engine,
+                    target_id,
+                    tree_id,
+                    set(document_ids),
+                    max_chars=max(32, min(1200, (policy.tool_reserve - 1024) // 4)),
+                )
             if generation.stop.is_set():
                 return
             context_stats = {}
@@ -737,6 +813,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 tool_defs=context_defs,
                 protocol=spec.protocol,
                 diagnostics=context_stats,
+                documents=context_documents,
             )
             if context_stats["compacted"] and not context_defs and not is_mock:
                 context_defs = [SOURCE_TOOL_DEF]
@@ -751,6 +828,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     tool_defs=context_defs,
                     protocol=spec.protocol,
                     diagnostics=context_stats,
+                    documents=context_documents,
                 )
             source_reader = None
             # Tool results can force compaction on later rounds even when the
@@ -779,6 +857,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                         raise RuntimeError("generation cancelled before tool execution")
                     if name == SOURCE_TOOL_NAME and source_reader is not None:
                         return source_reader(arguments)
+                    if name == DOCUMENT_TOOL_NAME and document_reader is not None:
+                        return document_reader(arguments)
                     return execute(name, arguments)
 
                 stream = run_agent(

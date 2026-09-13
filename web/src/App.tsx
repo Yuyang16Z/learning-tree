@@ -14,6 +14,7 @@ import type {
   TreeNode,
   SourceAnchor,
   NavigationAnchor,
+  DocumentSummary,
 } from "./types";
 import { Sidebar } from "./components/Sidebar";
 import { ChatPane } from "./components/ChatPane";
@@ -36,7 +37,7 @@ export default function App() {
   const [treeNodes, setTreeNodes] = useState<TreeNode[]>([]);
   const [activeNodeId, setActiveNodeId] = useState<number | null>(null);
   const [thread, setThread] = useState<ThreadNode[]>([]);
-  const [rightOpen, setRightOpen] = useState(() => window.innerWidth >= 760 && readSaved("bl-map-open", window.innerWidth >= 1100));
+  const [rightOpen, setRightOpen] = useState(() => window.innerWidth > 760 && readSaved("bl-map-open", window.innerWidth >= 1100));
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [newTreeOpen, setNewTreeOpen] = useState(false);
   const [addModelOpen, setAddModelOpen] = useState(false);
@@ -50,6 +51,7 @@ export default function App() {
   const [liveSteps, setLiveSteps] = useState<ToolStep[]>([]);
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
   const [sendingImages, setSendingImages] = useState<string[]>([]);
+  const [sendingDocuments, setSendingDocuments] = useState<DocumentSummary[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [theme, setTheme] = useState<"light" | "dark" | "system">(
     () => (localStorage.getItem("bl-theme") as "light" | "dark" | "system") || "system",
@@ -62,6 +64,7 @@ export default function App() {
   const mapRevision = useRef(0);
   const [navigationAnchor, setNavigationAnchor] = useState<NavigationAnchor | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [compactLayout, setCompactLayout] = useState(() => window.matchMedia("(max-width: 760px)").matches);
   const [busyNavigation, setBusyNavigation] = useState(false);
   const streamTargetRef = useRef<number | null>(null);
   const requestRef = useRef<{ from: number; origin: number; tree: number; requestId: string } | null>(null);
@@ -69,6 +72,28 @@ export default function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const importRef = useRef<HTMLInputElement>(null);
   const pendingTitleIds = treeNodes.filter(node => node.title_state === "pending").map(node => node.id).join(",");
+
+  useEffect(() => {
+    const breakpoint = window.matchMedia("(max-width: 760px)");
+    const resize = (event: MediaQueryListEvent) => {
+      setCompactLayout(event.matches);
+      setSidebarOpen(false);
+      // A panel that was open beside the chat must not cover it after a resize.
+      // Automatic collapsing preserves the user's saved desktop preference.
+      setRightOpen(event.matches ? false : readSaved("bl-map-open", window.innerWidth >= 1100));
+    };
+    breakpoint.addEventListener("change", resize);
+    return () => breakpoint.removeEventListener("change", resize);
+  }, []);
+
+  useEffect(() => {
+    if (!compactLayout || (!rightOpen && !sidebarOpen)) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { setRightOpen(false); setSidebarOpen(false); }
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [compactLayout, rightOpen, sidebarOpen]);
 
   useEffect(() => {
     if (activeTreeId == null || !pendingTitleIds) return;
@@ -232,7 +257,7 @@ export default function App() {
     } catch (e) { setErr(String((e as Error).message ?? e)); }
   }
 
-  async function onAsk(payload: { question: string; images?: string[]; tools?: string[]; deep?: boolean; mode?: 'continue' | 'retry' | 'revise'; nodeId?: number; question_message_id?: number; onAccepted?: (nodeId: number) => void }): Promise<boolean> {
+  async function onAsk(payload: { question: string; images?: string[]; document_ids?: string[]; documents?: DocumentSummary[]; tools?: string[]; deep?: boolean; mode?: 'continue' | 'retry' | 'revise'; nodeId?: number; question_message_id?: number; onAccepted?: (nodeId: number) => void }): Promise<boolean> {
     const fromId = payload.nodeId ?? focusRef.current;
     const treeId = treeRef.current;
     if (!fromId || !treeId || !activeModelId || abortRef.current || busyNavigation) return false;
@@ -242,7 +267,7 @@ export default function App() {
     abortRef.current = ctrl;
     requestRef.current = { from: fromId, origin, tree: treeId, requestId };
     streamTargetRef.current = null;
-    setPendingQuestion(payload.question); setSendingImages(payload.images ?? []);
+    setPendingQuestion(payload.question); setSendingImages(payload.images ?? []); setSendingDocuments(payload.documents ?? []);
     setLive(''); setLiveReasoning(''); setLiveSteps([]);
     setStreaming(true); setStreamFromId(origin); setErr(null);
     let succeeded = false;
@@ -255,7 +280,7 @@ export default function App() {
     try {
       const meta = await api.ask(fromId, {
         question: payload.question, config_id: activeModelId,
-        images: payload.images, tools: payload.tools, deep_think: payload.deep,
+        images: payload.images, document_ids: payload.document_ids, tools: payload.tools, deep_think: payload.deep,
         mode: payload.mode, request_id: requestId, question_message_id: payload.question_message_id,
       }, {
         onStart: meta => { streamTargetRef.current = meta.node_id ?? fromId; acceptQuestion(streamTargetRef.current); void refreshTree(treeId).catch(() => {}); },
@@ -291,7 +316,7 @@ export default function App() {
       }
       abortRef.current = null; requestRef.current = null; streamTargetRef.current = null;
       setStreaming(false); setStreamFromId(null); setLive(''); setLiveReasoning('');
-      setLiveSteps([]); setPendingQuestion(null); setSendingImages([]);
+      setLiveSteps([]); setPendingQuestion(null); setSendingImages([]); setSendingDocuments([]);
     }
     return succeeded;
   }
@@ -426,7 +451,7 @@ export default function App() {
 
   return (
     <div className={`app${sidebarOpen ? ' sidebar-visible' : ''}`}>
-      <button className="mobile-sidebar-toggle" onClick={() => setSidebarOpen(v => !v)} aria-label={sidebarOpen ? t("关闭主题列表", "Close topic list") : t("打开主题列表", "Open topic list")}>☰</button>
+      <button className="mobile-sidebar-toggle" onClick={() => { setSidebarOpen(v => !v); setRightOpen(false); }} aria-label={sidebarOpen ? t("关闭主题列表", "Close topic list") : t("打开主题列表", "Open topic list")} aria-expanded={sidebarOpen}>☰</button>
       {sidebarOpen && <button className="sidebar-scrim" onClick={() => setSidebarOpen(false)} aria-label={t("关闭主题列表", "Close topic list")} />}
       <input type="file" accept=".json,application/json" hidden ref={importRef} onChange={async e => {
         const file = e.currentTarget.files?.[0]; e.currentTarget.value = '';
@@ -464,6 +489,7 @@ export default function App() {
         liveSteps={liveSteps}
         pendingQuestion={pendingQuestion}
         sendingImages={sendingImages}
+        sendingDocuments={sendingDocuments}
         streaming={streaming}
         loading={busyNavigation}
         showStream={streaming && activeTreeId === requestRef.current?.tree && (activeNodeId === streamFromId || activeNodeId === streamTargetRef.current)}
@@ -477,18 +503,19 @@ export default function App() {
         onBranch={onBranch}
         onDeleteNode={onDeleteNode}
         rightOpen={rightOpen}
-        onToggleRight={() => setRightOpen(o => { saveValue("bl-map-open", !o); return !o; })}
+        onToggleRight={() => { setSidebarOpen(false); setRightOpen(o => { saveValue("bl-map-open", !o); return !o; }); }}
         onAddMock={addMock}
         mcpServers={mcpServers.filter((s) => s.enabled)}
         onTestMcp={(id) => api.testMcp(id)}
       />
       </div>
+      {compactLayout && rightOpen && <button className="map-scrim" onClick={() => setRightOpen(false)} aria-label={t("关闭学习树面板", "Close learning tree panel")} />}
       {rightOpen && <div className="splitter" onMouseDown={startResize} />}
       {rightOpen && (
         <LearningMap
           nodes={treeNodes}
           activeId={activeNodeId}
-          onSelect={selectNode}
+          onSelect={id => { if (compactLayout) setRightOpen(false); void selectNode(id); }}
           onDelete={onDeleteNode}
           onCollapse={() => { setRightOpen(false); saveValue("bl-map-open", false); }}
           width={rightWidth}

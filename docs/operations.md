@@ -73,12 +73,13 @@ For a tagged version, see the corresponding [release notes](releases/v0.2.0.md).
 
 For full recovery, stop the app, keep a copy of the current data file, and copy a chosen private backup to the configured database path. Start one backend. A database restore does not restore browser drafts, learning files or MCP memory; back those up separately when moving machines.
 
-Tree JSON import creates a new tree and remaps references. Limits are 25 MB, 2,000 nodes and 12,000 messages. Automatic preference/factual memory and MCP memory are not included. Exported conversations can still be private even though model keys are excluded.
+Tree JSON import creates a new tree and remaps references. Limits are 25 MiB, 2,000 nodes and 12,000 messages. Backups containing question documents use version 2, include original bytes and integrity hashes, and are reparsed on import; version-1 backups remain supported. Embedded originals count toward the JSON limit, so large collections may need a private SQLite backup. Automatic preference/factual memory and MCP memory are not included. Exported conversations and documents can still be private even though model keys are excluded. See [document formats and data flow](documents.md).
 
 ## Troubleshooting
 
 - **No model:** add one in Settings, or run `manage.py dev` for the offline demo.
 - **Old UI:** refresh after rebuilding/restarting. Clearing browser storage also removes drafts and preferences.
+- **Document upload rejected:** use a supported text format, a text-layer PDF or a `.docx` file within the documented limits. Convert plain text to UTF-8, decrypt protected files, or split large inputs. Scanned pages require a separate OCR step; see [document limits](documents.md#formats-and-limits).
 - **Context budget exceeded:** review the model's Advanced settings, then reduce oversized mandatory inputs or tools if the configured window is already correct. See [model context settings](#model-context-settings). A provider can still reject a request that passes the local estimate because tokenization and image accounting differ.
 - **Semantic retrieval is not installed:** run `uv run python scripts/manage.py retrieval` and restart. This installs optional Python packages as well as weights; the settings page does not install Python packages.
 - **Semantic models are unavailable:** after installing the optional packages, use **Settings → Memory → Prepare / retry**, or run `uv run python scripts/prepare_retrieval.py --smoke`. Preparation needs access to public Hugging Face model files. If a network or model error occurs, basic chat and keyword retrieval remain available. Retry later; no new model API key is required.

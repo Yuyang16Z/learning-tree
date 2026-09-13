@@ -28,9 +28,16 @@ export interface TreeNode extends LearningFields {
   seed_text: string | null; has_summary: boolean;
 }
 export interface ToolStep { tool: string; result: string | null }
+export interface DocumentSummary {
+  id: string; name: string; media_type: string; size: number; characters: number; warnings: string[];
+}
+export interface DocumentDetail extends DocumentSummary {
+  sections: { label: string; text: string }[];
+}
 export interface Message {
   id: number; role: 'user' | 'assistant'; content: string; answered_by: string | null;
   images?: string[] | null; reasoning?: string | null; steps?: ToolStep[] | null;
+  documents?: DocumentSummary[];
 }
 export interface NodeDetail extends LearningFields {
   id: number; tree_id: number; parent_id: number | null; title: string;
@@ -41,6 +48,7 @@ export interface ThreadNode extends LearningFields {
   question: string | null; images: string[] | null; answer: string | null;
   reasoning: string | null; steps: ToolStep[] | null; answered_by: string | null;
   question_message_id?: number | null; answer_message_id?: number | null;
+  documents?: DocumentSummary[];
   attempts?: { message_id: number; status: string; content: string }[];
 }
 export type ModelProtocol = 'openai' | 'anthropic';

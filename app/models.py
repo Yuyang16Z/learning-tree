@@ -99,6 +99,7 @@ class Message(SQLModel, table=True):
     answered_by: str | None = None  # assistant 专用：模型显示名
     # 多模态：用户消息带的图片（data URI 列表），会随脊柱一起回传给模型
     images: list | None = Field(default=None, sa_column=Column(JSON))
+    document_ids: list[str] | None = Field(default=None, sa_column=Column(JSON))
     # 深度思考：assistant 的思考过程（推理模型的 reasoning_content）
     reasoning: str | None = None
     # 工具调用步骤：[{"tool":..,"args":..,"result":..}]，供前端折叠展示

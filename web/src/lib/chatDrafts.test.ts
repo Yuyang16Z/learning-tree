@@ -28,4 +28,17 @@ describe("accepted chat drafts", () => {
   it("keeps both node drafts when the destination already has one", () => {
     expect(moveFollowupDraft(sent, { key: "tree:1:node:2", text: "该节点自己的草稿", images: [] })).toBeNull();
   });
+  it("does not clear documents attached while an earlier submission was being accepted", () => {
+    const document = { id: "a", name: "notes.txt", media_type: "text/plain", size: 4, characters: 4, warnings: [] };
+    const changed = { ...sent, documents: [document] };
+    expect(clearAcceptedDraft(changed, sent)).toBe(changed);
+    expect(clearAcceptedDraft(changed, { ...changed })).toEqual({ key: sent.key, text: "", images: [] });
+  });
+  it("moves document-only drafts but does not overwrite a destination with existing documents", () => {
+    const document = { id: "a", name: "notes.txt", media_type: "text/plain", size: 4, characters: 4, warnings: [] };
+    const source = { key: "A", text: "", images: [], documents: [document] };
+    const target = { key: "B", text: "", images: [] };
+    expect(moveFollowupDraft(source, target)?.target.documents).toEqual([document]);
+    expect(moveFollowupDraft(sent, { ...target, documents: [document] })).toBeNull();
+  });
 });

@@ -10,6 +10,7 @@ from sqlmodel import Session, select
 
 from .config import settings
 from .db import engine, init_db
+from .documents import router as document_router
 from .models import ModelConfig
 from .routers import mcp_router, memory_router, models_router, nodes, trees
 
@@ -61,6 +62,9 @@ app.add_middleware(
 for module in (models_router, trees, nodes, mcp_router, memory_router):
     app.include_router(module.router)
     app.include_router(module.router, prefix="/api", include_in_schema=False)
+
+app.include_router(document_router)
+app.include_router(document_router, prefix="/api", include_in_schema=False)
 
 
 @app.get("/health")

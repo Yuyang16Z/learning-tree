@@ -20,6 +20,9 @@ describe("localized application diagnostics", () => {
       "连上了，发现 14 个工具", "请求失败（502），请重试。",
       "API 地址需要以 https:// 或 http:// 开头。", "保存失败，理解草稿已保留。",
       "启动参数必须是字符串数组；无参数时填写 []。",
+      "PDF 没有可提取的文字，可能是扫描件；暂不支持 OCR，请上传文字版。",
+      "第 1, 3 页没有可提取的文字（可能为空白页或扫描图片）；未进行 OCR。",
+      "文档不存在或不属于当前学习主题，请重新上传。",
     ]) {
       const english = localizeError(original, "en");
       expect(english).not.toBe(original);

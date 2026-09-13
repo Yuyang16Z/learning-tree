@@ -241,6 +241,7 @@ def e2e() -> None:
         with background(server_args(port), env) as api:
             wait_ready(base, api)
             run([executable("node"), "scripts/smoke.cjs"], env=env)
+            run([executable("node"), "scripts/document_smoke.cjs"], env=env)
 
 
 def main() -> None:

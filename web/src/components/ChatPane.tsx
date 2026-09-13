@@ -5,12 +5,14 @@ import { api } from "../api";
 import { useI18n } from "../i18n";
 import { localizeError, mcpDisplayName } from "../i18n/workspace";
 import { clearAcceptedDraft, moveFollowupDraft, type ChatDraft as Draft } from "../lib/chatDrafts";
-import type { McpServer, ModelCfg, ThreadNode, ToolStep } from "../types";
+import { DOCUMENT_ACCEPT, documentMetadata, DocumentUploadQueue } from "../lib/documentUploads";
+import { DocumentCards } from "./DocumentCards";
+import type { DocumentSummary, McpServer, ModelCfg, ThreadNode, ToolStep } from "../types";
 import "./ChatPane.css";
 
 type Anchor = { source_message_id?: number; source_start?: number; source_end?: number; learning_note?: string };
 type Destination = { messageId?: number; start?: number; end?: number; text?: string };
-type Ask = { question: string; images?: string[]; tools?: string[]; deep?: boolean; mode?: "continue" | "retry" | "revise"; nodeId?: number; question_message_id?: number; onAccepted?: (nodeId: number) => void };
+type Ask = { question: string; images?: string[]; document_ids?: string[]; documents?: DocumentSummary[]; tools?: string[]; deep?: boolean; mode?: "continue" | "retry" | "revise"; nodeId?: number; question_message_id?: number; onAccepted?: (nodeId: number) => void };
 interface Props {
   thread: ThreadNode[];
   treeTitle: string;
@@ -24,6 +26,7 @@ interface Props {
   liveSteps: ToolStep[];
   pendingQuestion: string | null;
   sendingImages: string[];
+  sendingDocuments: DocumentSummary[];
   streaming: boolean;
   showStream: boolean;
   err: string | null;
@@ -62,13 +65,16 @@ function readDraft(key: string): Draft {
   if (cached) return cached;
   try {
     const value = JSON.parse(localStorage.getItem(key) ?? "null");
-    if (value && typeof value.text === "string") return { ...value, key, images: Array.isArray(value.images) ? value.images : [] };
+    if (value && typeof value.text === "string") return { ...value, key, images: Array.isArray(value.images) ? value.images : [], documents: documentMetadata(value.documents),
+      previous: value.previous ? { text: value.previous.text ?? "", images: value.previous.images ?? [], documents: documentMetadata(value.previous.documents) } : undefined };
   } catch { /* Storage may be unavailable; editing still works in memory. */ }
   return { key, text: "", images: [] };
 }
 function writeDraft(draft: Draft) {
+  draft = { ...draft, documents: documentMetadata(draft.documents),
+    previous: draft.previous ? { ...draft.previous, documents: documentMetadata(draft.previous.documents) } : undefined };
   draftCache.set(draft.key, draft);
-  if (!draft.text && !draft.images.length && !draft.revisionId) localStorage.removeItem(draft.key);
+  if (!draft.text && !draft.images.length && !draft.documents?.length && !draft.revisionId) localStorage.removeItem(draft.key);
   else localStorage.setItem(draft.key, JSON.stringify(draft));
 }
 
@@ -89,7 +95,8 @@ function ImageStrip({ images }: { images: string[] }) {
   const { t } = useI18n();
   return <div className="chat-images">{images.map((src, i) => <a href={src} target="_blank" rel="noreferrer" key={i}><img src={src} alt={t("附图 {number}", "Attachment {number}", { number: i + 1 })} /></a>)}</div>;
 }
-function Icon({ name }: { name: "tree" | "image" | "tools" | "export" | "arrow" }) {
+function Icon({ name }: { name: "tree" | "image" | "tools" | "export" | "arrow" | "document" }) {
+  if (name === "document") return <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" /><path d="M14 3v6h6M8 13h8M8 17h5" /></svg>;
   const paths = { tree: <><path d="M6 4v14m0-9h8a4 4 0 0 0 4-4" /><circle cx="6" cy="19" r="2" /><circle cx="18" cy="4" r="2" /></>, image: <><rect x="3" y="3" width="18" height="18" rx="4" /><circle cx="8" cy="8" r="1" /><path d="m3 17 6-6 4 4 3-3 5 5" /></>, tools: <><path d="M4 7h16M4 17h16" /><circle cx="9" cy="7" r="2" fill="var(--bg)" /><circle cx="15" cy="17" r="2" fill="var(--bg)" /></>, export: <><path d="M12 3v12m-4-4 4 4 4-4M4 15v5h16v-5" /></>, arrow: <><path d="M12 19V5m-5 5 5-5 5 5" /></> };
   return <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
@@ -138,7 +145,7 @@ function markSource(element: HTMLElement, anchor: Destination) {
 
 export function ChatPane(props: Props) {
   const { locale, t } = useI18n();
-  const { thread, treeTitle, hasNode, loading = false, activeNodeId, activeTreeId, focusedSeed, live, liveReasoning, liveSteps, pendingQuestion, sendingImages, streaming, showStream, err, models, activeModelId, onModelChange, onOpenSettings, onAsk, onStop, onBranch, onNavigate, navigationAnchor, rightOpen, onToggleRight, onAddMock, mcpServers, onExport, onNew } = props;
+  const { thread, treeTitle, hasNode, loading = false, activeNodeId, activeTreeId, focusedSeed, live, liveReasoning, liveSteps, pendingQuestion, sendingImages, sendingDocuments, streaming, showStream, err, models, activeModelId, onModelChange, onOpenSettings, onAsk, onStop, onBranch, onNavigate, navigationAnchor, rightOpen, onToggleRight, onAddMock, mcpServers, onExport, onNew } = props;
   const nearestBranch = [...thread].reverse().find(node => node.seed_text && (node.source_node_id ?? node.parent_id) != null);
   const noteKey = `bl-note-draft-v2:${activeTreeId}:${nearestBranch?.node_id ?? "none"}`;
   const draftKey = draftKeyFor(activeTreeId, activeNodeId);
@@ -159,11 +166,14 @@ export function ChatPane(props: Props) {
   const [noteSaving, setNoteSaving] = useState(false);
   const [noteError, setNoteError] = useState<string | null>(null);
   const [savedNotes, setSavedNotes] = useState<Record<string, string>>({});
+  const [, setUploadVersion] = useState(0);
   const activeNoteKeyRef = useRef(noteKey);
   activeNoteKeyRef.current = noteKey;
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const documentFileRef = useRef<HTMLInputElement>(null);
+  const documentUploadsRef = useRef<DocumentUploadQueue | null>(null);
   const toolMenuRef = useRef<HTMLDivElement>(null);
   const selectionRef = useRef<HTMLDivElement>(null);
   const draftRef = useRef(draft);
@@ -178,6 +188,16 @@ export function ChatPane(props: Props) {
   const sendingRef = useRef(false);
   const followupRef = useRef<{ sourceKey: string; targetKey: string } | null>(null);
   activeKeyRef.current = draftKey;
+  if (!documentUploadsRef.current) documentUploadsRef.current = new DocumentUploadQueue({
+    documents: key => readDraft(key).documents ?? [],
+    upload: api.uploadDocument,
+    complete: (key, document) => {
+      const current = readDraft(key);
+      commitDraft({ ...current, documents: documentMetadata([...(current.documents ?? []), document]) });
+    },
+    changed: () => setUploadVersion(version => version + 1),
+  });
+  const documentUploads = documentUploadsRef.current;
 
   useEffect(() => {
     let savedDraft: string | null = null;
@@ -290,6 +310,15 @@ export function ChatPane(props: Props) {
     };
     reader.readAsDataURL(file);
   }
+  function addDocument(file: File) {
+    if (activeNodeId == null || loading) return;
+    const error = documentUploads.enqueue(draftKey, activeNodeId, file);
+    if (error) setLocalError(error === "limit" ? t("每次提问最多附加 4 份文档，请先移除一份。", "Attach up to 4 documents per question. Remove one first.")
+      : error === "size" ? t("每份文档不能超过 10 MB。", "Each document must be 10 MB or smaller.")
+      : error === "empty" ? t("这个文件是空的，请选择有内容的文档。", "This file is empty. Choose a document with content.")
+      : t("支持 PDF、Word（.docx）、TXT、Markdown、CSV、TSV、JSON 和 LOG。旧版 .doc 请另存为 .docx。", "Use PDF, Word (.docx), TXT, Markdown, CSV, TSV, JSON or LOG. Save older .doc files as .docx first."));
+    else setLocalError(null);
+  }
   function captureSelection() {
     const selected = window.getSelection();
     if (!selected || selected.isCollapsed || !selected.rangeCount) { setSelection(null); selectionRequestRef.current++; return; }
@@ -351,17 +380,20 @@ export function ChatPane(props: Props) {
   }
 
   function editNode(node: ThreadNode) {
-    updateDraft({ text: node.question ?? "", images: node.images ?? [], revisionId: node.node_id, revisionMessageId: node.question_message_id ?? undefined, previous: draft.previous ?? { text: draft.text, images: draft.images } });
+    if (documentUploads.pending(draftKey)) return;
+    updateDraft({ text: node.question ?? "", images: node.images ?? [], documents: node.documents ?? [], revisionId: node.node_id, revisionMessageId: node.question_message_id ?? undefined, previous: draft.previous ?? { text: draft.text, images: draft.images, documents: draft.documents } });
     textareaRef.current?.focus();
   }
   function cancelRevision() {
-    updateDraft({ text: draft.previous?.text ?? "", images: draft.previous?.images ?? [], revisionId: undefined, revisionMessageId: undefined, previous: undefined });
+    updateDraft({ text: draft.previous?.text ?? "", images: draft.previous?.images ?? [], documents: draft.previous?.documents ?? [], revisionId: undefined, revisionMessageId: undefined, previous: undefined });
   }
   async function send(retry?: ThreadNode) {
     const submitted = { ...draftRef.current };
-    const question = retry ? retry.question ?? "" : submitted.text.trim();
+    let question = retry ? retry.question ?? "" : submitted.text.trim();
     const images = retry ? retry.images ?? [] : submitted.images;
-    if ((!question && !images.length) || sendingRef.current || streaming || loading || !activeModelId) return;
+    const documents = retry ? retry.documents ?? [] : submitted.documents ?? [];
+    if (!question && documents.length) question = t("请概括所附文档的主要内容，并注明文件名及页码或段落来源。", "Summarize the attached documents and cite file names and page or paragraph sources.");
+    if ((!question && !images.length && !documents.length) || sendingRef.current || streaming || loading || !activeModelId || documentUploads.list(submitted.key).length > 0) return;
     const tools = [...(useSearch ? ["web_search"] : []), ...(useFetch ? ["fetch"] : []), ...selectedMcp.filter(id => mcpServers.some(server => server.id === id && server.enabled)).map(id => `mcp_server_${id}`)];
     sendingRef.current = true;
     let accepted = false;
@@ -370,7 +402,8 @@ export function ChatPane(props: Props) {
     stickToBottom.current = true;
     setAwayFromBottom(false);
     try {
-      await onAsk({ question, images: images.length ? images : undefined, tools: tools.length ? tools : undefined,
+      await onAsk({ question, images: images.length ? images : undefined, documents,
+        document_ids: retry ? undefined : documents.map(document => document.id), tools: tools.length ? tools : undefined,
         mode: retry ? "retry" : submitted.revisionId ? "revise" : "continue", nodeId: retry?.node_id ?? submitted.revisionId,
         question_message_id: retry?.question_message_id ?? submitted.revisionMessageId,
         onAccepted: nodeId => {
@@ -430,6 +463,8 @@ export function ChatPane(props: Props) {
   const noModel = !models.length || !activeModelId;
   const toolCount = Number(useSearch) + Number(useFetch) + selectedMcp.filter(id => mcpServers.some(server => server.id === id && server.enabled)).length;
   const displayDraft = draft.key === draftKey ? draft : readDraft(draftKey);
+  const draftUploads = documentUploads.list(draftKey);
+  const attachmentsBusy = draftUploads.length > 0;
   const visibleThread = thread.filter(node => node.question !== null && !(showStream && (node.node_id === retryingNodeId || (node.status === "pending" && node.node_id === activeNodeId))));
 
   return <main className="center chat-pane">
@@ -452,12 +487,12 @@ export function ChatPane(props: Props) {
           <div className="chat-messages" onPointerUp={captureSelection} onKeyUp={(event) => { if (event.shiftKey) captureSelection(); }}>
             {!loading && !visibleThread.length && !showStream && <div className="chat-welcome"><span className="chat-eyebrow">{focusedSeed ? t("从这里展开", "Explore from here") : t("新的起点", "A fresh start")}</span><h2>{focusedSeed ? `「${focusedSeed}」` : treeTitle}</h2><p>{t("想先弄懂什么？", "What would you like to understand first?")}</p></div>}
             {visibleThread.map((node, index) => <section className="chat-turn" data-turn-node={node.node_id} key={`${node.node_id}:${node.question_message_id ?? index}`}>
-              <div className="chat-question"><ImageStrip images={node.images ?? []} /><div>{node.question}</div><div className="chat-question-actions"><button onClick={() => editNode(node)} disabled={streaming} title={t("编辑后生成新版本，保留原有问答与分支", "Create a new version while keeping the original conversation and branches")}>{t("编辑", "Edit")}</button></div></div>
+              <div className="chat-question"><ImageStrip images={node.images ?? []} /><DocumentCards documents={node.documents ?? []} /><div>{node.question}</div><div className="chat-question-actions"><button onClick={() => editNode(node)} disabled={streaming || attachmentsBusy} title={t("编辑后生成新版本，保留原有问答与分支", "Create a new version while keeping the original conversation and branches")}>{t("编辑", "Edit")}</button></div></div>
               {node.answer != null && <div className="chat-answer"><div className="chat-answer-label"><span className="chat-answer-dot" />{node.answered_by ?? "AI"}{node.status === "error" || node.status === "interrupted" ? <span>{t("· 未完成", "· Incomplete")}</span> : null}</div><ReasoningBlock text={node.reasoning ?? ""} /><ToolSteps steps={node.steps ?? []} /><div className="chat-markdown" data-answer-node={node.node_id} data-message-id={node.answer_message_id ?? undefined} tabIndex={0}><Markdown text={node.answer} /></div>{node.answer.trim() && <div className="chat-answer-actions"><button onClick={() => void branchAnswer(node)} disabled={branching || streaming || loading} title={t("从这条回答展开一个新的问题", "Explore a new question from this answer")}><Icon name="tree" />{t("新分支", "New branch")}</button></div>}</div>}
               {!!node.attempts?.length && <details className="chat-reasoning chat-prior-attempts"><summary>{t("之前的未完成回答（{count}）", "Previous incomplete responses ({count})", { count: node.attempts.length })}</summary>{node.attempts.map(attempt => <div className="chat-markdown" data-answer-node={node.node_id} data-message-id={attempt.message_id} key={attempt.message_id}><Markdown text={attempt.content || t("未收到内容", "No content received")} /></div>)}</details>}
               {(node.status === "error" || node.status === "interrupted") && <div className="chat-retry"><span>{node.status === "interrupted" ? t("回答已停止", "Response stopped") : t("这次回答未完成", "This response is incomplete")}</span><button onClick={() => void send(node)} disabled={streaming || noModel}>{t("重试", "Retry")}</button>{node.error && <details><summary>{t("详情", "Details")}</summary><p>{localizeError(node.error, locale)}</p></details>}</div>}
             </section>)}
-            {showStream && <section className="chat-turn chat-live"><div className="chat-question"><ImageStrip images={sendingImages} /><div>{pendingQuestion}</div></div><div className="chat-answer"><div className="chat-answer-label"><span className="chat-answer-dot is-loading" />{t("正在回答", "Responding")}</div><ReasoningBlock text={liveReasoning} /><ToolSteps steps={liveSteps} /><div className="chat-markdown" aria-live="polite" aria-busy="true">{live ? <Markdown text={live} /> : <span className="chat-typing">•••</span>}</div></div></section>}
+            {showStream && <section className="chat-turn chat-live"><div className="chat-question"><ImageStrip images={sendingImages} /><DocumentCards documents={sendingDocuments} /><div>{pendingQuestion}</div></div><div className="chat-answer"><div className="chat-answer-label"><span className="chat-answer-dot is-loading" />{t("正在回答", "Responding")}</div><ReasoningBlock text={liveReasoning} /><ToolSteps steps={liveSteps} /><div className="chat-markdown" aria-live="polite" aria-busy="true">{live ? <Markdown text={live} /> : <span className="chat-typing">•••</span>}</div></div></section>}
           </div>
         </div>
         {awayFromBottom && <button className="chat-latest" onClick={() => { if (scrollRef.current) scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); stickToBottom.current = true; }}>{t("↓ 最新", "↓ Latest")}</button>}
@@ -465,13 +500,21 @@ export function ChatPane(props: Props) {
       <div className="chat-compose-area">
         {noModel && <div className="chat-model-empty"><span>{t("连接模型，开始学习", "Connect a model to start learning")}</span><button onClick={onOpenSettings}>{t("设置模型", "Model settings")}</button><button onClick={onAddMock}>{t("体验演示", "Try demo")}</button></div>}
         <div className="chat-compose-box">
-          {displayDraft.revisionId && <div className="chat-revision"><span>{t("编辑为新版本", "Edit as a new version")} <small>{t("原记录会保留", "The original stays saved")}</small></span><button onClick={cancelRevision} disabled={streaming}>{t("取消", "Cancel")}</button></div>}
+          {displayDraft.revisionId && <div className="chat-revision"><span>{t("编辑为新版本", "Edit as a new version")} <small>{t("原记录会保留", "The original stays saved")}</small></span><button onClick={cancelRevision} disabled={streaming || attachmentsBusy}>{t("取消", "Cancel")}</button></div>}
           {displayDraft.images.length > 0 && <div className="chat-pending-images">{displayDraft.images.map((src, index) => <div key={index}><img src={src} alt={t("待发送附图 {number}", "Pending attachment {number}", { number: index + 1 })} /><button onClick={() => updateDraft({ images: displayDraft.images.filter((_, i) => i !== index) })} aria-label={t("移除附图 {number}", "Remove attachment {number}", { number: index + 1 })}>×</button></div>)}</div>}
+          <DocumentCards documents={displayDraft.documents ?? []} onRemove={id => updateDraft({ documents: (displayDraft.documents ?? []).filter(document => document.id !== id) })} />
+          {draftUploads.map(upload => <div className="chat-document-upload" key={upload.id}>
+            <div><span className="chat-document-name">{upload.file.name}</span><span role={upload.status === "error" ? "alert" : "status"}>{upload.status === "error" ? localizeError(upload.error ?? "", locale) : upload.status === "queued" ? t("等待上传…", "Queued…") : upload.progress >= 100 ? t("正在提取文字…", "Extracting text…") : t("上传中 {percent}%", "Uploading {percent}%", { percent: upload.progress })}</span></div>
+            {upload.status !== "error" && <progress value={upload.progress} max={100} aria-label={t("文档上传进度", "Document upload progress")} />}
+            <div className="chat-document-actions">{upload.status === "error" && <button onClick={() => { documentUploads.remove(draftKey, upload.id); addDocument(upload.file); }}>{t("重试上传", "Retry upload")}</button>}<button onClick={() => documentUploads.remove(draftKey, upload.id)} aria-label={t("移除文档 {name}", "Remove document {name}", { name: upload.file.name })}>{t("移除", "Remove")}</button></div>
+          </div>)}
+          {((displayDraft.documents?.length ?? 0) > 0 || draftUploads.length > 0) && <div className="chat-document-hint">{t("在本机提取文字；发送问题时将相关内容提供给所选模型。扫描件需先 OCR。", "Text is extracted locally; relevant content is sent to your selected model with the question. Scans need OCR first.")}</div>}
           <textarea ref={textareaRef} disabled={loading} aria-label={t("输入问题", "Enter a question")} rows={1} placeholder={displayDraft.revisionId ? t("修改这个问题…", "Revise this question…") : focusedSeed ? t("关于「{quote}」，继续问…", "Ask more about “{quote}”…", { quote: focusedSeed.slice(0, 32) }) : t("继续问，或选中回答里不懂的地方…", "Ask a follow-up, or select something you want explained…")} value={displayDraft.text} onChange={event => updateDraft({ text: event.target.value })} onPaste={event => { const files = Array.from(event.clipboardData.items).filter(item => item.type.startsWith("image/")); if (files.length) { event.preventDefault(); files.forEach(item => { const file = item.getAsFile(); if (file) addFile(file); }); } }} onCompositionStart={() => { composingRef.current = true; }} onCompositionEnd={() => { composingRef.current = false; compEndAt.current = Date.now(); }} onKeyDown={event => { if (event.key !== "Enter" || event.shiftKey || composingRef.current || event.nativeEvent.isComposing || event.keyCode === 229 || Date.now() - compEndAt.current < 120) return; event.preventDefault(); void send(); }} />
           <div className="chat-compose-controls"><div className="chat-compose-left">
             <button className="chat-icon-button" onClick={() => fileRef.current?.click()} aria-label={t("添加图片", "Add images")} title={t("添加图片（最多 4 张）", "Add images (up to 4)")} disabled={displayDraft.images.length >= 4}><Icon name="image" /></button><input hidden ref={fileRef} type="file" accept="image/*" multiple onChange={event => { Array.from(event.target.files ?? []).forEach(addFile); event.target.value = ""; }} />
+            <button className="chat-icon-button" onClick={() => documentFileRef.current?.click()} aria-label={t("添加文档", "Add documents")} title={t("PDF / Word / TXT / Markdown / CSV，最多 4 份，每份 10 MB", "PDF / Word / TXT / Markdown / CSV; up to 4 files, 10 MB each")} disabled={loading || (displayDraft.documents?.length ?? 0) + draftUploads.filter(upload => upload.status !== "error").length >= 4}><Icon name="document" /></button><input hidden ref={documentFileRef} data-testid="document-upload-input" type="file" accept={DOCUMENT_ACCEPT} multiple onChange={event => { Array.from(event.target.files ?? []).forEach(addDocument); event.target.value = ""; }} />
             <div className="chat-tool-menu" ref={toolMenuRef}><button className={`chat-icon-button ${toolCount ? "is-active" : ""}`} onClick={() => setToolsOpen(!toolsOpen)} aria-label={t("选择工具", "Choose tools")} aria-expanded={toolsOpen} title={t("工具", "Tools")}><Icon name="tools" />{toolCount > 0 && <span className="chat-tool-count">{toolCount}</span>}</button>{toolsOpen && <div className="chat-tool-dropdown"><span className="chat-menu-label">{t("这次提问使用", "Tools for this question")}</span><label><input type="checkbox" checked={useSearch} onChange={event => setUseSearch(event.target.checked)} />{t("联网搜索", "Web search")}</label><label><input type="checkbox" checked={useFetch} onChange={event => setUseFetch(event.target.checked)} />{t("读取网页", "Read webpage")}</label>{mcpServers.filter(server => server.enabled).map(server => <label key={server.id}><input type="checkbox" checked={selectedMcp.includes(server.id)} onChange={() => setSelectedMcp(current => current.includes(server.id) ? current.filter(id => id !== server.id) : [...current, server.id])} />{mcpDisplayName(server, locale)}</label>)}<button onClick={() => { setToolsOpen(false); onOpenSettings(); }}>{t("管理模型与工具 ↗", "Manage models & tools ↗")}</button></div>}</div>
-          </div><div className="chat-compose-right"><select aria-label={t("选择模型", "Choose model")} value={activeModelId ?? ""} onChange={event => onModelChange(Number(event.target.value))} disabled={!models.length}>{!models.length && <option value="">{t("未连接模型", "No model connected")}</option>}{models.map(model => <option value={model.id} key={model.id}>{model.label}</option>)}</select>{streaming ? <button className="chat-send is-stop" onClick={onStop} aria-label={t("停止回答", "Stop response")} title={t("停止回答", "Stop response")}>■</button> : <button className="chat-send" onClick={() => void send()} disabled={loading || noModel || (!displayDraft.text.trim() && !displayDraft.images.length)} aria-label={t("发送问题", "Send question")} title={t("发送 · Enter", "Send · Enter")}><Icon name="arrow" /></button>}</div></div>
+          </div><div className="chat-compose-right"><select aria-label={t("选择模型", "Choose model")} value={activeModelId ?? ""} onChange={event => onModelChange(Number(event.target.value))} disabled={!models.length}>{!models.length && <option value="">{t("未连接模型", "No model connected")}</option>}{models.map(model => <option value={model.id} key={model.id}>{model.label}</option>)}</select>{streaming ? <button className="chat-send is-stop" onClick={onStop} aria-label={t("停止回答", "Stop response")} title={t("停止回答", "Stop response")}>■</button> : <button className="chat-send" onClick={() => void send()} disabled={loading || noModel || attachmentsBusy || (!displayDraft.text.trim() && !displayDraft.images.length && !displayDraft.documents?.length)} aria-label={t("发送问题", "Send question")} title={t("发送 · Enter", "Send · Enter")}><Icon name="arrow" /></button>}</div></div>
         </div>
       </div>
     </>}

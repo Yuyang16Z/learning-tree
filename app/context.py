@@ -99,6 +99,7 @@ def build_context(
     tool_defs: list[dict] | None = None,
     protocol: str = "openai",
     diagnostics: dict | None = None,
+    documents: list[dict] | None = None,
 ) -> tuple[str, list[dict]]:
     policy = policy or ContextPolicy()
     # Leave room for tool-call metadata and a bounded result on the next round;
@@ -109,11 +110,21 @@ def build_context(
     sources = ancestors + [(current, current_messages)]
     units = _units(sources)
     last = {"role": "user", "content": make_content(question, question_images)}
-    system = _full_system(ancestors, current, memory_note)
-    messages = _wire(units) + [last]
 
     def count(s, ms):
         return estimate_request_tokens(s, ms, tool_defs, protocol)
+
+    document_note = ""
+    if documents:
+        from .document_context import render_document_context
+
+        mandatory_cost = count(_full_system([], current, ""), [last])
+        document_budget = min(5000, max(0, (assembly_budget - mandatory_cost) // 3))
+        document_note = render_document_context(documents, question, document_budget)
+        if document_note:
+            document_note = "\n" + document_note
+    system = _full_system(ancestors, current, memory_note) + document_note
+    messages = _wire(units) + [last]
 
     if diagnostics is not None:
         diagnostics.update(compacted=False, raw_estimate=count(system, messages))
@@ -123,7 +134,7 @@ def build_context(
         return system, messages
 
     # The current question, selected passage and current note are mandatory.
-    base = _full_system([], current, "") + "\n" + COMPACTION_NOTICE
+    base = _full_system([], current, "") + document_note + "\n" + COMPACTION_NOTICE
     if count(base, [last]) > assembly_budget:
         raise ContextBudgetExceeded()
     available = assembly_budget - count(base, [last])

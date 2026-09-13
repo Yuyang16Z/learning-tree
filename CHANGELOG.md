@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add local PDF text-layer, DOCX and UTF-8 text document uploads with extraction previews, original downloads and source-linked question attachments. Bound parsing in a separate process and clearly report unsupported scans, encrypted or malformed documents.
+- Feed budgeted document excerpts into the current learning path and offer scoped read-only search/pagination; retain attachments across retries and revisions. Export original files with hashes in version 2 backups and reparse/remap them on import, while continuing to read version 1 backups.
+- Keep mobile chat accessible when resizing from desktop, with dismissible topic/tree drawers and attachment previews.
 - Add per-model context-window settings and local answer reservations. Estimate complete requests before provider calls, including tool definitions, images and tool results; report mandatory inputs that cannot fit.
 - Replace the fixed recent-history cutoff with budget-aware retention of complete turns and deterministic extraction of cited original sentences from older context. Preserve stored originals and keep the bounded extraction cache in process memory.
 - Offer scoped, read-only original-source pagination for compressed context and tool-enabled turns that may need later compaction. Revalidate the active path at execution; retain tool-call identities and native protocol blocks when fitting requests, and mark omitted history and abbreviated tool results explicitly.

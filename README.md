@@ -22,6 +22,7 @@ The images use synthetic content and the offline demo model. They demonstrate th
 - Branch titles summarize the first question you ask, rather than copying the source answer. A new empty branch shows “New branch”.
 - Save your understanding and bring it into the main conversation as an editable draft.
 - Edit a question as a new version, retry interrupted answers, and keep the original record.
+- Attach PDFs, Word `.docx` files or text documents to a question; preview parsed text, retain the original and keep references through follow-ups, retries and revisions. See [formats, limits and how text reaches the model](docs/documents.md).
 - Budget long conversations per model: keep recent full turns, extract cited source sentences from older context, and let the agent reread eligible originals when needed.
 - Recall relevant learning memories with local multilingual search, while keeping topic facts within the current learning path and user preferences separate.
 - Switch **English / 中文** in **Settings → 语言 / Language**. Labels change immediately; your conversations and notes keep their original language.
@@ -124,7 +125,7 @@ Changes and upgrade notes: [v0.2.0](docs/releases/v0.2.0.md) · [Changelog](CHAN
 
 The default data file is `branch_learning.db`; the legacy filename and JSON format identifier are retained for compatibility. Startup backs up an existing database into `.backups/` before building the UI. Run only one backend per database.
 
-Chats, notes, model keys and tool configuration are stored locally. Keys are in the private SQLite file, **not encrypted at rest**. Drafts and reading positions stay in browser storage. Tree exports omit model keys and server configuration but contain the exported conversation and attachments. MCP memory and learning files require separate backups.
+Chats, notes, document originals and parsed text, model keys and tool configuration are stored locally. Keys are in the private SQLite file, **not encrypted at rest**. Drafts and reading positions stay in browser storage. Tree exports omit model keys and server configuration but contain the exported conversation and attachments, including document originals. MCP memory and learning files require separate backups. Uploading a document is local; eligible excerpts are sent to your configured answer model when they enter a question's context.
 
 Existing memory IDs and content are preserved. SQLite adds a rebuildable `MemoryEmbedding` cache keyed by memory and model revision, with a content hash to detect stale text; deleting memories or their source nodes removes the associated cache entries. Public model weights live in `.runtime/retrieval/models/`. Deleting a memory does not delete the original conversation: the same information may still appear in active-path chat history. Local retrieval does not send text to a separate retrieval service; selected memories still accompany the prompt sent to your configured answer model.
 

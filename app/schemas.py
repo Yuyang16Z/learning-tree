@@ -82,6 +82,7 @@ class AskIn(BaseModel):
     request_id: str | None = Field(default=None, max_length=100)
     config_id: int | None = None  # 用哪个模型答；不传则用默认模型
     images: list[str] | None = None  # 随问题带的图片（data URI），会回传给模型
+    document_ids: list[str] = Field(default_factory=list, max_length=4)
     tools: list[str] | None = None  # 本次开启的工具，如 ["fetch","web_search"]
     deep_think: bool = False  # 深度思考：走推理、把思考过程单独流出来
 

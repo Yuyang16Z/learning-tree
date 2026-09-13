@@ -13,6 +13,8 @@ import type {
   Tree,
   TreeNode,
   SourceAnchor,
+  DocumentSummary,
+  DocumentDetail,
 } from "./types";
 
 const API = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
@@ -48,6 +50,7 @@ export interface AskBody {
   question: string;
   config_id: number | null;
   images?: string[];
+  document_ids?: string[];
   tools?: string[];
   deep_think?: boolean;
   mode?: "continue" | "retry" | "revise";
@@ -65,6 +68,28 @@ export interface AskHandlers {
 
 export const api = {
   base: API,
+
+  uploadDocument: (nodeId: number, file: File, onProgress: (percent: number) => void, signal: AbortSignal) =>
+    new Promise<DocumentSummary>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const abort = () => xhr.abort();
+      xhr.open("POST", `${API}/nodes/${nodeId}/documents`);
+      xhr.timeout = 120_000;
+      xhr.upload.onprogress = event => { if (event.lengthComputable) onProgress(Math.round(event.loaded / event.total * 100)); };
+      xhr.onload = () => {
+        const res = new Response(xhr.responseText, { status: xhr.status || 500, headers: { "content-type": "application/json" } });
+        void j<DocumentSummary>(res).then(resolve, reject);
+      };
+      xhr.onerror = () => reject(new Error(translate("文档上传失败，请检查连接后重试。", "Document upload failed. Check your connection and try again.")));
+      xhr.ontimeout = () => reject(new Error(translate("文档处理超时，请重试或选择较小的文件。", "Document processing timed out. Try again or choose a smaller file.")));
+      xhr.onabort = () => reject(new DOMException("Upload cancelled", "AbortError"));
+      xhr.onloadend = () => signal.removeEventListener("abort", abort);
+      if (signal.aborted) { reject(new DOMException("Upload cancelled", "AbortError")); return; }
+      signal.addEventListener("abort", abort, { once: true });
+      const body = new FormData(); body.append("file", file); xhr.send(body);
+    }),
+  getDocument: (id: string) => fetch(`${API}/documents/${encodeURIComponent(id)}`).then(j<DocumentDetail>),
+  documentDownloadUrl: (id: string) => `${API}/documents/${encodeURIComponent(id)}/download`,
 
   listModels: () => fetch(`${API}/models`).then(j<ModelCfg[]>),
   addModel: (body: ModelInput) => jsonPost(`${API}/models`, body).then(j<ModelCfg>),
