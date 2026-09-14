@@ -28,7 +28,7 @@ class ModelConfigOut(BaseModel):
     label: str
     base_url: str
     llm_model: str
-    key_hint: str  # 脱敏后的 key，只露后 4 位
+    key_hint: str  # Masked key showing only the last four characters.
     protocol: Literal["openai", "anthropic"] = "openai"
     max_tokens: int = 4096
     context_window: int = 32768
@@ -37,7 +37,7 @@ class ModelConfigOut(BaseModel):
 
 class TreeIn(BaseModel):
     title: str
-    root_question: str | None = None  # 可选：建树时顺手问的第一个问题
+    root_question: str | None = None  # Optional initial question when creating a tree.
 
 
 class TreeOut(BaseModel):
@@ -80,11 +80,11 @@ class AskIn(BaseModel):
     mode: Literal["continue", "retry", "revise"] = "continue"
     question_message_id: int | None = None
     request_id: str | None = Field(default=None, max_length=100)
-    config_id: int | None = None  # 用哪个模型答；不传则用默认模型
-    images: list[str] | None = None  # 随问题带的图片（data URI），会回传给模型
+    config_id: int | None = None  # Omit to use the default model.
+    images: list[str] | None = None  # Attached data URIs included in model input.
     document_ids: list[str] = Field(default_factory=list, max_length=4)
-    tools: list[str] | None = None  # 本次开启的工具，如 ["fetch","web_search"]
-    deep_think: bool = False  # 深度思考：走推理、把思考过程单独流出来
+    tools: list[str] | None = None  # Tools enabled for this request, e.g. ["fetch", "web_search"].
+    deep_think: bool = False  # Request reasoning and stream it separately from the answer.
 
 
 class TestOut(BaseModel):

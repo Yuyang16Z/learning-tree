@@ -61,6 +61,8 @@ def main() -> int:
         name = encoded_path.decode()
         path = PurePosixPath(name)
         count += 1
+        if not name.isascii():
+            errors.append(f"{name}: source filenames must use ASCII characters")
         if stage != "0" or mode not in {"100644", "100755"}:
             errors.append(f"{name}: unresolved or non-regular source entry")
             continue
@@ -68,7 +70,8 @@ def main() -> int:
             any(part in PRIVATE_DIRS for part in path.parts)
             or (path.name.startswith(".env") and path.name != ".env.example")
             or bool(re.search(r"\.(?:db|sqlite3?)(?:$|-)|\.(?:pem|key|p12)$", path.name))
-            or (path.parts[0] == "学习资料" and name != "学习资料/使用说明.md")
+            or path.parts[0] == "学习资料"
+            or (path.parts[0] == "learning-materials" and name != "learning-materials/README.md")
             or path.name.startswith(("优化交付记录", "更新记录"))
         )
         if forbidden:

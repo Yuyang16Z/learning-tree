@@ -52,7 +52,7 @@ For your own learning workspace, stop the demo and run:
 uv run python scripts/manage.py start --open
 ```
 
-Open **http://127.0.0.1:8099** and add your endpoint, model ID and API key in **Settings → Models & API keys**. This workspace uses a separate database from the demo. On macOS, after setup, you can also double-click `启动学习树.command`.
+Open **http://127.0.0.1:8099** and add your endpoint, model ID and API key in **Settings → Models & API keys**. This workspace uses a separate database from the demo. On macOS, after setup, you can also double-click `start-learning-tree.command`.
 
 ### Optional semantic memory
 

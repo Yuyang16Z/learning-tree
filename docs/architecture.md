@@ -87,7 +87,7 @@ OpenAI-compatible Chat Completions and Anthropic Messages use distinct message, 
 
 MCP sessions persist between calls, preserving browser/thinking state; calls into a session are serialized. A timed-out or uncertain execution is not blindly replayed. Shutdown closes the runtime. Optional dependencies live under `integrations/mcp/node_modules` and `.runtime/mcp-python`. Registration saves machine-specific paths in SQLite; moving the project requires re-registration.
 
-The file preset exposes `学习资料/`; MCP memory and browser output live in `mcp-data/`. SQLite contains conversations, document originals and extracted sections, configurations and learning memory. Browser storage contains drafts, positions and the `learning-tree.locale` preference (`zh-CN` or `en`). React context updates labels without remounting the workspace; user content is not translated.
+The file preset exposes `learning-materials/` and the legacy `学习资料/` directory when present, without moving existing files; MCP memory and browser output live in `mcp-data/`. SQLite contains conversations, document originals and extracted sections, configurations and learning memory. Browser storage contains drafts, positions and the `learning-tree.locale` preference (`zh-CN` or `en`). React context updates labels without remounting the workspace; user content is not translated.
 
 Schema upgrades are additive and idempotent. Future complex transformations should use versioned migrations with restore tests. JSON exports retain the `branch-learning` format identifier, use version 2 when documents are present and version 1 otherwise, remap IDs on import, and exclude model credentials and MCP definitions.
 

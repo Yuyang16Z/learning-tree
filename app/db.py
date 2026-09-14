@@ -7,10 +7,10 @@ from .config import settings
 
 engine = create_engine(
     settings.database_url,
-    connect_args={"check_same_thread": False},  # SQLite + 多线程（流式在线程池里跑）
+    connect_args={"check_same_thread": False},  # Streaming runs in worker threads.
 )
 
-# 幂等小迁移：给已存在的库补上后加的列（create_all 只建新表、不会 ALTER 旧表）。
+# Idempotently add missing columns; create_all creates tables but cannot ALTER existing ones.
 _ADDED_COLUMNS = {
     "modelconfig": {
         "protocol": "TEXT NOT NULL DEFAULT 'openai'",
@@ -45,7 +45,7 @@ def _ensure_columns() -> None:
         for table, cols in _ADDED_COLUMNS.items():
             existing = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table})"))}
             if not existing:
-                continue  # 表还没建，create_all 会带上新列
+                continue  # create_all will include the new columns when creating this table.
             for name, sqltype in cols.items():
                 if name not in existing:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {sqltype}"))

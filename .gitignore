@@ -18,8 +18,10 @@
 .runtime/
 .local/
 mcp-data/
-学习资料/*
-!学习资料/使用说明.md
+learning-materials/*
+!learning-materials/README.md
+# Keep legacy local libraries private after upgrading.
+学习资料/
 artifacts/
 优化交付记录.md
 更新记录*.md

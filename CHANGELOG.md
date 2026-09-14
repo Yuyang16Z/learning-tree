@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Standardize public filenames and ordinary developer comments in English. Rename the macOS launcher to `start-learning-tree.command` and the learning-file library to `learning-materials/`; keep legacy learning files accessible in place and excluded from Git. Restart the app after updating to refresh MCP sessions.
+
 - Add local PDF text-layer, DOCX and UTF-8 text document uploads with extraction previews, original downloads and source-linked question attachments. Bound parsing in a separate process and clearly report unsupported scans, encrypted or malformed documents.
 - Feed budgeted document excerpts into the current learning path and offer scoped read-only search/pagination; retain attachments across retries and revisions. Export original files with hashes in version 2 backups and reparse/remap them on import, while continuing to read version 1 backups.
 - Keep mobile chat accessible when resizing from desktop, with dismissible topic/tree drawers and attachment previews.

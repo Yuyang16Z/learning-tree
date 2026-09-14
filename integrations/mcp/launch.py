@@ -9,7 +9,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA = ROOT / "mcp-data"
-LIBRARY = ROOT / "学习资料"
+LIBRARY = ROOT / "learning-materials"
+LEGACY_LIBRARY = ROOT / "学习资料"
 PACKAGES = Path(__file__).resolve().parent / "node_modules"
 PYTHON = ROOT / ".runtime/mcp-python" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
@@ -59,12 +60,24 @@ def installed_chrome() -> Path | None:
     return chrome if sys.platform == "darwin" and chrome.is_file() else None
 
 
+def library_directories() -> list[Path]:
+    """Keep existing learning files accessible without moving or merging them."""
+    libraries = [LIBRARY]
+    if LEGACY_LIBRARY.is_symlink() or LEGACY_LIBRARY.exists():
+        libraries.append(LEGACY_LIBRARY)
+    for directory in libraries:
+        if directory.is_symlink():
+            raise RuntimeError("The learning library must not be a symlink to another directory.")
+        if directory.exists() and not directory.is_dir():
+            raise RuntimeError("The learning library path must be a directory.")
+    LIBRARY.mkdir(parents=True, exist_ok=True)
+    return libraries
+
+
 def command_for(name: str) -> tuple[list[str], dict[str, str], Path]:
     env = server_environment()
     DATA.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if LIBRARY.is_symlink():
-        raise RuntimeError("The learning library must not be a symlink to another directory.")
-    LIBRARY.mkdir(parents=True, exist_ok=True)
+    libraries = library_directories()
     if os.name != "nt":
         os.chmod(DATA, 0o700)
     if name in ("fetch", "time"):
@@ -90,7 +103,7 @@ def command_for(name: str) -> tuple[list[str], dict[str, str], Path]:
     args = [node, str(entry)]
     cwd = DATA
     if name == "filesystem":
-        args.append(str(LIBRARY))
+        args.extend(str(directory) for directory in libraries)
     elif name == "memory":
         env["MEMORY_FILE_PATH"] = str(DATA / "knowledge.jsonl")
     elif name == "sequential-thinking":

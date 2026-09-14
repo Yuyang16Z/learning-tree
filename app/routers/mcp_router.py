@@ -1,4 +1,4 @@
-"""MCP server 配置：增 / 列 / 删 / 启停 / 测连接（列出它暴露的工具）。"""
+"""MCP server configuration: add, list, delete, enable/disable and test by listing tools."""
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select

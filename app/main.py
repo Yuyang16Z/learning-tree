@@ -16,7 +16,7 @@ from .routers import mcp_router, memory_router, models_router, nodes, trees
 
 
 def seed_default_model() -> None:
-    """如果配了 default_api_key 且库里还没有模型，自动写入一条默认模型。"""
+    """Seed a default model if default_api_key is configured and no models exist."""
     if not settings.default_api_key:
         return
     with Session(engine) as s:
@@ -51,7 +51,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="LearningTree", version="0.2.0", lifespan=lifespan)
 
-# 本地工具，前端跨端口访问，放开 CORS 即可。
+# Allow the local frontend to access the backend across ports via CORS.
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:[0-9]+)?",

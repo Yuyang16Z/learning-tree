@@ -5,7 +5,7 @@ import type { McpInput, McpServer } from "../types";
 import { parseMcpArgs } from "../lib/mcpArgs";
 
 interface Props {
-  server: McpServer | null; // null = 新增
+  server: McpServer | null; // null = add a new server
   onClose: () => void;
   onAdd: (m: McpInput) => Promise<void>;
   onUpdate: (id: number, m: McpInput) => Promise<void>;

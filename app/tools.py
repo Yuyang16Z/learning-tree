@@ -1,18 +1,18 @@
-"""工具注册表 —— 给模型开"函数调用"能力（联网搜索 / fetch / …）。
+"""Tool registry exposing function calling to models (web search, fetch, etc.).
 
-设计上一个工具 = 一条 OpenAI 兼容的 tool 定义 + 一个执行函数。
-这套结构和 MCP 工具一一对应：接入真正的 MCP server 时，只需把它暴露的
-工具 schema/执行代理注册进这里即可（见 README 的扩展说明）。
+Each tool pairs an OpenAI-compatible definition with an execution function.
+The same structure maps to MCP tools: register the schemas and execution proxies
+exposed by an MCP server (see the README extension notes).
 
-- fetch：真实抓取一个 URL（httpx，无需 key，可离线自测）。
-- web_search：有 TAVILY_API_KEY 使用 Tavily，否则使用无需 Key 的 DDGS 真实搜索。
+- fetch: retrieve a real URL with httpx; no API key required, testable with a local server.
+- web_search: use Tavily when TAVILY_API_KEY is set, otherwise use key-free DDGS search.
 """
 
 import os
 
 import httpx
 
-# OpenAI 兼容的工具定义（发给模型，让它知道能调什么）
+# OpenAI-compatible tool definitions sent to the model to expose available tools.
 TOOL_DEFS: dict[str, dict] = {
     "fetch": {
         "type": "function",
@@ -46,7 +46,7 @@ def tool_defs_for(names: list[str]) -> list[dict]:
 
 
 def mcp_tool_def(oai_name: str, tool: dict) -> dict:
-    """把一个 MCP 工具（name/description/schema）转成 OpenAI 兼容的工具定义。"""
+    """Convert an MCP tool (name/description/schema) into an OpenAI-compatible definition."""
     return {
         "type": "function",
         "function": {

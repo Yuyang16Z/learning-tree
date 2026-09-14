@@ -1,4 +1,4 @@
-"""跨路由复用的小工具：模型解析、脊柱查询、key 脱敏、工具装配。"""
+"""Shared route helpers for model resolution, ancestor lookup, key masking and tool assembly."""
 
 from collections.abc import Callable
 
@@ -31,7 +31,7 @@ def to_spec(cfg: ModelConfig) -> LLMSpec:
 
 
 def resolve_config(session: Session, config_id: int | None) -> ModelConfig | None:
-    """指定了就用指定的；否则用默认；再否则用第一条；都没有返回 None。"""
+    """Resolve the requested model, otherwise the default or first model; return None if absent."""
     if config_id is not None:
         return session.get(ModelConfig, config_id)
     default = session.exec(select(ModelConfig).where(ModelConfig.is_default == True)).first()  # noqa: E712
@@ -47,7 +47,7 @@ def get_messages(session: Session, node_id: int) -> list[Message]:
 
 
 def get_ancestors(session: Session, node: Node) -> list[tuple[Node, list[Message]]]:
-    """从根到父节点，连同各自的消息。当前节点不含在内。"""
+    """Return nodes and their messages from root to parent, excluding the current node."""
     chain: list[Node] = []
     pid = node.parent_id
     seen = {node.id}
@@ -58,21 +58,21 @@ def get_ancestors(session: Session, node: Node) -> list[tuple[Node, list[Message
             break
         chain.append(parent)
         pid = parent.parent_id
-    chain.reverse()  # 根 → 父
+    chain.reverse()  # Root to parent.
     return [(n, get_messages(session, n.id)) for n in chain]
 
 
 def get_thread(session: Session, node: Node) -> list[tuple[Node, list[Message]]]:
-    """整条线程：根 → 当前节点（含当前），每个节点连同它那一次问答。"""
+    """Return the complete thread from root through the current node, including each node's messages."""
     return get_ancestors(session, node) + [(node, get_messages(session, node.id))]
 
 
 def assemble_tools(session: Session, requested: list[str]) -> tuple[list[dict], dict]:
-    """把前端请求的工具名解析成 (OpenAI 工具定义, 路由表)。
+    """Resolve frontend tool selections into (OpenAI tool definitions, routing table).
 
-    - 内置工具（fetch/web_search）：直接取定义。
-    - "mcp_server_{id}"：连接该 MCP server 列出工具；连接失败明确报错。
-    路由表：oai_name -> ("builtin", real) | ("mcp", spec, real)。
+    - Built-in tools (fetch/web_search): use their definitions directly.
+    - "mcp_server_{id}": connect and list tools; surface connection failures explicitly.
+    Routing table: oai_name -> ("builtin", real) | ("mcp", spec, real).
     """
     defs: list[dict] = []
     router: dict = {}
@@ -130,7 +130,9 @@ def fetch_memory_note(
 def extract_and_save(
     spec: LLMSpec, tree_id: int | None, node_id: int, question: str, answer: str
 ) -> None:
-    """后台调用：从一轮问答提炼记忆并去重存库。失败静默。"""
+    """Extract, deduplicate and store memories from a question/answer pair in the background.
+
+    Extraction failures are silent."""
     if spec.api_key == "mock" or spec.base_url.startswith("mock"):
         return
     res = extract_memories(spec, question, answer)

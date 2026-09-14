@@ -1,11 +1,14 @@
-"""统一消息接口，按模型配置选择 OpenAI 兼容或 Anthropic 原生协议。
+"""Unified messaging with OpenAI-compatible or native Anthropic protocols selected by model config.
 
-三种能力都在这里：
-- 普通/深度思考：stream_chat 逐段吐 ("text"|"reasoning", str)；推理模型的 reasoning_content 单独归到 reasoning。
-- 工具调用：run_agent 跑"回合制 agent 循环"——模型说要调工具→执行→塞回结果→再问，直到出最终答案。
-- 多模态：messages 里的 content 可以是"文本 + image_url"数组（在 context.py 组装）。
+This module provides three capabilities:
+- Standard/deep thinking: stream_chat yields ("text"|"reasoning", str) chunks,
+  routing reasoning_content separately to the reasoning stream.
+- Tool calling: run_agent loops through model requests, tool execution and result
+  reinjection until the model produces a final answer.
+- Multimodal input: message content may be a text/image_url array assembled in context.py.
 
-mock 模式（api_key/base_url=mock）把上面三样都模拟了，没 key 也能 curl 跑通全链路。
+Mock mode (api_key/base_url=mock) simulates these capabilities for end-to-end curl tests
+without an API key.
 """
 
 import json
@@ -49,7 +52,7 @@ def _chunks(s: str, n: int = 4) -> Iterator[str]:
 
 
 def _text_of(content) -> str:
-    """content 可能是 str 或多模态数组，取其中的文字。"""
+    """Extract text from content, which may be a string or a multimodal array."""
     if isinstance(content, list):
         return " ".join(p.get("text", "") for p in content if p.get("type") == "text")
     return content or ""
@@ -63,7 +66,7 @@ def _last_user_text(convo: list[dict]) -> str:
 
 
 def _mock_args(tool: dict, q: str) -> dict:
-    """mock 模式下按工具 schema 生成占位参数，让 MCP 工具也能真被调起来。"""
+    """Generate schema-based placeholder arguments in mock mode, including for MCP tools."""
     params = tool["function"].get("parameters", {})
     props = params.get("properties", {})
     required = params.get("required", list(props.keys()))
@@ -79,11 +82,11 @@ def _mock_args(tool: dict, q: str) -> dict:
     return args
 
 
-# ---------- 普通 / 深度思考：流式 ----------
+# ---------- Standard / deep-thinking responses: streaming ----------
 def stream_chat(
     spec: LLMSpec, system: str, messages: list[dict], deep: bool = False
 ) -> Iterator[tuple[str, str]]:
-    """逐段产出 (kind, text)，kind ∈ {"reasoning","text"}。"""
+    """Yield (kind, text) chunks, where kind is "reasoning" or "text"."""
     if _is_mock(spec):
         if deep:
             for ch in _chunks("（mock 思考）先拆解问题 → 定位关键概念 → 组织答案……"):
@@ -127,9 +130,9 @@ def stream_chat(
         stream.close()
 
 
-# ---------- 工具调用：agent 回合制 ----------
+# ---------- Tool calling: turn-based agent loop ----------
 def _chat_once(spec: LLMSpec, convo: list[dict], tools: list[dict], deep: bool = False) -> dict:
-    """一次非流式调用，返回正文、工具调用及可选的可见思考文本。"""
+    """Make one non-streaming call, returning text, tool calls and optional visible reasoning."""
     if _is_mock(spec):
         has_tool_result = any(m.get("role") == "tool" for m in convo)
         if tools and not has_tool_result:
@@ -147,7 +150,7 @@ def _chat_once(spec: LLMSpec, convo: list[dict], tools: list[dict], deep: bool =
             elif "web_search" in names:
                 name, args = "web_search", {"query": q[:40]}
             else:
-                # 通用工具（含 MCP）：按 schema 把必填参数填上占位值。
+                # For generic tools, including MCP, fill required schema fields with placeholders.
                 tool = tools[0]
                 name, args = tool["function"]["name"], _mock_args(tool, q)
             return {
@@ -190,10 +193,10 @@ def run_agent(
     max_rounds: int = 4,
     deep: bool = False,
 ) -> Iterator[dict]:
-    """产出事件：{"type":"tool_start"|"tool_end"|"reasoning"|"delta", ...}。
+    """Yield events: {"type":"tool_start"|"tool_end"|"reasoning"|"delta", ...}.
 
-    tool_defs：OpenAI 兼容的工具定义（内置 + MCP 混在一起）。
-    execute(name, args)：由上层提供的路由执行器（内置直调、MCP 转发）。
+    tool_defs: OpenAI-compatible definitions for both built-in and MCP tools.
+    execute(name, args): caller-provided router for direct built-in calls or MCP forwarding.
     """
     if _is_mock(spec):
         # A demo must never launch a real process or invoke a selected external tool.
@@ -251,7 +254,7 @@ def run_agent(
     yield {"type": "delta", "text": "（已达最大工具轮数，先答到这。）"}
 
 
-# ---------- 非流式：摘要用 ----------
+# ---------- Non-streaming responses: summarization ----------
 def complete(spec: LLMSpec, system: str, messages: list[dict]) -> str:
     if _is_mock(spec):
         return "（mock 摘要）本节点讲清了这个概念的关键点，可作为下层分支的背景。"
@@ -280,7 +283,7 @@ _EXTRACT_SYSTEM = (
 
 
 def extract_memories(spec: LLMSpec, question: str, answer: str) -> dict:
-    """从一轮问答里提炼记忆，返回 {"preferences": [...], "facts": [...]}。"""
+    """Extract memories from a question/answer pair as {"preferences": [...], "facts": [...]}."""
     if _is_mock(spec):
         return {
             "preferences": ["（mock）偏好简短、生活化的解释"],

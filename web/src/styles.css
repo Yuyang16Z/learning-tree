@@ -68,7 +68,7 @@ button {
   overflow: hidden;
 }
 
-/* ---------- 左侧栏 ---------- */
+/* ---------- Left sidebar ---------- */
 .sidebar {
   width: 220px;
   flex: none;
@@ -128,7 +128,7 @@ button {
   text-align: left;
 }
 
-/* 设置弹窗：固定尺寸、左侧分栏、内容区内部滚动 */
+/* Settings modal: fixed size, left navigation, and an internally scrolling content area */
 .modal.modal-settings {
   width: 620px;
   height: 560px;
@@ -177,7 +177,7 @@ button {
   padding-right: 6px;
 }
 
-/* 用户消息的编辑/删除（悬停显示）*/
+/* Edit/delete actions for user messages (shown on hover) */
 .msg.user .msg-actions {
   display: none;
   gap: 12px;
@@ -199,7 +199,7 @@ button {
   text-decoration: underline;
 }
 
-/* 停止作答按钮 */
+/* Stop response button */
 .send.stop {
   background: transparent;
   color: var(--text);
@@ -207,7 +207,7 @@ button {
   font-size: 12px;
 }
 
-/* 表单弹窗（添加模型 / MCP 配置）*/
+/* Form modals (add model / MCP configuration) */
 .modal.modal-form {
   width: 460px;
 }
@@ -244,7 +244,7 @@ button {
   border-color: var(--err-border);
 }
 
-/* 简洁配置行（MCP 列表）*/
+/* Compact configuration rows (MCP list) */
 .config-row {
   display: flex;
   align-items: center;
@@ -281,7 +281,7 @@ button {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-/* 状态点 */
+/* Status indicators */
 .dot {
   width: 9px;
   height: 9px;
@@ -303,7 +303,7 @@ button {
   background: #ef9f27;
 }
 
-/* 工具下拉 */
+/* Tool dropdown */
 .tool-menu {
   position: relative;
 }
@@ -346,7 +346,7 @@ button {
   padding: 6px 8px;
 }
 
-/* 知识树缩放控件 */
+/* Learning tree zoom controls */
 .tree-zoom {
   position: absolute;
   bottom: 46px;
@@ -446,7 +446,7 @@ input[type="checkbox"] {
   vertical-align: middle;
 }
 
-/* ---------- 中间聊天 ---------- */
+/* ---------- Center chat pane ---------- */
 .center {
   flex: 1;
   min-width: 0;
@@ -652,7 +652,7 @@ input[type="checkbox"] {
   align-items: center;
 }
 
-/* ---------- 右侧知识树 ---------- */
+/* ---------- Right-side learning tree ---------- */
 .right {
   width: 320px;
   flex: none;
@@ -700,7 +700,7 @@ input[type="checkbox"] {
   pointer-events: none;
 }
 
-/* ---------- 弹窗 ---------- */
+/* ---------- Modals ---------- */
 .overlay {
   position: fixed;
   inset: 0;
@@ -810,7 +810,7 @@ input[type="checkbox"] {
   font-size: 12px;
 }
 
-/* ---------- Phase 2：思考 / 工具 / 图片 / 开关 ---------- */
+/* ---------- Phase 2: reasoning / tools / images / toggles ---------- */
 .composer-row {
   flex-wrap: wrap;
 }

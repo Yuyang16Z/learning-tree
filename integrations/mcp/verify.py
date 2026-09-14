@@ -24,7 +24,7 @@ SPECS = {
 def main():
     report = {"verified_at": datetime.now(timezone.utc).isoformat(), "servers": [], "checks": []}
     token = "mcp-check-" + uuid.uuid4().hex[:10]
-    file = ROOT / "学习资料" / f"{token}.txt"
+    file = ROOT / "learning-materials" / f"{token}.txt"
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             futures = {

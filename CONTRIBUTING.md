@@ -22,6 +22,13 @@ Most changes need no local retrieval models. To work on real embedding/reranking
 - Keep the interface concise. Add Chinese and English labels together via the i18n helper; do not translate user content.
 - Tests use an isolated database and do not contact a personal app or real model.
 
+## Repository language
+
+- Use descriptive ASCII filenames and paths, following the surrounding naming style. Use English for ordinary code comments, developer docstrings and the primary documentation.
+- Keep `README.zh-CN.md`, localized documentation, bilingual interface strings and multilingual test fixtures. Never translate saved user content.
+- Treat model prompts, tool descriptions and docstrings exposed through MCP as behavior-bearing text. Change them separately from comment cleanup and verify the affected tool schemas and behavior.
+- Keep private files in `learning-materials/` or the existing legacy library out of commits. The release check enforces ASCII source paths and rejects private data even when force-staged.
+
 ## Pull requests
 
 Explain the user-visible behavior and how you verified it. Screenshots must use synthetic content. Never commit databases, `.env`, keys, private learning material or browser profiles. After staging, run `uv run python scripts/check_release.py` to check the proposed source snapshot. Follow [SECURITY.md](SECURITY.md) for sensitive reports.

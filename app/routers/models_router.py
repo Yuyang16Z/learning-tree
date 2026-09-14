@@ -1,4 +1,4 @@
-"""模型配置：增 / 列 / 删 / 测连接。api_key 只进不出（返回一律脱敏）。"""
+"""Model configuration: add, list, delete and test connections. API keys are masked in responses."""
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
@@ -29,7 +29,7 @@ def _out(cfg: ModelConfig) -> ModelConfigOut:
 @router.post("", response_model=ModelConfigOut)
 def add_model(body: ModelConfigIn, session: Session = Depends(get_session)) -> ModelConfigOut:
     cfg = ModelConfig(**body.model_dump())
-    if cfg.is_default:  # 保证同时只有一条默认
+    if cfg.is_default:  # Keep exactly one default model at a time.
         for other in session.exec(select(ModelConfig).where(ModelConfig.is_default == True)):  # noqa: E712
             other.is_default = False
             session.add(other)

@@ -47,14 +47,14 @@ Open **Settings → MCP tools**, test or enable a server, then select the tools 
 
 ## Data and process boundaries / 数据与会话
 
-- **Learning files:** only the project's `学习资料/` directory is exposed for reading and writing. Place your own files there; they are excluded from Git. A symlink replacing the entire library directory is rejected.
+- **Learning files:** the project's `learning-materials/` directory is exposed for reading and writing. An existing legacy `学习资料/` directory remains accessible in place; files are never moved, merged or overwritten during this transition. Both libraries are excluded from Git except the public `learning-materials/README.md`. A symlink replacing either library root is rejected. Restart the app after upgrading to refresh cached MCP sessions.
 - **Knowledge memory:** `mcp-data/knowledge.jsonl` persists across restarts. It is independent of chat history and is not included in learning-tree JSON exports; back it up separately if needed.
 - **Browser:** runs headless with an isolated, temporary profile. On macOS, installed Google Chrome is used when available; otherwise the installer downloads Playwright Chromium. It does not attach to your existing browser or reuse its logins. Output is stored under `mcp-data/browser/`; the current model tool channel passes text and page structure.
 - **Time:** uses the operating system's timezone by default; tool calls may specify any supported IANA timezone.
 - **Credentials:** the launcher forwards only basic OS, locale, proxy and certificate settings, never model API keys from the application environment.
 - **Continuity:** the backend reuses each MCP process and session. Navigation and subsequent page queries share a browser session. Closing the app or reconnecting resets browser/thinking state; files and saved memory remain.
 
-文件工具的读写范围为 `学习资料/`；MCP 不是通用系统沙箱。网页阅读保留上游默认的 robots.txt 行为。分步思考工具保存分解步骤，不会改变模型本身的推理能力。
+文件工具的读写范围为 `learning-materials/`，并兼容原有的 `学习资料/` 目录；升级不会搬动或合并私人文件，两个目录中的资料都继续排除在 Git 之外。升级后重启应用以刷新 MCP 会话。MCP 不是通用系统沙箱。网页阅读保留上游默认的 robots.txt 行为。分步思考工具保存分解步骤，不会改变模型本身的推理能力。
 
 The separate built-in **Web search** tool uses DDGS when no search key is configured. `TAVILY_API_KEY` opts into Tavily. Failures and empty results are reported explicitly; simulated search results are never substituted.
 

@@ -1,4 +1,6 @@
-"""长期记忆：列 / 删一条 / 清空。自动提炼在 nodes.ask 里后台完成，这里只做管理。"""
+"""Memory management: list, delete one or clear all.
+
+Automatic extraction runs in the background through nodes.ask; this module only manages records."""
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import delete

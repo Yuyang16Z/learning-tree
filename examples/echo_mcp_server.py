@@ -1,9 +1,9 @@
-"""一个最小 MCP server（stdio），用来离线验证 MCP 工具链路。
+"""A minimal stdio MCP server for offline tool-integration checks.
 
-在「设置 → MCP 工具」里这样配：
-  command = <项目 .venv 的 python 绝对路径>
-  args    = ["<本文件绝对路径>"]
-它暴露两个工具：echo、add。
+Configure it in Settings → MCP tools:
+  command = <absolute path to the project .venv Python executable>
+  args    = ["<absolute path to this file>"]
+It exposes two tools: echo and add. Their localized descriptions are model-facing.
 """
 
 from mcp.server.fastmcp import FastMCP
@@ -24,4 +24,4 @@ def add(a: int, b: int) -> int:
 
 
 if __name__ == "__main__":
-    mcp.run()  # 默认 stdio 传输
+    mcp.run()  # Use the default stdio transport.

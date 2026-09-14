@@ -10,13 +10,13 @@ def _now() -> datetime:
 
 
 class ModelConfig(SQLModel, table=True):
-    """一条模型配置；协议与服务地址分开保存，密钥只留在后端。"""
+    """Model configuration with separate protocol and endpoint fields; keys stay in the backend."""
 
     id: int | None = Field(default=None, primary_key=True)
-    label: str  # 显示名，如 "DeepSeek V3"
+    label: str  # Display name, e.g. "DeepSeek V3".
     base_url: str  # https://api.deepseek.com/v1
-    llm_model: str  # deepseek-chat（发给 API 的 model 字段）
-    api_key: str  # 只存后端，接口返回时脱敏
+    llm_model: str  # API model identifier, e.g. "deepseek-chat".
+    api_key: str  # Stored only in the backend and masked in API responses.
     protocol: Literal["openai", "anthropic"] = Field(
         default="openai", sa_column=Column(String, nullable=False, default="openai")
     )
@@ -27,12 +27,14 @@ class ModelConfig(SQLModel, table=True):
 
 
 class Memory(SQLModel, table=True):
-    """长期记忆。preference=关于用户的持久偏好/习惯（全局，tree_id 空）；fact=某话题的关键结论（按 tree）。"""
+    """Long-term memory: global user preferences/habits or topic-specific facts.
+
+    Preferences leave tree_id unset; facts are scoped to a tree."""
 
     id: int | None = Field(default=None, primary_key=True)
     kind: str  # "preference" | "fact"
     content: str
-    tree_id: int | None = Field(default=None, index=True)  # fact 挂到具体知识树；preference 为空
+    tree_id: int | None = Field(default=None, index=True)  # Unset for global preferences.
     source_node_id: int | None = None
     created_at: datetime = Field(default_factory=_now)
 
@@ -47,18 +49,18 @@ class MemoryEmbedding(SQLModel, table=True):
 
 
 class McpServer(SQLModel, table=True):
-    """用户配置的一个 MCP server（stdio 传输）。启用后，它暴露的工具会进 agent 回合。"""
+    """A user-configured stdio MCP server whose tools are available to agent turns when enabled."""
 
     id: int | None = Field(default=None, primary_key=True)
-    label: str  # 显示名，如 "fetch"、"filesystem"
-    command: str  # 启动命令，如 "uvx"、"npx"、"python"
-    args: list | None = Field(default=None, sa_column=Column(JSON))  # 参数，如 ["mcp-server-fetch"]
+    label: str  # Display name, e.g. "fetch" or "filesystem".
+    command: str  # Launch command, e.g. "uvx", "npx" or "python".
+    args: list | None = Field(default=None, sa_column=Column(JSON))  # E.g. ["mcp-server-fetch"].
     enabled: bool = True
     created_at: datetime = Field(default_factory=_now)
 
 
 class KnowledgeTree(SQLModel, table=True):
-    """一整棵知识树 = 一个学习主题。左侧栏列的就是它。"""
+    """A knowledge tree represents one learning topic listed in the left sidebar."""
 
     id: int | None = Field(default=None, primary_key=True)
     title: str
@@ -66,15 +68,17 @@ class KnowledgeTree(SQLModel, table=True):
 
 
 class Node(SQLModel, table=True):
-    """树上的一个节点 = 一小段聚焦的问答。parent_id 串成树；seed_text 是开分支时选中的引子。"""
+    """A node represents a focused conversation within a tree.
+
+    parent_id links the tree; seed_text stores the text selected to start a branch."""
 
     id: int | None = Field(default=None, primary_key=True)
     tree_id: int = Field(foreign_key="knowledgetree.id", index=True)
     parent_id: int | None = Field(default=None, foreign_key="node.id", index=True)
     title: str
-    seed_text: str | None = None  # 从父节点划词开分支时选中的那段概念
+    seed_text: str | None = None  # Text selected in the parent node when creating a branch.
     title_state: str = "legacy"  # empty/pending/ai/fallback/manual; separate from answer status
-    summary: str | None = None  # 缓存摘要，喂给子节点当上下文（脊柱用）
+    summary: str | None = None  # Cached summary used as context along the ancestor path.
     kind: str = "followup"
     status: str = "idle"
     error: str | None = None
@@ -89,19 +93,19 @@ class Node(SQLModel, table=True):
 
 
 class Message(SQLModel, table=True):
-    """节点内的一轮问答。answered_by 记录这段是哪个模型答的。"""
+    """A question/answer message within a node; answered_by records the responding model."""
 
     id: int | None = Field(default=None, primary_key=True)
     node_id: int = Field(foreign_key="node.id", index=True)
     role: str  # "user" | "assistant"
     status: str = "complete"
     content: str
-    answered_by: str | None = None  # assistant 专用：模型显示名
-    # 多模态：用户消息带的图片（data URI 列表），会随脊柱一起回传给模型
+    answered_by: str | None = None  # Assistant messages only: model display name.
+    # Multimodal input: user images as data URIs, passed with the ancestor path.
     images: list | None = Field(default=None, sa_column=Column(JSON))
     document_ids: list[str] | None = Field(default=None, sa_column=Column(JSON))
-    # 深度思考：assistant 的思考过程（推理模型的 reasoning_content）
+    # Deep thinking: assistant reasoning from the model's reasoning_content field.
     reasoning: str | None = None
-    # 工具调用步骤：[{"tool":..,"args":..,"result":..}]，供前端折叠展示
+    # Tool steps: [{"tool":..,"args":..,"result":..}] for collapsible frontend display.
     steps: list | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=_now)

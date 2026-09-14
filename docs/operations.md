@@ -24,7 +24,8 @@ An occupied port is not forcibly freed. Ctrl+C stops the app. Use one backend pe
 | `.runtime/dev.db` | Separate development data and demo configuration. |
 | `.runtime/retrieval/models/` | Pinned public embedding/reranker weights; no chat records. |
 | `.backups/` | Private database copies including credentials. |
-| `学习资料/` | Files exposed to the optional file tool. |
+| `learning-materials/` | Files exposed to the optional file tool; only its public README is tracked. |
+| `学习资料/` (legacy) | Existing learning files remain accessible in place after upgrading and stay excluded from Git. |
 | `mcp-data/` | MCP knowledge graph and browser artifacts. |
 | Browser storage | Drafts, positions, delete-recovery snapshot and language. |
 
@@ -50,7 +51,7 @@ Ordinary `uv run` commands and the setup command preserve installed optional dep
 
 Existing memories do not need to be imported again. Their IDs and content are unchanged, and missing embedding-cache entries are generated lazily during retrieval. The cache is derived data: a restored database without these vectors can rebuild them from its memory records. A missing model-weight cache is restored by preparation. If you prepare weights with the CLI while the app is already running, use **Prepare / retry** in that process or restart to load them.
 
-Deleting one memory, clearing memory, or deleting a source branch/tree also removes associated cached vectors. Deleting an extracted memory does not delete the original chat messages, which may still enter the current conversation's context. These controls do not clear MCP memory or index/delete files in `学习资料/`; those are independent stores.
+Deleting one memory, clearing memory, or deleting a source branch/tree also removes associated cached vectors. Deleting an extracted memory does not delete the original chat messages, which may still enter the current conversation's context. These controls do not clear MCP memory or index/delete files in `learning-materials/` or the legacy `学习资料/` directory; those are independent stores.
 
 ## Model context settings
 
@@ -68,6 +69,8 @@ If the app reports that a question, quotation, image or tool information exceeds
 2. Run `uv run python scripts/manage.py backup`.
 3. Pull the update; run `uv run python scripts/manage.py setup`.
 4. Start again and refresh the browser. Additive upgrades preserve existing IDs and records.
+
+The macOS launcher is now `start-learning-tree.command`. New learning files belong in `learning-materials/`. If the old `学习资料/` directory exists, the file MCP also exposes it in place; the upgrade never moves, merges or overwrites private files. Both libraries stay excluded from Git apart from `learning-materials/README.md`. Restart the app after updating so cached MCP sessions reload the directory list.
 
 For a tagged version, see the corresponding [release notes](releases/v0.2.0.md). Basic setup preserves previously installed semantic dependencies and existing model caches. New users can add semantic retrieval separately; upgrading does not require downloading models merely to use chat or keyword memory.
 

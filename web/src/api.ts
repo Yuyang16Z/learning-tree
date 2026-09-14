@@ -148,7 +148,7 @@ export const api = {
     method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ learning_note }),
   }).then(j<unknown>),
 
-  // 流式提问：逐段回调（文本 / 思考 / 工具步骤），返回结束时的元信息。signal 可中止。
+  // Stream text, reasoning, and tool-step callbacks; return completion metadata. The signal can abort the request.
   async ask(nodeId: number, body: AskBody, on: AskHandlers, signal?: AbortSignal): Promise<AskMeta> {
     const res = await fetch(`${API}/nodes/${nodeId}/ask`, {
       method: "POST",
