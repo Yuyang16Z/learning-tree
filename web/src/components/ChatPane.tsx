@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import { api, type ContextStatus } from "../api";
 import { useI18n } from "../i18n";
 import { localizeError, mcpDisplayName } from "../i18n/workspace";
-import { clearAcceptedDraft, moveFollowupDraft, type ChatDraft as Draft } from "../lib/chatDrafts";
+import { clearAcceptedDraft, isEmptyDraft, moveFollowupDraft, type ChatDraft as Draft } from "../lib/chatDrafts";
 import { documentMetadata, DocumentUploadQueue } from "../lib/documentUploads";
 import { ATTACHMENT_ACCEPT, attachmentKind, ImageAttachmentQueue, MAX_IMAGES, readImage } from "../lib/attachments";
 import { copyText } from "../lib/clipboard";
@@ -42,7 +42,7 @@ interface Props {
   onOpenSettings: () => void;
   onAsk: (p: Ask) => Promise<boolean>;
   onStop: () => void;
-  onBranch: (seed: string, fromNodeId: number, anchor?: Anchor) => Promise<void>;
+  onBranch: (seed: string, fromNodeId: number, anchor?: Anchor, onCreated?: (nodeId: number) => void) => Promise<void>;
   onDeleteNode: (id: number) => void;
   onNavigate: (id: number, anchor?: Destination) => Promise<void>;
   navigationAnchor?: (Destination & { nodeId: number; nonce: number }) | null;
@@ -227,6 +227,7 @@ export function ChatPane(props: Props) {
   const compEndAt = useRef(0);
   const sendingRef = useRef(false);
   const followupRef = useRef<{ sourceKey: string; targetKey: string } | null>(null);
+  const branchFocusRef = useRef<{ sourceKey: string; targetKey: string } | null>(null);
   const uploadKeysRef = useRef(new Set<string>());
   activeKeyRef.current = draftKey;
   if (!documentUploadsRef.current) documentUploadsRef.current = new DocumentUploadQueue({
@@ -301,6 +302,21 @@ export function ChatPane(props: Props) {
     restoredRef.current = null;
     stickToBottom.current = false;
   }, [draftKey, scrollKey]);
+
+  useLayoutEffect(() => {
+    const pending = branchFocusRef.current;
+    if (!pending) return;
+    if (draftKey !== pending.sourceKey && draftKey !== pending.targetKey) {
+      branchFocusRef.current = null;
+      return;
+    }
+    if (draftKey === pending.targetKey && !loading && textareaRef.current) {
+      const input = textareaRef.current;
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+      branchFocusRef.current = null;
+    }
+  }, [draftKey, loading]);
 
   useEffect(() => {
     const flush = () => { try { writeDraft(draftRef.current); } catch { /* Existing records stay untouched. */ } };
@@ -430,13 +446,28 @@ export function ChatPane(props: Props) {
   }
   async function branchSelection() {
     if (!selection || branching || streaming) return;
+    const selected = selection;
+    const selectionRequest = selectionRequestRef.current;
+    const sourceKey = draftKey;
+    const treeId = activeTreeId;
+    let targetKey: string | null = null;
     setBranching(true);
     try {
-      await onBranch(selection.text, selection.nodeId, { source_message_id: selection.messageId, source_start: selection.start, source_end: selection.end });
-      setSelection(null);
-      window.getSelection()?.removeAllRanges();
-      textareaRef.current?.focus();
-    } catch (error) { setSelection(current => current ? { ...current, state: "error", error: error instanceof Error ? error.message : t("分支创建失败，请重试。", "Could not create the branch. Try again.") } : null); }
+      await onBranch(selected.text, selected.nodeId, { source_message_id: selected.messageId, source_start: selected.start, source_end: selected.end }, nodeId => {
+        targetKey = draftKeyFor(treeId, nodeId);
+        // Seed the new node before navigation reads its draft; keep the source draft intact.
+        const existing = readDraft(targetKey);
+        if (isEmptyDraft(existing)) commitDraft({ ...existing, text: selected.text });
+        if (activeKeyRef.current === sourceKey) branchFocusRef.current = { sourceKey, targetKey };
+      });
+      if (activeKeyRef.current === targetKey) {
+        setSelection(null);
+        window.getSelection()?.removeAllRanges();
+      }
+    } catch (error) {
+      if (activeKeyRef.current === sourceKey && selectionRequestRef.current === selectionRequest)
+        setSelection(current => current ? { ...current, state: "error", error: error instanceof Error ? error.message : t("分支创建失败，请重试。", "Could not create the branch. Try again.") } : null);
+    }
     finally { setBranching(false); }
   }
   async function branchAnswer(node: ThreadNode) {

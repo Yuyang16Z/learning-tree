@@ -406,12 +406,13 @@ export default function App() {
     finally { ctrl.abort(); }
   }
 
-  async function onBranch(seed: string, fromNodeId: number, anchor?: SourceAnchor): Promise<void> {
+  async function onBranch(seed: string, fromNodeId: number, anchor?: SourceAnchor, onCreated?: (nodeId: number) => void): Promise<void> {
     const treeId = treeRef.current;
     if (!treeId) return;
     const ticket = navigation.current.next();
     try {
       const child = await api.branch(fromNodeId, seed, anchor);
+      onCreated?.(child.id);
       await refreshTree(treeId);
       if (treeRef.current === treeId && navigation.current.current(ticket)) await selectNode(child.id);
     } catch (e) { if (treeRef.current === treeId) setErr(String((e as Error).message ?? e)); throw e; }

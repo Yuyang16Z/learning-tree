@@ -187,6 +187,8 @@ async function poll(callback) {
     assert.equal(branch.title, '');
     assert.equal(branch.title_state, 'empty');
     await page.locator('.learning-map').getByRole('button', { name: 'New branch', exact: true }).waitFor();
+    await poll(async () => (await input.inputValue()) === '');
+    assert.equal(await input.inputValue(), '', 'A whole-answer branch keeps its composer empty; only an explicitly selected passage is prefilled');
     const branchQuestion = 'How can I compare two evaluation frameworks?';
     await input.fill(branchQuestion);
     await input.press('Enter');

@@ -56,6 +56,7 @@ async function poll(callback, label) {
     ];
   });
   const tree = await api('/trees/import', { format: 'branch-learning', version: 1, tree: { title: 'Chat navigation UI check' }, nodes, messages });
+  const peerTree = await api('/trees', { title: 'Branch prefill independent topic' });
   const storedNodes = await api(`/trees/${tree.id}`);
   const leaf = storedNodes.find(node => !storedNodes.some(other => other.parent_id === node.id));
   const thread = (await api(`/nodes/${leaf.id}/thread`)).nodes;
@@ -77,8 +78,8 @@ async function poll(callback, label) {
   await context.addInitScript(({ treeId, leafId }) => {
     localStorage.setItem('learning-tree.locale', 'en');
     localStorage.setItem('bl-theme', 'dark');
-    localStorage.setItem('bl-tree', JSON.stringify(treeId));
-    localStorage.setItem(`bl-node:${treeId}`, JSON.stringify(leafId));
+    if (!localStorage.getItem('bl-tree')) localStorage.setItem('bl-tree', JSON.stringify(treeId));
+    if (!localStorage.getItem(`bl-node:${treeId}`)) localStorage.setItem(`bl-node:${treeId}`, JSON.stringify(leafId));
   }, { treeId: tree.id, leafId: leaf.id });
   const rail = page.getByRole('navigation', { name: 'Question navigation', exact: true });
   const tick = number => rail.getByRole('button', { name: `Jump to question ${number}: ${questions[number - 1]}`, exact: true });
@@ -90,6 +91,26 @@ async function poll(callback, label) {
       const viewport = element.closest('.chat-scroll').getBoundingClientRect();
       return rect.top >= viewport.top - 4 && rect.top < viewport.bottom - 20;
     }), `question ${number} is visible in its own turn`);
+  }
+  async function selectAnswerText(answer, text) {
+    await answer.locator('p').first().scrollIntoViewIfNeeded();
+    await answer.evaluate((element, text) => {
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+      const start = element.textContent.indexOf(text);
+      if (start < 0) throw new Error('Synthetic selection text missing');
+      const end = start + text.length;
+      const range = document.createRange();
+      let offset = 0, started = false, current;
+      while ((current = walker.nextNode())) {
+        const length = current.textContent.length;
+        if (!started && start < offset + length) { range.setStart(current, start - offset); started = true; }
+        if (started && end <= offset + length) { range.setEnd(current, end - offset); break; }
+        offset += length;
+      }
+      const selection = window.getSelection();
+      selection.removeAllRanges(); selection.addRange(range);
+      element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+    }, text);
   }
   try {
     await page.goto(base);
@@ -132,23 +153,7 @@ async function poll(callback, label) {
     const selectedText = 'ORCHID-417 and syntax trees';
     const answer = turn(2).locator('[data-answer-node]');
     await answer.locator('p').first().scrollIntoViewIfNeeded();
-    await answer.evaluate((element, text) => {
-      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
-      const start = element.textContent.indexOf(text);
-      if (start < 0) throw new Error('Synthetic selection text missing');
-      const end = start + text.length;
-      const range = document.createRange();
-      let offset = 0, started = false, current;
-      while ((current = walker.nextNode())) {
-        const length = current.textContent.length;
-        if (!started && start < offset + length) { range.setStart(current, start - offset); started = true; }
-        if (started && end <= offset + length) { range.setEnd(current, end - offset); break; }
-        offset += length;
-      }
-      const selection = window.getSelection();
-      selection.removeAllRanges(); selection.addRange(range);
-      element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
-    }, selectedText);
+    await selectAnswerText(answer, selectedText);
     const copy = page.getByRole('button', { name: 'Copy selected text', exact: true });
     await copy.waitFor();
     await page.screenshot({ path: path.join(artifacts, 'chat-selection-copy.png') });
@@ -171,6 +176,94 @@ async function poll(callback, label) {
     assert((await scroller.evaluate(element => element.scrollHeight)) > (await scroller.evaluate(element => element.clientHeight)));
     await page.screenshot({ path: path.join(artifacts, 'chat-question-navigation-mobile.png') });
     checks.push('The navigation rail remains usable on a narrow screen without horizontal overflow');
+
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await tick(2).click();
+    await assertQuestionVisible(2);
+    const input = page.getByRole('textbox', { name: 'Enter a question', exact: true });
+    const sourceDraft = 'Keep this question on the original learning path.';
+    const sourceDraftKey = `bl-draft-v2:${tree.id}:${leaf.id}`;
+    await input.fill(sourceDraft);
+    const originalSource = await api(`/nodes/${thread[1].node_id}`);
+    await selectAnswerText(answer, selectedText);
+    const firstBranchResponse = page.waitForResponse(response => new URL(response.url()).pathname === `/api/nodes/${thread[1].node_id}/branch` && response.request().method() === 'POST');
+    await page.locator('.chat-selection-card').getByRole('button', { name: 'New branch', exact: true }).click();
+    const selectedBranch = await (await firstBranchResponse).json();
+    await poll(async () => (await input.inputValue()) === selectedText, 'selected passage appears in the new branch draft');
+    await poll(async () => input.evaluate((element, length) => document.activeElement === element && element.selectionStart === length && element.selectionEnd === length, selectedText.length), 'new branch has focus with its caret after the exact selected text');
+    assert.equal(selectedBranch.seed_text, selectedText);
+    assert.equal(selectedBranch.source_node_id, thread[1].node_id);
+    assert.equal(selectedBranch.source_message_id, thread[1].answer_message_id);
+    assert.equal(selectedBranch.source_end - selectedBranch.source_start, selectedText.length);
+    assert.equal(selectedBranch.title, '', 'Prefilling an editable draft does not create a saved question or title');
+    assert.equal((await api(`/nodes/${selectedBranch.id}`)).messages.length, 0);
+    assert.deepEqual(await api(`/nodes/${thread[1].node_id}`), originalSource, 'Branching keeps the source messages unchanged');
+    assert.equal(await page.evaluate(key => JSON.parse(localStorage.getItem(key)).text, sourceDraftKey), sourceDraft);
+    assert.equal(modelCalls, 0, 'Prefilling a selected passage never automatically asks or explains');
+    await page.screenshot({ path: path.join(artifacts, 'chat-selection-branch-prefill.png') });
+    const editedSelection = `${selectedText}\n\nCould you give a concrete example?`;
+    await input.press('End');
+    await input.press('Shift+Enter');
+    await input.press('Shift+Enter');
+    await input.pressSequentially('Could you give a concrete example?');
+    assert.equal(await input.inputValue(), editedSelection, 'Typing appends to the prefilled selection');
+    await page.reload();
+    await poll(async () => (await input.inputValue()) === editedSelection, 'the edited branch draft survives reload');
+    assert.equal(await page.evaluate(id => JSON.parse(localStorage.getItem(`bl-node:${id}`)), tree.id), selectedBranch.id);
+    assert.equal(await page.evaluate(key => JSON.parse(localStorage.getItem(key)).text, sourceDraftKey), sourceDraft);
+    assert.equal(modelCalls, 0);
+    checks.push('A selected passage spanning Markdown nodes prefills an editable branch draft, focuses its final character, preserves the source draft and messages, and survives reload without a model call');
+
+    // Hold a real isolated branch response after server creation. The user can
+    // change topics before its result arrives; completion must only seed that
+    // new branch's own draft and must not steal the current topic's focus.
+    await page.getByRole('button', { name: 'Back to source ↗', exact: true }).click();
+    const sourceAnswer = page.locator(`[data-message-id="${thread[1].answer_message_id}"]`);
+    await sourceAnswer.waitFor();
+    await selectAnswerText(sourceAnswer, selectedText);
+    let releaseBranch;
+    const held = new Promise(resolve => { releaseBranch = resolve; });
+    let delayedBranch = null;
+    const branchRoute = `**/api/nodes/${thread[1].node_id}/branch`;
+    await page.route(branchRoute, async route => {
+      const response = await route.fetch();
+      delayedBranch = await response.json();
+      await held;
+      await route.fulfill({ response });
+    });
+    try {
+      await page.locator('.chat-selection-card').getByRole('button', { name: 'New branch', exact: true }).click();
+      await poll(async () => delayedBranch !== null, 'the server created the delayed branch');
+      await page.locator('.sidebar').getByRole('button', { name: peerTree.title, exact: true }).click();
+      await page.getByRole('heading', { name: peerTree.title, exact: true, level: 1 }).waitFor();
+      await poll(async () => !(await input.isDisabled()), 'the other topic is ready to edit');
+      const peerDraft = 'This separate topic keeps my current question.';
+      await input.fill(peerDraft);
+      await input.evaluate(element => { element.focus(); element.setSelectionRange(5, 13); });
+      const refreshedSource = page.waitForResponse(response => new URL(response.url()).pathname === `/api/trees/${tree.id}`);
+      releaseBranch();
+      await refreshedSource;
+      const delayedKey = `bl-draft-v2:${tree.id}:${delayedBranch.id}`;
+      await poll(async () => page.evaluate(key => JSON.parse(localStorage.getItem(key) ?? 'null')?.text === 'ORCHID-417 and syntax trees', delayedKey), 'the late result stores only its own branch draft');
+      await page.evaluate(() => new Promise(requestAnimationFrame));
+      assert.equal(await input.inputValue(), peerDraft);
+      assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('bl-tree'))), peerTree.id, 'The delayed branch cannot navigate away from the newly selected topic');
+      assert(await input.evaluate(element => document.activeElement === element && element.selectionStart === 5 && element.selectionEnd === 13), 'A late branch response cannot steal focus or move the other draft caret');
+      await page.evaluate(({ treeId, nodeId }) => {
+        localStorage.setItem('bl-tree', JSON.stringify(treeId));
+        localStorage.setItem(`bl-node:${treeId}`, JSON.stringify(nodeId));
+      }, { treeId: tree.id, nodeId: delayedBranch.id });
+      await page.reload();
+      await poll(async () => (await input.inputValue()) === selectedText, 'opening the delayed branch restores its selected passage');
+      assert.equal(await page.evaluate(key => JSON.parse(localStorage.getItem(key)).text, `bl-draft-v2:${peerTree.id}:${peerTree.root_node_id}`), peerDraft);
+      assert.equal(await page.evaluate(key => JSON.parse(localStorage.getItem(key)).text, sourceDraftKey), sourceDraft);
+      assert.equal(modelCalls, 0);
+      assert.equal(branchCalls, 2);
+      checks.push('A branch response delayed across a topic switch preserves the current topic, text and caret; its selected passage remains available when that branch is opened later');
+    } finally {
+      releaseBranch();
+      await page.unroute(branchRoute);
+    }
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ ok: true, checks }, null, 2));
   } finally {
