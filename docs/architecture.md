@@ -13,6 +13,7 @@ LearningTree uses React + TypeScript and FastAPI + SQLite/SQLModel. Normal start
 | `app/context.py` | Budget-aware active-path assembly and scoped source rereading. |
 | `app/context_budget.py` | Local request-size estimates and protocol-preserving fitting before provider calls. |
 | `app/context_compaction.py` | Cited, complete-sentence extraction and a bounded process-local cache. |
+| `app/tool_catalog.py` | Turn-scoped discovery and exact tool-schema loading within the context allowance. |
 | `app/documents.py` | Local document storage, bounded parsing, previews and original downloads. |
 | `app/retrieval.py` | Source filtering, keyword/vector ranking, fusion, deduplication and memory budgets. |
 | `app/semantic_models.py` | Pinned local embedding/reranker models, cached startup and explicit preparation. |
@@ -100,6 +101,10 @@ Server-sent events carry updates. Partial output is retained after interruption 
 OpenAI-compatible Chat Completions and Anthropic Messages use distinct message, image, stream and tool formats. Mock responses exercise local interactions without paid calls; they do not validate a remote model's capabilities.
 
 ## Tools and persistence
+
+The composer toggles select available capabilities; one MCP server can expose many tools. Small tool sets continue to use their original direct definitions. When all selected schemas would exceed their allowance, a turn-local catalog exposes a compact search tool and retains the scoped conversation/document readers. Searching only discovers definitions from the selected set; it does not execute the tools. The catalog loads complete original argument schemas for subsequent requests. Its schema allowance normally targets one third of the input budget, with a minimum sufficient for the pinned readers and discovery definition; it is always capped by the space remaining after mandatory inputs and tool-result headroom. A single definition that cannot fit is reported as unavailable within the current budget instead of silently altering its required arguments.
+
+Each model round is fitted with that round's active definitions. Tool execution is restricted to the definitions advertised in the request that produced the call, so discovery cannot authorize an unselected tool or retroactively authorize another call in the same response. Tool results keep their call IDs and Anthropic native blocks. When earlier derived context crowds out results, fitting can fall back to the protected current inputs rather than discarding the current question, quotation or note. Original stored messages and tool outputs are not rewritten. After the bounded tool rounds, one final request without tools synthesizes the collected evidence; executed actions are not replayed to recover omitted text.
 
 MCP sessions persist between calls, preserving browser/thinking state; calls into a session are serialized. A timed-out or uncertain execution is not blindly replayed. Shutdown closes the runtime. Optional dependencies live under `integrations/mcp/node_modules` and `.runtime/mcp-python`. Registration saves machine-specific paths in SQLite; moving the project requires re-registration.
 

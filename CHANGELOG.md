@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Load large selected tool sets on demand within a schema budget, preserving exact argument definitions and restricting execution to tools advertised for that model round. Keep original-source readers available, report individual definitions that cannot fit, and finish bounded tool loops with a no-tool answer attempt. Preserve current inputs and stored originals while fitting later tool results.
+
 - Add a compact question-navigation rail with hover previews, keyboard access and local scroll jumps, including legacy multi-turn nodes. Add selected-text copy beside inline Explain and New branch.
 
 - Keep the preferences editor at a fixed height with internal scrolling.

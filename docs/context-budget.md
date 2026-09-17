@@ -29,6 +29,12 @@ When tools are available, initial context assembly also leaves `min(4096, input_
 
 An OpenAI-compatible model's **Answer reserve** is only a local planning allowance. LearningTree does not add a new output-cap parameter to those requests, so the provider may generate more than that reserve. Native Anthropic requests continue to send `max_tokens`. In either case, use the provider's real limits rather than increasing the configured window merely to dismiss an error.
 
+## Many selected tools
+
+One checked MCP server can expose many functions. When their combined definitions exceed the schema allowance (normally one third of the input budget, adjusted for mandatory input and internal readers), LearningTree switches to a request-local tool catalog. It initially sends discovery, source readers and a small relevant set. The model uses `search_available_tools` to find selected functions by name or description, then receives their complete native schemas on its next request. Searching does not execute the functions or enable unselected servers.
+
+The initial context reserves room for later schema loading as well as tool results. Newly requested definitions can replace older ones within that allowance. An individual definition too large to fit is reported as unavailable through discovery; its required arguments are never silently removed. Small tool sets keep the direct path. Catalog mode allows six tool rounds, followed when necessary by one answer-only request to synthesize the collected evidence.
+
 ## What the estimator counts
 
 The estimator covers system instructions, message content, selected memory, quoted material, images, tool definitions and the tool calls/results accumulated in the current loop. It runs before answer-provider requests, including each continuation after a tool result.
@@ -73,9 +79,11 @@ The chat runtime adjusts source-text page length and directory page size to the 
 
 Tool outputs can make a previously small request too large. The final fitting step first removes older history as complete protocol groups and explicitly notes the omission, reminding the model to reread eligible sources if needed. It preserves the current question and current tool-call IDs, arguments and required native blocks, including Anthropic signatures.
 
+If more room is needed, the request drops optional historical excerpts, retrieved memories and document snippets from the system context, with an omission notice. The current quotation and learning note remain intact. Source and document readers stay available to retrieve eligible originals within the remaining tool rounds.
+
 If tool-result bodies still exceed the budget, the request can retain their beginning and end with an explicit notice that the middle was omitted. That notice tells the model not to infer that missing content does not exist and not to repeat a side-effecting operation merely to obtain a fuller result. A shortened result is not a full execution log or proof that the entire output was checked.
 
-If mandatory content such as the current question, quotation, images or tool schemas cannot fit, the app reports an actionable error. Shorten the input, reduce images or enabled tools, or correct the model's configured window when the provider actually supports more. The app does not silently cut mandatory input or change stored originals to force the request through.
+If mandatory content such as the current question, quotation, images, required readers or accumulated signed tool-call metadata cannot fit, the app reports an actionable error. Shorten the input, reduce images, or correct the model's configured window when the provider actually supports more. The app does not silently cut mandatory input or change stored originals to force the request through.
 
 See [local operation and backups](operations.md), [architecture](architecture.md) and [the memory-retrieval design](architecture.md#learning-memory-retrieval).
 
@@ -85,4 +93,6 @@ See [local operation and backups](operations.md), [architecture](architecture.md
 
 短对话保持完整；长对话优先保留近期完整问答，较早内容按条件、纠正、问题、定义和用户理解等类别抽取完整原句，附上来源。这里没有调用另一个模型自由改写，也没有改动聊天原文；但抽取可能漏掉相关句子或相邻语境，不能宣称无损压缩。
 
-首次上下文已压缩，或用户选中了可能继续产生较长结果的工具时，会启用 `read_learning_source`，供 Agent 分页回读当前学习路径原文，执行时重新核对来源范围。短且未选工具的问答保留普通流式路径。回读不会把兄弟分支、其他知识树或任意文件开放给模型。后续再次省略历史会明确提示；超长工具结果会标记只保留首尾，不能为补读而重放有副作用的操作。若当前问题、引用、图片或工具定义本身已超预算，则提示调整输入或模型配置。
+勾选一组 MCP 可能展开成很多函数。工具定义较多时改为按需发现与加载，选中的工具仍可检索，完整参数定义在下一轮发给模型；检索本身不会执行工具。系统同时预留后续加载和结果所需空间。单个定义仍过大时会明确告知，不会擅自删减参数。
+
+首次上下文已压缩，或用户选中了可能继续产生较长结果的工具时，会启用 `read_learning_source`，供 Agent 分页回读当前学习路径原文，执行时重新核对来源范围。短且未选工具的问答保留普通流式路径。回读不会把兄弟分支、其他知识树或任意文件开放给模型。后续工具调用增长时先省略较早问答，再回收可选历史、记忆和文档摘录；仍不够时，超长工具结果标记只保留首尾，不能为补读而重放有副作用的操作。当前问题、引用、图片、学习笔记及原始存档会保留；必要输入仍超预算时提示调整输入或模型配置。

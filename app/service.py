@@ -77,7 +77,7 @@ def assemble_tools(session: Session, requested: list[str]) -> tuple[list[dict], 
     """
     defs: list[dict] = []
     router: dict = {}
-    for name in requested:
+    for name in dict.fromkeys(requested):
         if name in TOOL_DEFS:
             defs.append(TOOL_DEFS[name])
             router[name] = ("builtin", name)
@@ -93,7 +93,11 @@ def assemble_tools(session: Session, requested: list[str]) -> tuple[list[dict], 
             try:
                 for t in mcp_client.list_tools(spec):
                     oai = f"mcp_{sid}_{t['name']}"
-                    defs.append(mcp_tool_def(oai, t))
+                    definition = mcp_tool_def(oai, t)
+                    definition["function"]["description"] = f"[{srv.label}] " + definition[
+                        "function"
+                    ].get("description", "")
+                    defs.append(definition)
                     router[oai] = ("mcp", spec, t["name"])
             except Exception as exc:
                 raise RuntimeError(f"MCP「{srv.label}」连接失败，请在设置中测试连接。") from exc

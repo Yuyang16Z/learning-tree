@@ -101,16 +101,24 @@ def build_context(
     protocol: str = "openai",
     diagnostics: dict | None = None,
     documents: list[dict] | None = None,
+    tool_schema_budget: int = 0,
 ) -> tuple[str, list[dict]]:
     policy = policy or ContextPolicy()
     # Leave room for tool-call metadata and a bounded result on the next round;
     # otherwise a full system summary can leave no space for its own source read.
     tool_reserve = policy.tool_reserve if tool_defs else 0
-    assembly_budget = policy.input_budget - tool_reserve
+    # Loaded definitions are already counted below. Reserve only the remaining
+    # allowance, so later lazy loading can replace the small initial catalogue.
+    tool_schema_cost = estimate_request_tokens("", [], tool_defs, protocol) - (
+        estimate_request_tokens("", [], protocol=protocol)
+    )
+    schema_reserve = max(0, tool_schema_budget - tool_schema_cost)
+    assembly_budget = policy.input_budget - tool_reserve - schema_reserve
     ancestors = [(n, ms) for n, ms in ancestors if n.tree_id == current.tree_id]
     sources = ancestors + [(current, current_messages)]
     units = _units(sources)
     last = {"role": "user", "content": make_content(question, question_images)}
+    protected_system = _full_system([], current, "")
 
     def count(s, ms):
         return estimate_request_tokens(s, ms, tool_defs, protocol)
@@ -119,7 +127,7 @@ def build_context(
     if documents:
         from .document_context import render_document_context
 
-        mandatory_cost = count(_full_system([], current, ""), [last])
+        mandatory_cost = count(protected_system, [last])
         document_budget = min(5000, max(0, (assembly_budget - mandatory_cost) // 3))
         document_note = render_document_context(documents, question, document_budget)
         if document_note:
@@ -128,14 +136,20 @@ def build_context(
     messages = _wire(units) + [last]
 
     if diagnostics is not None:
-        diagnostics.update(compacted=False, raw_estimate=count(system, messages))
+        # This core contains the current quote/note. It is internal request
+        # assembly state, not a public or loggable diagnostics payload.
+        diagnostics.update(
+            compacted=False,
+            raw_estimate=count(system, messages),
+            protected_system=protected_system,
+        )
     if count(system, messages) <= assembly_budget:
         if diagnostics is not None:
             diagnostics["estimated_input_tokens"] = count(system, messages)
         return system, messages
 
     # The current question, selected passage and current note are mandatory.
-    base = _full_system([], current, "") + document_note + "\n" + COMPACTION_NOTICE
+    base = protected_system + document_note + "\n" + COMPACTION_NOTICE
     if count(base, [last]) > assembly_budget:
         raise ContextBudgetExceeded()
     profile, memory_note = split_profile(memory_note)

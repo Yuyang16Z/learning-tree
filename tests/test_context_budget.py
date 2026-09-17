@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from app.context_budget import (
+    HISTORY_OMISSION,
+    SYSTEM_OMISSION,
     ContextBudgetExceeded,
     ContextPolicy,
     estimate_request_tokens,
@@ -214,6 +216,161 @@ def test_old_tool_round_is_removed_as_a_complete_group():
     assert not any(
         message.get("tool_call_id") or message.get("tool_calls") for message in result.messages
     )
+
+
+@pytest.mark.parametrize("protocol", ["openai", "anthropic"])
+def test_three_tool_rounds_reclaim_optional_system_before_trimming_results(protocol):
+    from app.context import build_context
+    from app.models import Node
+
+    policy = ContextPolicy(window_tokens=8192, output_tokens=1024)
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "Read one source",
+                "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+            },
+        }
+    ]
+    current = Node(
+        id=3,
+        tree_id=1,
+        title="Current topic",
+        seed_text="CURRENT_QUOTE: only with explicit permission.",
+        learning_note="CURRENT_NOTE: keep the qualification intact.",
+    )
+    question = "Compare the current sources and preserve their restrictions."
+    core, initial_messages = build_context(
+        [], current, [], question, policy=policy, tool_defs=tools, protocol=protocol
+    )
+    room = (
+        policy.input_budget
+        - policy.tool_reserve
+        - 32
+        - estimate_request_tokens(core, initial_messages, tools, protocol)
+    )
+    memory_note = "OPTIONAL_HISTORY:" + "x" * (room - len("OPTIONAL_HISTORY:") - 1)
+    diagnostics = {}
+    system, messages = build_context(
+        [],
+        current,
+        [],
+        question,
+        memory_note=memory_note,
+        policy=policy,
+        tool_defs=tools,
+        protocol=protocol,
+        diagnostics=diagnostics,
+    )
+    assert "OPTIONAL_HISTORY:" in system
+    assert not diagnostics["compacted"]
+    fit_request(system, messages, tools, policy=policy, protocol=protocol)
+    for index in range(3):
+        call = {
+            "id": f"round_{index}",
+            "type": "function",
+            "function": {"name": "lookup", "arguments": '{"q":"a distinct source"}'},
+        }
+        assistant = {"role": "assistant", "content": "explanation " * 60, "tool_calls": [call]}
+        if protocol == "anthropic":
+            assistant["_anthropic_content"] = [
+                {
+                    "type": "thinking",
+                    "thinking": "Keep signed thought intact.",
+                    "signature": f"signature_{index}",
+                },
+                {"type": "redacted_thinking", "data": f"opaque_{index}"},
+                {"type": "text", "text": assistant["content"]},
+                {
+                    "type": "tool_use",
+                    "id": call["id"],
+                    "name": "lookup",
+                    "input": {"q": "a distinct source"},
+                },
+            ]
+        messages.extend(
+            [assistant, {"role": "tool", "tool_call_id": call["id"], "content": "r" * 100}]
+        )
+    originals = copy.deepcopy((system, messages, tools, current.model_dump()))
+    with pytest.raises(ContextBudgetExceeded):
+        fit_request(system, messages, tools, policy=policy, protocol=protocol)
+    fitted = fit_request(
+        system,
+        messages,
+        tools,
+        policy=policy,
+        protocol=protocol,
+        protected_system=diagnostics["protected_system"],
+    )
+    assert fitted.compressed
+    assert fitted.system == core + SYSTEM_OMISSION
+    assert current.seed_text in fitted.system and current.learning_note in fitted.system
+    assert "OPTIONAL_HISTORY:" not in fitted.system
+    assert fitted.messages == messages, (
+        "Reclaim optional context before discarding any tool evidence"
+    )
+    assert fitted.estimated_input_tokens <= policy.input_budget
+    assert (system, messages, tools, current.model_dump()) == originals
+
+
+def test_optional_system_fallback_preserves_latest_images_and_history_notice():
+    latest = {"role": "user", "content": image_content("CURRENT_IMAGE_AND_QUESTION", 120)}
+    messages = [
+        {"role": "user", "content": "Older question"},
+        {"role": "assistant", "content": "obsolete background " * 500},
+        latest,
+        *tool_group(size=20000, native=True),
+    ]
+    original = copy.deepcopy(messages)
+    core = "Mandatory rules and the full current quote."
+    result = fit_request(
+        core + " Optional old excerpt." * 150,
+        messages,
+        policy=ContextPolicy(window_tokens=8192, output_tokens=1024),
+        protocol="anthropic",
+        protected_system=core,
+    )
+    assert result.system == core + SYSTEM_OMISSION + HISTORY_OMISSION
+    assert result.messages[0] == latest
+    assert result.messages[1] == original[3], "Signed blocks and parallel call IDs stay untouched"
+    assert [message["tool_call_id"] for message in result.messages[2:]] == ["call_0", "call_1"]
+    assert all("未发送" in message["content"] for message in result.messages[2:])
+    assert result.estimated_input_tokens <= ContextPolicy(8192, 1024).input_budget
+    assert messages == original
+
+
+def test_protected_core_overflow_still_fails_instead_of_cutting_current_material():
+    core = "CURRENT_QUOTE_MUST_REMAIN_WHOLE" * 400
+    messages = [{"role": "user", "content": "Explain the quote."}]
+    original = copy.deepcopy(messages)
+    with pytest.raises(ContextBudgetExceeded):
+        fit_request(
+            core + " optional history " * 500,
+            messages,
+            policy=ContextPolicy(window_tokens=4096, output_tokens=512),
+            protected_system=core,
+        )
+    assert messages == original
+
+
+def test_old_turn_removal_is_preferred_to_dropping_optional_system():
+    system = "Core rules. Useful optional source excerpt."
+    messages = [
+        {"role": "user", "content": "Old question"},
+        {"role": "assistant", "content": "old answer " * 2000},
+        {"role": "user", "content": "Current question"},
+    ]
+    result = fit_request(
+        system,
+        messages,
+        policy=ContextPolicy(window_tokens=4096, output_tokens=512),
+        protected_system="Core rules.",
+    )
+    assert result.system == system + HISTORY_OMISSION
+    assert SYSTEM_OMISSION not in result.system
+    assert result.messages == [messages[-1]]
 
 
 def test_anthropic_native_blocks_are_not_double_counted_with_mirrored_fields():

@@ -96,7 +96,7 @@ function ReasoningBlock({ text }: { text: string }) {
 }
 function ToolSteps({ steps }: { steps: ToolStep[] }) {
   const { t } = useI18n();
-  const toolLabels: Record<string, string> = { fetch: t("读取网页", "Read webpage"), web_search: t("联网搜索", "Web search") };
+  const toolLabels: Record<string, string> = { fetch: t("读取网页", "Read webpage"), web_search: t("联网搜索", "Web search"), search_available_tools: t("查找可用工具", "Find available tools"), read_learning_source: t("回查学习记录", "Read learning history"), read_document_source: t("查阅文档", "Read document") };
   return <>{steps.map((step, i) => <details className="chat-reasoning" key={i}><summary>{toolLabels[step.tool] ?? step.tool}{step.result === null ? t(" · 进行中", " · Running") : t(" · 已完成", " · Done")}</summary>{step.result !== null && <div>{step.result}</div>}</details>)}</>;
 }
 function ImageStrip({ images }: { images: string[] }) {

@@ -19,6 +19,10 @@ TOOL_OMISSION = (
     "\n[工具结果因上下文预算仅保留首尾原文；中间内容未发送。"
     "结果不完整，不能据此断言某内容不存在，也不要为补读而重复执行有副作用的操作。]\n"
 )
+SYSTEM_OMISSION = (
+    "\n[本轮工具调用增长，可选历史摘录、记忆及文档摘录已省略，原始资料仍保留。"
+    "不要猜测省略内容；如有 read_learning_source 或 read_document_source 工具，可回查原文。]"
+)
 
 
 class ContextBudgetExceeded(ValueError):
@@ -119,12 +123,15 @@ def fit_request(
     *,
     policy: ContextPolicy,
     protocol: str = "openai",
+    protected_system: str | None = None,
 ) -> BudgetedRequest:
     """Keep mandatory input and native blocks intact; modify request copies only.
 
     Older user turns are removed as whole protocol groups. The current question
-    and all subsequent tool call IDs/arguments/signed blocks remain intact. If
-    necessary only tool-result bodies are abridged, with an explicit warning.
+    and all subsequent tool call IDs/arguments/signed blocks remain intact. When
+    supplied by the context builder, protected_system allows optional system
+    context to be removed as a whole without parsing any source text. Tool-result
+    bodies are abridged only after this, with an explicit warning.
     """
     fitted = copy.deepcopy(messages)
     budget = policy.input_budget
@@ -151,6 +158,15 @@ def fit_request(
             system += HISTORY_OMISSION
             history_omitted = True
         compressed = True
+
+    if estimate() > budget and protected_system is not None:
+        reduced = protected_system + SYSTEM_OMISSION
+        if history_omitted:
+            reduced += HISTORY_OMISSION
+        # An already minimal system must not gain a larger omission notice.
+        if text_tokens(reduced) < text_tokens(system):
+            system = reduced
+            compressed = True
 
     if estimate() > budget:
         results = [m for m in fitted if m.get("role") == "tool"]

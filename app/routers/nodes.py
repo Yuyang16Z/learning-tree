@@ -15,8 +15,8 @@ from sqlalchemy import delete
 from sqlalchemy.orm import defer
 from sqlmodel import Session, select
 
-from ..context import BASE_SYSTEM, build_context, context_messages
-from ..context_budget import ContextBudgetExceeded, ContextPolicy
+from ..context import BASE_SYSTEM, build_context, context_messages, make_content
+from ..context_budget import ContextBudgetExceeded, ContextPolicy, estimate_request_tokens
 from ..context_sources import SOURCE_TOOL_DEF, SOURCE_TOOL_NAME, make_source_reader
 from ..db import engine, get_session
 from ..document_context import (
@@ -41,6 +41,7 @@ from ..service import (
     to_spec,
 )
 from ..title_generation import fallback_title, summarize_question
+from ..tool_catalog import SEARCH_TOOL_DEF, ToolCatalog, needs_catalog, tool_definition_cost
 from ..tree_identity import record_node_id
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
@@ -781,6 +782,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 return
             # Source selection/compaction never holds _REQUEST_LOCK. Oversized
             # mandatory input fails before MCP discovery or any model call.
+            preflight_stats = {}
             build_context(
                 ancestors,
                 context_target,
@@ -790,6 +792,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 policy=policy,
                 protocol=spec.protocol,
                 documents=context_documents,
+                diagnostics=preflight_stats,
             )
             if generation.stop.is_set():
                 return
@@ -824,6 +827,33 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 return
             context_stats = {}
             context_defs = tool_defs + ([SOURCE_TOOL_DEF] if tool_defs and not is_mock else [])
+            tool_catalog = None
+            # A checked group grants availability, not an obligation to attach
+            # every server's schema to every request. Reserve a stable allowance
+            # so later discovery cannot crowd out the current question.
+            pinned = [
+                definition
+                for definition in context_defs
+                if definition["function"]["name"] in (SOURCE_TOOL_NAME, DOCUMENT_TOOL_NAME)
+            ]
+            core_cost = estimate_request_tokens(
+                preflight_stats["protected_system"],
+                [{"role": "user", "content": make_content(question_text, question_images)}],
+                protocol=spec.protocol,
+            )
+            schema_room = max(0, policy.input_budget - policy.tool_reserve - core_cost - 512)
+            schema_budget = min(
+                schema_room,
+                max(policy.input_budget // 3, tool_definition_cost([*pinned, SEARCH_TOOL_DEF])),
+            )
+            if context_defs and needs_catalog(context_defs, schema_budget):
+                tool_catalog = ToolCatalog(
+                    context_defs,
+                    budget=schema_budget,
+                    pinned_names=tuple(item["function"]["name"] for item in pinned),
+                    query=question_text,
+                )
+                context_defs = tool_catalog.definitions
             request_system, llm_messages = build_context(
                 ancestors,
                 context_target,
@@ -836,6 +866,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 protocol=spec.protocol,
                 diagnostics=context_stats,
                 documents=context_documents,
+                tool_schema_budget=schema_budget if tool_catalog else 0,
             )
             if context_stats["compacted"] and not context_defs and not is_mock:
                 context_defs = [SOURCE_TOOL_DEF]
@@ -855,8 +886,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             source_reader = None
             # Tool results can force compaction on later rounds even when the
             # initial history fits. Make read-only history access available then.
-            if (context_stats["compacted"] or tool_defs) and not is_mock:
-                tool_defs = [*tool_defs, SOURCE_TOOL_DEF]
+            if any(item["function"]["name"] == SOURCE_TOOL_NAME for item in context_defs):
                 source_reader = make_source_reader(
                     engine,
                     target_id,
@@ -871,6 +901,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             if title_needed:
                 _queue_branch_title(target_id, spec)
                 title_queued = True
+            tool_defs = context_defs
             if tool_defs:
                 execute = make_executor(tool_router)
 
@@ -889,6 +920,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     llm_messages,
                     tool_defs,
                     guarded_execute,
+                    protected_system=context_stats["protected_system"],
+                    **({"tool_catalog": tool_catalog, "max_rounds": 6} if tool_catalog else {}),
                     **({"deep": True} if body.deep_think else {}),
                 )
             else:

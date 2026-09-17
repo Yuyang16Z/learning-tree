@@ -95,6 +95,7 @@ const diagnostics: [string, string][] = [
   ["回答保存失败，请检查磁盘空间后重试。", "The response could not be saved. Check disk space and try again."],
   ["模型连接在回答完成前断开，可以重试。", "The model disconnected before completing the response. You can retry."],
   ["模型回答未完整结束，可以重试。", "The model response is incomplete. You can retry."],
+  ["模型在工具调用结束后没有生成最终回答，请重试。", "The model did not produce a final answer after the tool rounds ended. You can retry."],
   ["连接中断，已保留问题，可重试。", "The connection was interrupted. Your question has been kept; you can retry."],
   ["没有收到回答数据，请重试。", "No response data was received. Try again."],
   ["mock 可用", "Demo model is ready"], ["连接成功", "Connected"],

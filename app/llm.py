@@ -20,6 +20,7 @@ from openai import OpenAI
 
 from . import anthropic_provider
 from .context_budget import ContextPolicy, fit_request
+from .tool_catalog import SEARCH_TOOL_NAME, ToolCatalog
 
 MOCK_ANSWER = (
     "（mock 模型）我收到的上下文只有从根节点到当前节点这一条脊柱，"
@@ -167,7 +168,7 @@ def _chat_once(spec: LLMSpec, convo: list[dict], tools: list[dict], deep: bool =
     resp = _client(spec).chat.completions.create(
         model=spec.llm_model,
         messages=convo,
-        tools=tools,
+        **({"tools": tools} if tools else {}),
         stream=False,
     )
     if resp.choices[0].finish_reason not in ("stop", "tool_calls"):
@@ -192,6 +193,9 @@ def run_agent(
     execute: Callable[[str, dict], str],
     max_rounds: int = 4,
     deep: bool = False,
+    *,
+    tool_catalog: ToolCatalog | None = None,
+    protected_system: str | None = None,
 ) -> Iterator[dict]:
     """Yield events: {"type":"tool_start"|"tool_end"|"reasoning"|"delta", ...}.
 
@@ -208,17 +212,39 @@ def run_agent(
     convo: list[dict] = list(messages)
     policy = ContextPolicy.from_spec(spec)
 
-    for _ in range(max_rounds):
-        prepared = fit_request(system, convo, tool_defs, policy=policy, protocol=spec.protocol)
+    for round_index in range(max_rounds + 1):
+        final = round_index == max_rounds
+        current_tools = [] if final else tool_catalog.definitions if tool_catalog else tool_defs
+        closing = (
+            "\n工具调用已达本轮上限。请根据已取得的资料回答用户问题，明确未核实的部分；"
+            "不要继续调用工具，也不要声称完成未执行的操作。"
+            if final
+            else ""
+        )
+        prepared = fit_request(
+            system + closing,
+            convo,
+            current_tools,
+            policy=policy,
+            protocol=spec.protocol,
+            **(
+                {"protected_system": protected_system + closing}
+                if protected_system is not None
+                else {}
+            ),
+        )
         request = [{"role": "system", "content": prepared.system}, *prepared.messages]
         r = (
-            _chat_once(spec, request, tool_defs, deep=True)
+            _chat_once(spec, request, current_tools, deep=True)
             if deep
-            else _chat_once(spec, request, tool_defs)
+            else _chat_once(spec, request, current_tools)
         )
         if deep and r.get("reasoning"):
             yield {"type": "reasoning", "text": r["reasoning"]}
         if r["tool_calls"]:
+            if final:
+                raise RuntimeError("模型在工具调用结束后没有生成最终回答，请重试。")
+            available = {tool["function"]["name"] for tool in current_tools}
             convo.append(
                 {
                     "role": "assistant",
@@ -243,15 +269,24 @@ def run_agent(
             )
             for tc in r["tool_calls"]:
                 yield {"type": "tool_start", "name": tc["name"], "args": tc["args"]}
-                result = execute(tc["name"], tc["args"])
+                if tc["name"] not in available:
+                    result = json.dumps(
+                        {
+                            "error": "tool_not_available",
+                            "message": "工具未加载或未获本轮授权；请先查找可用工具。",
+                        },
+                        ensure_ascii=False,
+                    )
+                elif tool_catalog and tc["name"] == SEARCH_TOOL_NAME:
+                    result = tool_catalog.search(tc["args"])
+                else:
+                    result = execute(tc["name"], tc["args"])
                 yield {"type": "tool_end", "name": tc["name"], "result": result}
                 convo.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
         else:
             for ch in _chunks(r["content"] or ""):
                 yield {"type": "delta", "text": ch}
             return
-
-    yield {"type": "delta", "text": "（已达最大工具轮数，先答到这。）"}
 
 
 # ---------- Non-streaming responses: summarization ----------
