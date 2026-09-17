@@ -76,4 +76,18 @@ describe("draft-scoped document upload queue", () => {
     expect(queue.pending("A")).toBe(false);
     expect(queue.list("A")).toHaveLength(1);
   });
+  it("cancels all pending uploads for a removed draft and ignores their late completion", async () => {
+    const { queue, requests, drafts } = setup();
+    queue.enqueue("A", 1, file("removed.txt")); queue.enqueue("A", 1, file("queued.txt"));
+    queue.enqueue("B", 2, file("kept.txt"));
+    queue.cancel("A");
+    expect(requests[0].signal.aborted).toBe(true);
+    expect(requests[1].signal.aborted).toBe(false);
+    requests[0].resolve(summary("removed.txt")); requests[1].resolve(summary("kept.txt")); await tick();
+    expect(queue.list("A")).toEqual([]);
+    expect(drafts.has("A")).toBe(false);
+    expect(drafts.get("B")).toEqual([summary("kept.txt")]);
+    expect(requests).toHaveLength(2);
+  });
+
 });

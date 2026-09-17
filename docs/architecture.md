@@ -33,6 +33,18 @@ Branch titles have an independent `title_state`: empty, pending, ai, fallback, m
 
 Context follows the current ancestry. Short eligible histories remain complete. Longer histories retain recent complete question/answer groups within the selected model's input budget; older sources contribute categorized original sentences with provenance and explicit omission notices. The current question, its images, selected passage and current learning note remain mandatory. Factual memory is restricted to the ancestor path, without silently mixing siblings. Understanding is brought back as an editable message draft.
 
+The question-navigation rail uses each rendered question's node ID plus message
+ID, so legacy nodes containing several turns remain independently addressable.
+It scrolls inside the current reading pane without loading another node or
+calling a model. Selected-text copy also stays entirely local.
+
+Inline **Explain** uses the currently selected model (or the configured default
+when no model ID is supplied). It assembles the root-to-selected-node messages,
+branch quote and understanding notes through the normal bounded context builder.
+It currently does not retrieve global preferences, long-term memory or document
+excerpts, and has no MCP tool calls. The short response is transient; it does not
+create stored messages or a new branch.
+
 ## Question documents
 
 An uploaded document keeps its original bytes, extracted sections and metadata in SQLite. Messages carry document IDs; upload alone makes no provider request. PDF text layers, Word body paragraphs/tables and UTF-8 text files are parsed locally with size and extraction bounds. Parsed text remains reference material; it is not executable code or an independent instruction source.

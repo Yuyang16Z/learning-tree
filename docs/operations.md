@@ -27,7 +27,7 @@ An occupied port is not forcibly freed. Ctrl+C stops the app. Use one backend pe
 | `learning-materials/` | Files exposed to the optional file tool; only its public README is tracked. |
 | `学习资料/` (legacy) | Existing learning files remain accessible in place after upgrading and stay excluded from Git. |
 | `mcp-data/` | MCP knowledge graph and browser artifacts. |
-| Browser storage | Drafts, positions, delete-recovery snapshot and language. |
+| Browser storage | Drafts, positions, language and a content-free deletion notice for other open tabs. |
 
 These local data files are excluded from Git. `DATABASE_URL` may select another SQLite file. Supplied commands resolve relative paths from the project root.
 
@@ -81,6 +81,24 @@ Tree JSON import creates a new tree and remaps references. Limits are 25 MiB, 2,
 ## Troubleshooting
 
 Topics can be renamed, archived, restored or deleted from their sidebar **…** menu. Archiving preserves all records and only hides the topic from **My topics**. Open **Archived** to browse or restore it. This state lives in SQLite and is shared between the browser and desktop app; exported JSON omits it and imports appear as active topics. Renaming a topic does not rewrite its original root question.
+
+Confirming deletion removes the tree, its nodes and messages (including images),
+stored document originals and extracted sections, source-linked memories and
+their cached vectors. The interface clears that tree's local drafts and reading
+positions after the server confirms deletion. It no longer exports a recovery
+snapshot or offers **Restore last deletion**; upgrading also removes the old
+browser recovery snapshot. Use **Archive** for topics you may want to reopen.
+
+Deleting only a branch removes its messages and source-linked memories. Uploaded
+documents belong to the entire topic and can be shared by surviving branches;
+the document library is removed when the whole topic is deleted.
+
+Deletion operates on data owned by that tree in the live application. Independently
+exported files, historical whole-database backups, the user-managed preference
+profile and shared MCP libraries/knowledge/browser artifacts have separate
+lifecycles. They are not attributed to individual trees and are not removed by
+matching topic names. Existing whole-database backups can still contain older
+records; this operation is not a secure erase of backup media.
 
 - **No model:** add one in Settings, or run `manage.py dev` for the offline demo.
 - **Old UI:** refresh after rebuilding/restarting. Clearing browser storage also removes drafts and preferences.

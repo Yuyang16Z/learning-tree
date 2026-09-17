@@ -12,7 +12,6 @@ interface Props {
   onRename: (id: number, title: string) => Promise<void>;
   onArchive: (id: number, archived: boolean) => Promise<void>;
   onOpenSettings: () => void; onImport: () => void;
-  recoveryAvailable: boolean; onRecover: () => void;
 }
 
 function ActionIcon({ type }: { type: 'more' | 'rename' | 'archive' | 'restore' | 'delete' | 'back' }) {
@@ -26,7 +25,7 @@ function ActionIcon({ type }: { type: 'more' | 'rename' | 'archive' | 'restore' 
   </svg>;
 }
 
-export function Sidebar({ trees, activeTreeId, onSelect, onNew, onDelete, onRename, onArchive, onOpenSettings, onImport, recoveryAvailable, onRecover }: Props) {
+export function Sidebar({ trees, activeTreeId, onSelect, onNew, onDelete, onRename, onArchive, onOpenSettings, onImport }: Props) {
   const { locale, t } = useI18n();
   const [showArchived, setShowArchived] = useState(false);
   const [menu, setMenu] = useState<{ id: number; left: number; top: number } | null>(null);
@@ -144,7 +143,6 @@ export function Sidebar({ trees, activeTreeId, onSelect, onNew, onDelete, onRena
       </nav>
       <div className="sidebar-bottom">
         <button ref={archiveToggleRef} className="sidebar-link sidebar-archive-link" aria-label={showArchived ? t('返回我的主题', 'Back to topics') : t('已归档', 'Archived')} onClick={() => { closeMenu(false); setShowArchived(value => !value); }}><ActionIcon type={showArchived ? 'back' : 'archive'} /><span>{showArchived ? t('返回我的主题', 'Back to topics') : t('已归档', 'Archived')}</span>{!showArchived && archivedCount > 0 && <span className="sidebar-archive-count">{archivedCount}</span>}</button>
-        {recoveryAvailable && <button className="sidebar-link" onClick={onRecover}>{t('↶ 恢复上次删除', '↶ Restore last deletion')}</button>}
         <button className="sidebar-link" onClick={onImport}>{t('↥ 导入学习记录', '↥ Import learning records')}</button>
         <button className="sidebar-link" onClick={onOpenSettings}>{t('⚙ 设置', '⚙ Settings')}</button>
       </div>
@@ -155,7 +153,7 @@ export function Sidebar({ trees, activeTreeId, onSelect, onNew, onDelete, onRena
       <div className="topic-actions-divider" role="separator" />
       <button role="menuitem" className="topic-action-delete" disabled={menuBusy} onClick={() => {
         closeMenu();
-        if (window.confirm(t('删除「{title}」？会保留一份整树备份，可在左下角恢复。', 'Delete “{title}”? A backup will be kept. Restore it from the sidebar.', { title: menuTree.title }))) onDelete(menuTree.id);
+        if (window.confirm(t('永久删除「{title}」？其中的对话、分支、附件和话题记忆都会删除，且无法撤销。', 'Permanently delete “{title}”? Its conversations, branches, attachments, and topic memories will be deleted. This cannot be undone.', { title: menuTree.title }))) onDelete(menuTree.id);
       }}><ActionIcon type="delete" />{t('删除', 'Delete')}</button>
       {menuError && <div className="topic-action-error" role="alert">{menuError}</div>}
     </div>, document.body)}

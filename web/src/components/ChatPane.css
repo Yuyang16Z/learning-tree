@@ -32,6 +32,7 @@
 .chat-answer-actions svg { width: 14px; height: 14px; }
 .chat-copy-control { position: relative; display: inline-flex; align-items: center; gap: 7px; }
 .chat-copy-control .chat-copy-button { width: 28px; height: 28px; border-radius: 6px; display: inline-flex; justify-content: center; align-items: center; padding: 5px; }
+.chat-copy-control .chat-copy-button.chat-copy-labeled { width: auto; height: 30px; gap: 5px; padding: 6px 9px; border: 0; background: transparent; color: var(--muted); white-space: nowrap; }
 .chat-copy-button svg { width: 16px; height: 16px; }
 .chat-copy-control .chat-copy-button:hover { color: var(--text); background: var(--panel-2); }
 .chat-copy-control .chat-copy-button.is-copied { color: var(--teal); }
@@ -134,7 +135,7 @@
 .chat-welcome h2 { overflow-wrap: anywhere; line-height: 1.6; }
 .chat-eyebrow { font-size: 10px; color: var(--teal); letter-spacing: 1px; }
 .chat-selection-card { max-height: calc(100dvh - 24px); overflow-y: auto; position: fixed; z-index: 90; width: 352px; max-width: calc(100vw - 24px); border: 1px solid var(--border-strong); border-radius: 13px; padding: 14px; background: var(--bg); box-shadow: 0 8px 40px #0000001a; font-size: 12px; }
-.chat-selection-card.is-compact { width: auto; display: flex; gap: 4px; padding: 5px; border-radius: 9px; }
+.chat-selection-card.is-compact { width: auto; display: flex; flex-wrap: wrap; gap: 4px; padding: 5px; border-radius: 9px; }
 .chat-selection-card button { font: inherit; }
 .chat-explain-button { border: 0; border-radius: 6px; padding: 7px 11px; background: var(--teal); color: #fff; font-size: 11px !important; }
 .chat-selection-branch { display: inline-flex; align-items: center; gap: 5px; font-size: 11px !important; border: 0; background: none; color: var(--muted); padding: 6px 9px; border-radius: 6px; }
@@ -146,7 +147,7 @@
 .chat-selection-content .chat-markdown { font-size: 12px; line-height: 1.85; }
 .chat-selection-content .chat-markdown h1, .chat-selection-content .chat-markdown h2, .chat-selection-content .chat-markdown h3 { font-size: 13px; }
 .chat-selection-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.chat-selection-footer > button:first-child { border: 0; background: none; padding: 6px 0; color: var(--muted); font-size: 11px; }
+.chat-selection-footer > button:not(.chat-explain-button) { border: 0; background: none; padding: 6px 0; color: var(--muted); font-size: 11px; }
 .chat-selection-error { color: var(--danger); font-size: 11px; overflow-wrap: anywhere; }
 .chat-selection-error button { display: block; background: none; border: 0; color: var(--teal); padding: 8px 0 0; }
 .chat-explaining { color: var(--muted); font-size: 11px; }

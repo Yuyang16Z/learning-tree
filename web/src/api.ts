@@ -150,7 +150,7 @@ export const api = {
   getThread: (id: number) =>
     fetch(`${API}/nodes/${id}/thread`).then(j<{ nodes: ThreadNode[] }>).then((r) => r.nodes),
   // Explicit deletion only. Editing creates a separate version through ask(mode=revise).
-  deleteNode: (id: number) => fetch(`${API}/nodes/${id}`, { method: "DELETE" }).then(j<unknown>),
+  deleteNode: (id: number) => fetch(`${API}/nodes/${id}`, { method: "DELETE" }).then(j<{ deleted: number[] }>),
   branch: (nodeId: number, seed_text: string, anchor?: SourceAnchor) =>
     jsonPost(`${API}/nodes/${nodeId}/branch`, { seed_text, ...anchor }).then(
       j<{ id: number; parent_id: number; title: string; seed_text: string }>,

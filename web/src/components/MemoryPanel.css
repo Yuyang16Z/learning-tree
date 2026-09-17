@@ -4,6 +4,7 @@
 .memory-heading { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; font-weight: 600; }
 .memory-caption { color: var(--muted); font-size: 12px; font-weight: 400; line-height: 1.5; }
 .memory-profile-input, .memory-fact-input { display: block; width: 100%; min-height: 148px; padding: 12px 14px; line-height: 1.75; resize: vertical; border-radius: 10px; }
+.memory-profile-input { height: 180px; min-height: 180px; max-height: 180px; resize: none; overflow-y: auto; overscroll-behavior-y: contain; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 .memory-profile-input:focus, .memory-fact-input:focus { outline: none; box-shadow: none; border-color: var(--muted); }
 .memory-profile-input::placeholder { color: var(--muted); }
 .memory-editor-footer, .memory-pagination { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; min-height: 30px; }

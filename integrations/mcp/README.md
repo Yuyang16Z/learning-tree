@@ -59,3 +59,13 @@ Open **Settings → MCP tools**, test or enable a server, then select the tools 
 The separate built-in **Web search** tool uses DDGS when no search key is configured. `TAVILY_API_KEY` opts into Tavily. Failures and empty results are reported explicitly; simulated search results are never substituted.
 
 The optional verifier checks all six services using a public example page and uniquely named temporary data. It cleans up its test file and memory entity, closes test sessions, and writes `artifacts/mcp-installation.json`. This tests tool execution, not the capabilities of a particular remote model.
+
+## Suggested additions / 可考虑的扩展
+
+These are recommendations, not installed presets:
+
+- **Programming study:** [Context7](https://context7.com/docs/overview) retrieves library documentation and examples for specific versions. This is the most direct addition when learning frameworks and APIs.
+- **Learning from real projects:** [GitHub's official MCP server](https://github.com/github/github-mcp-server) can read repositories, files and issues. Start with its read-only mode and the relevant repository tools; choose authentication and transport before integrating it with LearningTree.
+- **Broader research:** [Tavily MCP](https://docs.tavily.com/documentation/mcp) offers search and page extraction. LearningTree already has built-in search, including optional Tavily API support, so add the separate server only when its additional tools are needed.
+
+建议按学习任务选工具：先补技术文档，再按需接入开源项目阅读；现有网页、文件、浏览器能力继续使用。内置学习记忆与独立 Memory MCP 是两套存储，删除学习树只清理有明确归属的应用数据。共享 MCP 文件和知识图谱需要独立管理；下一步若要统一清理，应先给 MCP 产物记录所属学习树，再提供按树管理入口。

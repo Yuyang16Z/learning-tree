@@ -18,7 +18,8 @@ from .context_budget import text_tokens
 from .models import Message, Node
 
 SUMMARY_VERSION = "extractive-v1"
-_CACHE: OrderedDict[str, tuple] = OrderedDict()
+_CACHE: OrderedDict[tuple[int, str], tuple] = OrderedDict()
+_DELETED_TREES: set[int] = set()
 _LOCK = threading.Lock()
 _SENTENCES = re.compile(r".+?(?:[。！？]|(?<=[.!?])\s+|\n+|$)", re.DOTALL)
 _CORRECTION = re.compile(
@@ -97,7 +98,7 @@ def source_fingerprint(node: Node, messages: list[Message]) -> str:
 
 
 def extract(node: Node, messages: list[Message]) -> tuple[Excerpt, ...]:
-    key = source_fingerprint(node, messages)
+    key = (node.tree_id, source_fingerprint(node, messages))
     with _LOCK:
         if key in _CACHE:
             _CACHE.move_to_end(key)
@@ -132,11 +133,22 @@ def extract(node: Node, messages: list[Message]) -> tuple[Excerpt, ...]:
     ranked = sorted(enumerate(candidates), key=lambda item: (-item[1].priority, item[0]))[:128]
     result = tuple(excerpt for _, excerpt in sorted(ranked))
     with _LOCK:
-        _CACHE[key] = result
-        _CACHE.move_to_end(key)
-        while len(_CACHE) > 64:
-            _CACHE.popitem(last=False)
+        # A worker holding old snapshots can finish after deletion. Never recache them.
+        if node.tree_id not in _DELETED_TREES:
+            _CACHE[key] = result
+            _CACHE.move_to_end(key)
+            while len(_CACHE) > 64:
+                _CACHE.popitem(last=False)
     return result
+
+
+def forget_tree(tree_id: int) -> None:
+    """Discard content caches, retaining only a content-free ID until process exit."""
+    with _LOCK:
+        _DELETED_TREES.add(tree_id)
+        for key in list(_CACHE):
+            if key[0] == tree_id:
+                del _CACHE[key]
 
 
 def _terms(text: str) -> set[str]:

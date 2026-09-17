@@ -57,6 +57,12 @@ export class DocumentUploadQueue {
     entry?.controller.abort();
     this.options.changed();
   }
+  cancel(key: string) {
+    const entries = this.list(key);
+    this.entries.delete(key);
+    for (const entry of entries) entry.controller.abort();
+    this.options.changed();
+  }
   private async run(key: string) {
     if (this.running.has(key)) return;
     this.running.add(key);

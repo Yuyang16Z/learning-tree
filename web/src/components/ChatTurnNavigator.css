@@ -1,0 +1,22 @@
+.chat-turn-nav { position: absolute; top: 12px; bottom: 12px; left: 4px; width: 28px; z-index: 8; display: flex; align-items: center; }
+.chat-turn-nav-track { position: relative; width: 100%; max-height: 100%; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-width: none; padding: 4px 0; }
+.chat-turn-nav-track::-webkit-scrollbar { display: none; }
+.chat-pane .chat-turn-tick { display: flex; align-items: center; justify-content: flex-start; width: 28px; height: 20px; padding: 0 5px; border: 0; border-radius: 4px; background: transparent; cursor: pointer; }
+.chat-turn-tick > span { display: block; width: 8px; height: 2px; border-radius: 1px; background: var(--border-strong); transition: width .12s, background .12s; }
+.chat-turn-tick.is-major > span { width: 13px; }
+.chat-turn-tick.is-current > span, .chat-turn-tick:hover > span, .chat-turn-tick:focus-visible > span { width: 20px; background: var(--text); }
+.chat-pane .chat-turn-tick:focus-visible { outline: 1px solid var(--muted); outline-offset: -1px; background: var(--panel-2); }
+.chat-turn-preview { position: fixed; z-index: 85; pointer-events: none; width: min(310px, calc(100vw - 32px)); padding: 13px 15px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel-2); box-shadow: 0 8px 28px #0003; font-size: 12px; line-height: 1.65; overflow: hidden; }
+.chat-turn-preview-count { display: block; color: var(--muted); font-size: 10px; margin-bottom: 6px; }
+.chat-turn-preview strong, .chat-turn-preview p { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; white-space: pre-wrap; }
+.chat-turn-preview strong { -webkit-line-clamp: 2; color: var(--text); font-weight: 600; }
+.chat-turn-preview p { -webkit-line-clamp: 3; color: var(--muted); margin: 6px 0 0; }
+.chat-reading.has-turn-nav .chat-messages { padding-left: 54px; }
+.chat-turn-located .chat-question { animation: turn-located 1.2s ease-out; }
+@keyframes turn-located { from { box-shadow: 0 0 0 2px var(--border-strong); } to { box-shadow: 0 0 0 2px transparent; } }
+@media (prefers-reduced-motion: reduce) { .chat-turn-located .chat-question { animation: none; } }
+@media (max-width: 760px) {
+  .chat-turn-nav { left: 2px; width: 24px; }
+  .chat-pane .chat-turn-tick { width: 24px; height: 24px; padding: 0 4px; }
+  .chat-reading.has-turn-nav .chat-messages { padding-left: 36px; }
+}

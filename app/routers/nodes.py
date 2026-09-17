@@ -41,6 +41,7 @@ from ..service import (
     to_spec,
 )
 from ..title_generation import fallback_title, summarize_question
+from ..tree_identity import record_node_id
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
 _REQUEST_LOCK = threading.RLock()
@@ -65,6 +66,25 @@ class Generation:
 
 _GENERATIONS: dict[int, Generation] = {}
 _CANCELLED_REQUESTS: dict[tuple[int, str], float] = {}
+
+
+def discard_node_work(node_ids) -> None:
+    """Caller holds _REQUEST_LOCK; late workers cannot retain durable deleted content."""
+    for node_id in node_ids:
+        _TITLE_JOBS.pop(node_id, None)
+        generation = _GENERATIONS.pop(node_id, None)
+        if generation is not None:
+            with generation.lock:
+                generation.stop.set()
+                generation.status, generation.error = "interrupted", "节点已删除。"
+                generation.text.clear()
+                generation.reasoning.clear()
+                generation.steps.clear()
+                while not generation.events.empty():
+                    try:
+                        generation.events.get_nowait()
+                    except queue.Empty:
+                        break
 
 
 def _snapshot(model):
@@ -217,6 +237,7 @@ def patch_node(node_id: int, body: NodePatch, session: Session = Depends(get_ses
 def delete_node(node_id: int, session: Session = Depends(get_session)) -> dict:
     with _REQUEST_LOCK:
         _get(session, node_id)
+        record_node_id(session)
         ids, stack = set(), [node_id]
         while stack:
             current = stack.pop()
@@ -226,10 +247,7 @@ def delete_node(node_id: int, session: Session = Depends(get_session)) -> dict:
             stack.extend(
                 n.id for n in session.exec(select(Node).where(Node.parent_id == current)).all()
             )
-        for nid in ids:
-            _TITLE_JOBS.pop(nid, None)
-            if nid in _GENERATIONS:
-                _GENERATIONS[nid].stop.set()
+        discard_node_work(ids)
         for message in session.exec(select(Message).where(Message.node_id.in_(ids))).all():
             session.delete(message)
         for memory in session.exec(select(Memory).where(Memory.source_node_id.in_(ids))).all():
@@ -286,6 +304,7 @@ def branch(node_id: int, body: BranchIn, session: Session = Depends(get_session)
             session, parent, body.source_message_id, body.source_start, body.source_end
         )
         child = Node(
+            id=record_node_id(session, allocate=True),
             tree_id=parent.tree_id,
             parent_id=parent.id,
             kind="branch",
@@ -479,7 +498,8 @@ def explain(node_id: int, body: ExplainIn, session: Session = Depends(get_sessio
 
 
 def _persist(target_id: int, generation: Generation, label: str) -> None:
-    with generation.lock, Session(engine) as session:
+    # Deletion must not slip between the source check and assistant-message INSERT.
+    with _REQUEST_LOCK, generation.lock, Session(engine) as session:
         node = session.get(Node, target_id)
         if not node or node.request_id != generation.request_id:
             return
@@ -630,6 +650,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     if original_question and m.id < original_question.id
                 ]
                 target = Node(
+                    id=record_node_id(session, allocate=True),
                     tree_id=node.tree_id,
                     parent_id=node.parent_id,
                     kind="revision",
@@ -644,6 +665,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 )
             elif previous_messages:
                 target = Node(
+                    id=record_node_id(session, allocate=True),
                     tree_id=node.tree_id,
                     parent_id=node.id,
                     kind="followup",

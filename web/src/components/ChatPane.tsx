@@ -8,7 +8,9 @@ import { clearAcceptedDraft, moveFollowupDraft, type ChatDraft as Draft } from "
 import { documentMetadata, DocumentUploadQueue } from "../lib/documentUploads";
 import { ATTACHMENT_ACCEPT, attachmentKind, ImageAttachmentQueue, MAX_IMAGES, readImage } from "../lib/attachments";
 import { copyText } from "../lib/clipboard";
+import { matchesDeletedWorkspace, onWorkspaceDeletion, type WorkspaceDeletion } from "../lib/workspace";
 import { DocumentCards } from "./DocumentCards";
+import { ChatTurnNavigator, turnKey } from "./ChatTurnNavigator";
 import type { DocumentSummary, McpServer, ModelCfg, ThreadNode, ToolStep } from "../types";
 import "./ChatPane.css";
 
@@ -60,9 +62,12 @@ const scrollKeyFor = (tree: number | null, node: number | null) => `bl-scroll-v2
 const markdownPlugins = [remarkGfm];
 const draftCache = new Map<string, Draft>();
 const noteDraftCache = new Map<string, string>();
+const deletedWorkspaces: WorkspaceDeletion[] = [];
+const deletedDraft = (key: string) => deletedWorkspaces.some(scope => matchesDeletedWorkspace(key, scope));
 
 
 function readDraft(key: string): Draft {
+  if (deletedDraft(key)) return { key, text: "", images: [] };
   const cached = draftCache.get(key);
   if (cached) return cached;
   try {
@@ -73,6 +78,7 @@ function readDraft(key: string): Draft {
   return { key, text: "", images: [] };
 }
 function writeDraft(draft: Draft) {
+  if (deletedDraft(draft.key)) return;
   draft = { ...draft, documents: documentMetadata(draft.documents),
     previous: draft.previous ? { ...draft.previous, documents: documentMetadata(draft.previous.documents) } : undefined };
   draftCache.set(draft.key, draft);
@@ -102,7 +108,7 @@ function Icon({ name }: { name: "tree" | "attachment" | "tools" | "export" | "ar
   return <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
 
-function CopyButton({ text, label }: { text: string; label: string }) {
+function CopyButton({ text, label, visibleLabel }: { text: string; label: string; visibleLabel?: string }) {
   const { t } = useI18n();
   const [state, setState] = useState<"idle" | "copying" | "copied" | "error">("idle");
   useEffect(() => {
@@ -111,11 +117,11 @@ function CopyButton({ text, label }: { text: string; label: string }) {
     return () => window.clearTimeout(timer);
   }, [state]);
   const title = state === "copied" ? t("已复制", "Copied") : label;
-  return <span className="chat-copy-control"><button type="button" className={`chat-copy-button ${state === "copied" ? "is-copied" : ""}`} title={title} aria-label={title} disabled={state === "copying"} onClick={async () => {
+  return <span className="chat-copy-control"><button type="button" className={`chat-copy-button ${state === "copied" ? "is-copied" : ""} ${visibleLabel ? "chat-copy-labeled" : ""}`} title={title} aria-label={title} disabled={state === "copying"} onClick={async () => {
     setState("copying");
     try { await copyText(text); setState("copied"); }
     catch { setState("error"); }
-  }}><Icon name={state === "copied" ? "check" : "copy"} /></button><span className="chat-sr-only" role="status">{state === "copied" ? t("已复制", "Copied") : ""}</span>{state === "error" && <span className="chat-copy-error" role="alert">{t("复制失败，请选中文字复制。", "Couldn't copy. Select the text to copy it.")}</span>}</span>;
+  }}><Icon name={state === "copied" ? "check" : "copy"} />{visibleLabel && <span>{state === "copied" ? t("已复制", "Copied") : visibleLabel}</span>}</button><span className="chat-sr-only" role="status">{state === "copied" ? t("已复制", "Copied") : ""}</span>{state === "error" && <span className="chat-copy-error" role="alert">{t("复制失败，请选中文字复制。", "Couldn't copy. Select the text to copy it.")}</span>}</span>;
 }
 
 /** DOM offsets intentionally refer to visible answer text, not Markdown source. */
@@ -206,6 +212,7 @@ export function ChatPane(props: Props) {
   const compEndAt = useRef(0);
   const sendingRef = useRef(false);
   const followupRef = useRef<{ sourceKey: string; targetKey: string } | null>(null);
+  const uploadKeysRef = useRef(new Set<string>());
   activeKeyRef.current = draftKey;
   if (!documentUploadsRef.current) documentUploadsRef.current = new DocumentUploadQueue({
     documents: key => readDraft(key).documents ?? [],
@@ -230,6 +237,28 @@ export function ChatPane(props: Props) {
     changed: () => setUploadVersion(version => version + 1),
   });
   const imageUploads = imageUploadsRef.current;
+
+  useEffect(() => onWorkspaceDeletion(scope => {
+    deletedWorkspaces.push(scope);
+    for (const key of draftCache.keys()) if (matchesDeletedWorkspace(key, scope)) draftCache.delete(key);
+    for (const key of noteDraftCache.keys()) if (matchesDeletedWorkspace(key, scope)) noteDraftCache.delete(key);
+    for (const key of uploadKeysRef.current) {
+      if (!matchesDeletedWorkspace(key, scope)) continue;
+      documentUploads.cancel(key);
+      imageUploads.cancel(key);
+      uploadKeysRef.current.delete(key);
+    }
+    setSavedNotes(current => Object.fromEntries(Object.entries(current).filter(([key]) => !matchesDeletedWorkspace(key, scope))));
+    if (matchesDeletedWorkspace(draftRef.current.key, scope)) {
+      const empty = { key: draftRef.current.key, text: "", images: [] };
+      draftRef.current = empty;
+      setDraft(empty);
+      setSelection(null);
+      selectionRequestRef.current++;
+      followupRef.current = null;
+    }
+    if (matchesDeletedWorkspace(activeNoteKeyRef.current, scope)) { setNoteDraft(""); setNoteOpen(false); }
+  }), []);
 
   useEffect(() => {
     let savedDraft: string | null = null;
@@ -322,6 +351,7 @@ export function ChatPane(props: Props) {
     catch { setStorageError(true); }
   }
   function commitDraft(next: Draft) {
+    if (deletedDraft(next.key)) return;
     // Update the ref and cache together. A later node-change effect must never re-save an old render.
     persistDraft(next);
     if (next.key === activeKeyRef.current) { draftRef.current = next; setDraft(next); }
@@ -331,13 +361,16 @@ export function ChatPane(props: Props) {
     commitDraft({ ...current, ...change });
   }
   function addImage(file: File): string | null {
+    if (deletedDraft(draftKey)) return null;
+    uploadKeysRef.current.add(draftKey);
     const error = imageUploads.enqueue(draftKey, file);
     return error === "limit" ? t("每次提问最多附加 4 张图片，请先移除一张。", "Attach up to 4 images per question. Remove one first.")
       : error === "size" ? t("每张图片不能超过 4 MB。", "Each image must be 4 MB or smaller.")
       : error === "empty" ? t("这个图片文件是空的，请重新选择。", "This image file is empty. Choose another one.") : null;
   }
   function addDocument(file: File): string | null {
-    if (activeNodeId == null || loading) return null;
+    if (activeNodeId == null || loading || deletedDraft(draftKey)) return null;
+    uploadKeysRef.current.add(draftKey);
     const error = documentUploads.enqueue(draftKey, activeNodeId, file);
     return error === "limit" ? t("每次提问最多附加 4 份文档，请先移除一份。", "Attach up to 4 documents per question. Remove one first.")
       : error === "size" ? t("每份文档不能超过 10 MB。", "Each document must be 10 MB or smaller.")
@@ -458,6 +491,7 @@ export function ChatPane(props: Props) {
   const personalNote = savedNotes[noteKey] ?? nearestBranch?.learning_note ?? "";
   const learningNote = personalNote || (lastAnswer ? Array.from(lastAnswer.replace(/[#*`>]/g, "")).slice(0, 400).join("") : "");
   function updateNote(value: string) {
+    if (deletedDraft(noteKey)) return;
     setNoteDraft(value);
     noteDraftCache.set(noteKey, value);
     try { localStorage.setItem(noteKey, value); }
@@ -471,6 +505,7 @@ export function ChatPane(props: Props) {
     setNoteError(null);
     try {
       await api.saveNote(nearestBranch.node_id, content);
+      if (deletedDraft(key)) return;
       setSavedNotes(current => ({ ...current, [key]: content }));
       noteDraftCache.delete(key);
       try { localStorage.removeItem(key); } catch { /* The durable server copy is already saved. */ }
@@ -507,17 +542,17 @@ export function ChatPane(props: Props) {
     {nearestBranch && noteOpen && <div className="chat-note-panel"><label htmlFor="personal-learning-note">{t("我的理解", "My reflection")}</label><textarea id="personal-learning-note" disabled={noteSaving} value={noteDraft} onChange={event => updateNote(event.target.value)} rows={3} maxLength={4000} placeholder={t("用自己的话，记下这次弄懂的事…", "Write what you learned in your own words…")} /><div className="chat-note-actions">{noteError && <span role="alert">{localizeError(noteError, locale)}</span>}<button onClick={() => setNoteOpen(false)}>{t("收起", "Collapse")}</button><button className="chat-explain-button" onClick={() => void savePersonalNote()} disabled={noteSaving || noteDraft.trim() === personalNote.trim()}>{noteSaving ? t("保存中…", "Saving…") : t("保存理解", "Save reflection")}</button></div></div>}
     {(err || localError || storageError) && <div className="chat-error" role="alert">{localizeError(err || localError || t("浏览器存储空间不足，当前草稿尚未保存。可移除附图后重试。", "Browser storage is full. This draft has not been saved. Remove attachments and try again."), locale)}</div>}
     {!hasNode ? <div className="chat-empty"><div className="chat-empty-mark"><Icon name="tree" /></div><h2>{t("从一个好奇开始", "Start with curiosity")}</h2><p>{t("把不懂的地方，慢慢学明白。", "Follow your questions, one idea at a time.")}</p>{onNew && <button className="chat-primary" onClick={onNew}>{t("新建学习树", "New learning tree")}</button>}</div> : <>
-      <div className="chat-reading">
+      <div className={`chat-reading${visibleThread.length > 1 ? ' has-turn-nav' : ''}`}>
         <div className="chat-scroll" ref={scrollRef} onScroll={() => {
           const el = scrollRef.current;
           if (!el) return;
           stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
           setAwayFromBottom(!stickToBottom.current);
-          if (restoredRef.current === scrollKey && thread[thread.length - 1]?.node_id === activeNodeId) { try { localStorage.setItem(scrollKey, String(el.scrollTop)); } catch { /* Scroll restoration is optional. */ } }
+          if (!deletedDraft(scrollKey) && restoredRef.current === scrollKey && thread[thread.length - 1]?.node_id === activeNodeId) { try { localStorage.setItem(scrollKey, String(el.scrollTop)); } catch { /* Scroll restoration is optional. */ } }
         }}>
           <div className="chat-messages" onPointerUp={captureSelection} onKeyUp={(event) => { if (event.shiftKey) captureSelection(); }}>
             {!loading && !visibleThread.length && !showStream && <div className="chat-welcome"><span className="chat-eyebrow">{focusedSeed ? t("从这里展开", "Explore from here") : t("新的起点", "A fresh start")}</span><h2>{focusedSeed ? `「${focusedSeed}」` : treeTitle}</h2><p>{t("想先弄懂什么？", "What would you like to understand first?")}</p></div>}
-            {visibleThread.map((node, index) => <section className="chat-turn" data-turn-node={node.node_id} key={`${node.node_id}:${node.question_message_id ?? index}`}>
+            {visibleThread.map((node, index) => <section className="chat-turn" data-turn-node={node.node_id} data-turn-key={turnKey(node, index)} key={turnKey(node, index)}>
               <div className="chat-question"><ImageStrip images={node.images ?? []} /><DocumentCards documents={node.documents ?? []} /><div>{node.question}</div><div className="chat-question-actions"><CopyButton text={node.question ?? ""} label={t("复制问题", "Copy question")} /><button onClick={() => editNode(node)} disabled={streaming || attachmentsBusy} title={t("编辑后生成新版本，保留原有问答与分支", "Create a new version while keeping the original conversation and branches")}>{t("编辑", "Edit")}</button></div></div>
               {node.answer != null && <div className="chat-answer"><div className="chat-answer-label"><span className="chat-answer-dot" />{node.answered_by ?? "AI"}{node.status === "error" || node.status === "interrupted" ? <span>{t("· 未完成", "· Incomplete")}</span> : null}</div><ReasoningBlock text={node.reasoning ?? ""} /><ToolSteps steps={node.steps ?? []} /><div className="chat-markdown" data-answer-node={node.node_id} data-message-id={node.answer_message_id ?? undefined} tabIndex={0}><Markdown text={node.answer} /></div>{node.answer.trim() && <div className="chat-answer-actions"><CopyButton text={node.answer} label={t("复制回答", "Copy answer")} /><button onClick={() => void branchAnswer(node)} disabled={branching || streaming || loading} title={t("从这条回答展开一个新的问题", "Explore a new question from this answer")}><Icon name="tree" />{t("新分支", "New branch")}</button></div>}</div>}
               {!!node.attempts?.length && <details className="chat-reasoning chat-prior-attempts"><summary>{t("之前的未完成回答（{count}）", "Previous incomplete responses ({count})", { count: node.attempts.length })}</summary>{node.attempts.map(attempt => <div className="chat-markdown" data-answer-node={node.node_id} data-message-id={attempt.message_id} key={attempt.message_id}><Markdown text={attempt.content || t("未收到内容", "No content received")} /></div>)}</details>}
@@ -526,6 +561,7 @@ export function ChatPane(props: Props) {
             {showStream && <section className="chat-turn chat-live"><div className="chat-question"><ImageStrip images={sendingImages} /><DocumentCards documents={sendingDocuments} /><div>{pendingQuestion}</div></div><div className="chat-answer"><div className="chat-answer-label"><span className="chat-answer-dot is-loading" />{t("正在回答", "Responding")}</div><ReasoningBlock text={liveReasoning} /><ToolSteps steps={liveSteps} /><div className="chat-markdown" aria-live="polite" aria-busy="true">{live ? <Markdown text={live} /> : <span className="chat-typing">•••</span>}</div></div></section>}
           </div>
         </div>
+        <ChatTurnNavigator turns={visibleThread} scrollRef={scrollRef} scopeKey={scrollKey} onJump={() => { stickToBottom.current = false; setAwayFromBottom(true); setSelection(null); selectionRequestRef.current++; }} />
         {awayFromBottom && <button className="chat-latest" onClick={() => { if (scrollRef.current) scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); stickToBottom.current = true; }}>{t("↓ 最新", "↓ Latest")}</button>}
       </div>
       <div className="chat-compose-area">
@@ -550,7 +586,7 @@ export function ChatPane(props: Props) {
       </div>
     </>}
     {selection && <div className={`chat-selection-card ${selection.state === "selected" ? "is-compact" : ""}`} ref={selectionRef} style={{ left: selection.x, top: selection.y }} role="dialog" aria-label={t("解释选中文字", "Explain selected text")} onPointerDown={event => event.stopPropagation()}>
-      {selection.state === "selected" ? <><button className="chat-explain-button" disabled={noModel} onClick={() => void explainSelection()}>{t("解释一下", "Explain")}</button><button className="chat-selection-branch" onClick={() => void branchSelection()} disabled={branching || streaming} title={t("围绕选中文字创建分支", "Create a branch from the selected text")}><Icon name="tree" />{t("新分支", "New branch")}</button></> : <><div className="chat-selection-heading"><span>{selection.text}</span><button onClick={() => { setSelection(null); selectionRequestRef.current++; }} aria-label={t("关闭解释", "Close explanation")}>×</button></div><div className="chat-selection-content">{selection.state === "loading" ? <span className="chat-explaining">{t("正在解释…", "Explaining…")}</span> : selection.explanation ? <div className="chat-markdown"><Markdown text={selection.explanation} /></div> : null}{selection.error && <div className="chat-selection-error" role="alert">{localizeError(selection.error, locale)}<button onClick={() => void explainSelection()}>{t("重试解释", "Try again")}</button></div>}</div><div className="chat-selection-footer"><button onClick={() => { setSelection(null); selectionRequestRef.current++; }}>{t("明白了", "Got it")}</button><button className="chat-explain-button" onClick={() => void branchSelection()} disabled={branching || streaming || selection.state === "loading"}>{branching ? t("创建中…", "Creating…") : t("新分支 ↗", "New branch ↗")}</button></div></>}
+      {selection.state === "selected" ? <><CopyButton text={selection.text} label={t("复制选中文字", "Copy selected text")} visibleLabel={t("复制", "Copy")} /><button className="chat-explain-button" disabled={noModel} onClick={() => void explainSelection()}>{t("解释一下", "Explain")}</button><button className="chat-selection-branch" onClick={() => void branchSelection()} disabled={branching || streaming} title={t("围绕选中文字创建分支", "Create a branch from the selected text")}><Icon name="tree" />{t("新分支", "New branch")}</button></> : <><div className="chat-selection-heading"><span>{selection.text}</span><button onClick={() => { setSelection(null); selectionRequestRef.current++; }} aria-label={t("关闭解释", "Close explanation")}>×</button></div><div className="chat-selection-content">{selection.state === "loading" ? <span className="chat-explaining">{t("正在解释…", "Explaining…")}</span> : selection.explanation ? <div className="chat-markdown"><Markdown text={selection.explanation} /></div> : null}{selection.error && <div className="chat-selection-error" role="alert">{localizeError(selection.error, locale)}<button onClick={() => void explainSelection()}>{t("重试解释", "Try again")}</button></div>}</div><div className="chat-selection-footer"><CopyButton text={selection.text} label={t("复制选中文字", "Copy selected text")} visibleLabel={t("复制", "Copy")} /><button onClick={() => { setSelection(null); selectionRequestRef.current++; }}>{t("明白了", "Got it")}</button><button className="chat-explain-button" onClick={() => void branchSelection()} disabled={branching || streaming || selection.state === "loading"}>{branching ? t("创建中…", "Creating…") : t("新分支 ↗", "New branch ↗")}</button></div></>}
     </div>}
   </main>;
 }

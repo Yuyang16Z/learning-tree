@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import delete
 from sqlmodel import Session, select
 
+from ..context_compaction import forget_tree
 from ..db import get_session
 from ..documents import (
     MAX_FILE_BYTES,
@@ -25,7 +26,8 @@ from ..documents import (
 from ..models import KnowledgeTree, Memory, MemoryEmbedding, Message, Node
 from ..schemas import NodeOut, TreeIn, TreeOut, TreePatch
 from ..service import get_messages
-from .nodes import _GENERATIONS, _REQUEST_LOCK, _TITLE_JOBS, node_metadata
+from ..tree_identity import record_node_id, record_tree_id
+from .nodes import _CANCELLED_REQUESTS, _REQUEST_LOCK, discard_node_work, node_metadata
 
 router = APIRouter(prefix="/trees", tags=["trees"])
 
@@ -44,11 +46,17 @@ def _node_out(node: Node, session: Session) -> NodeOut:
 
 @router.post("", response_model=TreeOut)
 def create_tree(body: TreeIn, session: Session = Depends(get_session)) -> TreeOut:
-    tree = KnowledgeTree(title=body.title.strip() or "新的学习")
+    tree = KnowledgeTree(
+        id=record_tree_id(session, allocate=True), title=body.title.strip() or "新的学习"
+    )
     session.add(tree)
     session.flush()
     root = Node(
-        tree_id=tree.id, parent_id=None, title=body.root_question or tree.title, kind="root"
+        id=record_node_id(session, allocate=True),
+        tree_id=tree.id,
+        parent_id=None,
+        title=body.root_question or tree.title,
+        kind="root",
     )
     session.add(root)
     session.commit()
@@ -225,7 +233,7 @@ def import_tree(body: dict, session: Session = Depends(get_session)) -> TreeOut:
     # never overwritten; request IDs and model credentials are not portable.
     # Archive status is local organization, not portable learning content.
     # Imports always appear as active topics; keep versions 1 and 2 compatible.
-    tree = KnowledgeTree(title=backup.tree.title)
+    tree = KnowledgeTree(id=record_tree_id(session, allocate=True), title=backup.tree.title)
     session.add(tree)
     session.flush()
     document_map = {}
@@ -254,7 +262,12 @@ def import_tree(body: dict, session: Session = Depends(get_session)) -> TreeOut:
             values.update(status="interrupted", error="导入了未完成的回答，可重试。")
         # Imported labels are explicit user data; do not trigger model calls or
         # overwrite them when opening the tree in a newer version.
-        node = Node(tree_id=tree.id, title_state="manual" if values["title"] else "empty", **values)
+        node = Node(
+            id=record_node_id(session, allocate=True),
+            tree_id=tree.id,
+            title_state="manual" if values["title"] else "empty",
+            **values,
+        )
         session.add(node)
         session.flush()
         node_map[old.id] = node
@@ -335,12 +348,14 @@ def delete_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
         tree = session.get(KnowledgeTree, tree_id)
         if not tree:
             raise HTTPException(404, "知识树不存在")
+        record_tree_id(session)
+        record_node_id(session)
         nodes = session.exec(select(Node).where(Node.tree_id == tree_id)).all()
         ids = [node.id for node in nodes]
-        for nid in ids:
-            _TITLE_JOBS.pop(nid, None)
-            if nid in _GENERATIONS:
-                _GENERATIONS[nid].stop.set()
+        discard_node_work(ids)
+        for key in list(_CANCELLED_REQUESTS):
+            if key[0] == tree_id:
+                _CANCELLED_REQUESTS.pop(key, None)
         for message in session.exec(select(Message).where(Message.node_id.in_(ids))).all():
             session.delete(message)
         for memory in session.exec(
@@ -353,6 +368,7 @@ def delete_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
         session.execute(delete(DocumentAttachment).where(DocumentAttachment.tree_id == tree_id))
         session.delete(tree)
         session.commit()
+        forget_tree(tree_id)
     return {"deleted": tree_id}
 
 

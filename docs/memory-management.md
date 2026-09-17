@@ -9,6 +9,9 @@ Existing automatic preferences first appear together in one editable text area.
 Reading this view does not rewrite or delete the original records. Duplicate
 text is combined for display.
 
+The editor stays at a fixed height and scrolls internally. Long content remains
+editable without pushing the topic-memory controls farther down the page.
+
 Save explicitly to make the profile user-managed. From then on, automatic
 extraction does not append preferences or overwrite the profile; topic facts
 continue to be extracted. An empty saved profile intentionally disables those

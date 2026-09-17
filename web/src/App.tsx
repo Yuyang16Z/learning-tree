@@ -18,7 +18,7 @@ import type {
 import { Sidebar } from "./components/Sidebar";
 import { ChatPane } from "./components/ChatPane";
 import { LearningMap } from "./components/LearningMap";
-import { NavigationGate, readSaved, saveValue } from "./lib/workspace";
+import { NavigationGate, readSaved, saveValue, clearLegacyRecovery, removeWorkspace, onWorkspaceDeletion, orphanedWorkspaceTrees, orphanedWorkspaceNodes, deletionAffectsRequest } from "./lib/workspace";
 import { mergePendingTitles, pollPendingTitles } from "./lib/titlePolling";
 import { SettingsModal } from "./components/SettingsModal";
 import { NewTreeModal } from "./components/NewTreeModal";
@@ -66,7 +66,6 @@ export default function App() {
   const [busyNavigation, setBusyNavigation] = useState(false);
   const streamTargetRef = useRef<number | null>(null);
   const requestRef = useRef<{ from: number; origin: number; tree: number; requestId: string } | null>(null);
-  const [recovery, setRecovery] = useState<Record<string, unknown> | null>(() => readSaved('bl-recovery', null));
   const [notice, setNotice] = useState<string | null>(null);
   const importRef = useRef<HTMLInputElement>(null);
   const pendingTitleIds = treeNodes.filter(node => node.title_state === "pending").map(node => node.id).join(",");
@@ -117,6 +116,7 @@ export default function App() {
 
   async function loadTrees() {
     const t = await api.listTrees(true);
+    for (const treeId of orphanedWorkspaceTrees(t.map(tree => tree.id))) removeWorkspace({ treeId }, false);
     setTrees(t);
     return t;
   }
@@ -143,6 +143,7 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
+    clearLegacyRecovery();
     loadModels().catch((e) => setErr(String(e)));
     loadMcp().catch((e) => setErr(String(e)));
     loadTrees()
@@ -172,6 +173,8 @@ export default function App() {
     try {
       const nodes = await api.getTree(id);
       if (!navigation.current.current(ticket)) return;
+      const orphaned = orphanedWorkspaceNodes(id, nodes.map(node => node.id));
+      if (orphaned.length) removeWorkspace({ treeId: id, nodeIds: orphaned }, false);
       if (mapTicket === mapRevision.current) setTreeNodes(nodes);
       const tr = (list ?? trees).find(t => t.id === id);
       const saved = readSaved<number | null>(`bl-node:${id}`, null);
@@ -208,7 +211,11 @@ export default function App() {
   async function refreshTree(id: number) {
     const ticket = ++mapRevision.current;
     const nodes = await api.getTree(id);
-    if (treeRef.current === id && ticket === mapRevision.current) setTreeNodes(nodes);
+    if (treeRef.current === id && ticket === mapRevision.current) {
+      const orphaned = orphanedWorkspaceNodes(id, nodes.map(node => node.id));
+      if (orphaned.length) removeWorkspace({ treeId: id, nodeIds: orphaned }, false);
+      setTreeNodes(nodes);
+    }
     return nodes;
   }
 
@@ -223,13 +230,7 @@ export default function App() {
     }
   }
 
-  async function keepRecovery(treeId: number) {
-    const backup = await api.exportTree(treeId);
-    if (!saveValue('bl-recovery', backup)) throw new Error(t("浏览器空间不足，请先导出备份再删除。", "Browser storage is full. Export a backup before deleting."));
-    setRecovery(backup);
-  }
-
-  function clearTreeSelection() {
+  function clearTreeSelection(clearSaved = true) {
     navigation.current.next();
     ++mapRevision.current;
     treeRef.current = null;
@@ -241,7 +242,9 @@ export default function App() {
     setNavigationAnchor(null);
     setBusyNavigation(false);
     setErr(null);
-    saveValue('bl-tree', null);
+    if (clearSaved) {
+      try { localStorage.removeItem('bl-tree'); } catch { /* Navigation state is optional. */ }
+    }
   }
 
   async function renameTree(id: number, title: string) {
@@ -266,19 +269,41 @@ export default function App() {
   }
 
   async function deleteTree(id: number) {
-    if (streaming) { setErr(t("请先停止当前回答，再删除。", "Stop the current response before deleting.")); return; }
+    if (abortRef.current) { setErr(t("请先停止当前回答，再删除。", "Stop the current response before deleting.")); return; }
     try {
-      await keepRecovery(id);
       await api.deleteTree(id);
-      const list = await loadTrees();
-      setNotice(t("已删除，整棵树的备份已保留。", "Deleted. A backup of the entire tree is available."));
+      removeWorkspace({ treeId: id });
+      const list = trees.filter(tree => tree.id !== id);
+      setTrees(current => current.filter(tree => tree.id !== id));
+      setNotice(t("主题已永久删除。", "Topic permanently deleted."));
       if (treeRef.current === id) {
         const next = list.find(tree => !tree.archived);
         if (next) await selectTree(next.id, list);
-        else clearTreeSelection();
+        else clearTreeSelection(false);
       }
     } catch (e) { setErr(String((e as Error).message ?? e)); }
   }
+
+  useEffect(() => onWorkspaceDeletion((deletion, remote) => {
+    if (!remote) return;
+    if (deletionAffectsRequest(deletion, requestRef.current, streamTargetRef.current)) abortRef.current?.abort();
+    if (deletion.nodeIds === undefined) {
+      setTrees(current => current.filter(tree => tree.id !== deletion.treeId));
+      if (treeRef.current === deletion.treeId) clearTreeSelection(false);
+    } else if (treeRef.current === deletion.treeId) {
+      ++mapRevision.current;
+      setTreeNodes(current => current.filter(node => !deletion.nodeIds!.includes(node.id)));
+      if (focusRef.current !== null && deletion.nodeIds.includes(focusRef.current)) {
+        navigation.current.next();
+        focusRef.current = null;
+        setActiveNodeId(null);
+        setThread([]);
+        setNavigationAnchor(null);
+        setBusyNavigation(false);
+      }
+      void refreshTree(deletion.treeId).catch(() => {});
+    }
+  }), []);
 
   async function onAsk(payload: { question: string; images?: string[]; document_ids?: string[]; documents?: DocumentSummary[]; tools?: string[]; deep?: boolean; mode?: 'continue' | 'retry' | 'revise'; nodeId?: number; question_message_id?: number; onAccepted?: (nodeId: number) => void }): Promise<boolean> {
     const fromId = payload.nodeId ?? focusRef.current;
@@ -366,18 +391,31 @@ export default function App() {
 
   async function onDeleteNode(id: number) {
     const treeId = treeRef.current;
-    if (!treeId || streaming) return;
+    if (!treeId || abortRef.current) return;
+    const target = treeNodes.find(node => node.id === id);
+    if (!target) return;
+    if (target.parent_id == null) {
+      const title = trees.find(tree => tree.id === treeId)?.title ?? target.title;
+      if (window.confirm(t("永久删除「{title}」？其中的对话、分支、附件和话题记忆都会删除，且无法撤销。", "Permanently delete “{title}”? Its conversations, branches, attachments, and topic memories will be deleted. This cannot be undone.", { title }))) await deleteTree(treeId);
+      return;
+    }
+    if (!window.confirm(t("永久删除这个分支及其子分支？相关对话和话题记忆会删除，主题共享附件会保留，且无法撤销。", "Permanently delete this branch and its sub-branches? Related conversations and topic memories will be deleted; topic-shared attachments will remain. This cannot be undone."))) return;
     try {
-      const parent = treeNodes.find(n => n.id === id)?.parent_id;
-      if (parent == null && treeNodes.filter(n => n.parent_id == null).length === 1) { await deleteTree(treeId); return; }
-      await keepRecovery(treeId);
-      await api.deleteNode(id);
-      const nodes = await refreshTree(treeId);
-      setNotice(t("已删除节点，整棵树的备份已保留。", "Node deleted. A backup of the entire tree is available."));
-      if (treeRef.current !== treeId) return;
-      const focus = nodes.find(n => n.id === parent)?.id ?? nodes[0]?.id;
-      if (focus) await selectNode(focus);
-      else { focusRef.current = null; setActiveNodeId(null); setThread([]); }
+      // The server may know descendants created in another tab since our last refresh.
+      const result = await api.deleteNode(id);
+      const deletedIds = new Set(result.deleted);
+      removeWorkspace({ treeId, nodeIds: [...deletedIds] });
+      const remaining = treeNodes.filter(node => !deletedIds.has(node.id));
+      if (treeRef.current === treeId) {
+        ++mapRevision.current;
+        setTreeNodes(current => current.filter(node => !deletedIds.has(node.id)));
+        if (focusRef.current !== null && deletedIds.has(focusRef.current)) {
+          const focus = remaining.find(node => node.id === target.parent_id)?.id ?? remaining[0]?.id;
+          if (focus) await selectNode(focus);
+          else { navigation.current.next(); focusRef.current = null; setActiveNodeId(null); setThread([]); }
+        }
+      }
+      setNotice(t("分支已永久删除。", "Branch permanently deleted."));
     } catch (e) { setErr(String((e as Error).message ?? e)); }
   }
 
@@ -398,7 +436,7 @@ export default function App() {
     try {
       const restored = await api.importTree(data);
       const list = await loadTrees(); await selectTree(restored.id, list);
-      setNotice(t("已恢复为一棵新树。", "Restored as a new tree."));
+      setNotice(t("学习记录已导入为新主题。", "Learning records imported as a new topic."));
     } catch (e) { setErr(String((e as Error).message ?? e)); }
   }
 
@@ -488,8 +526,6 @@ export default function App() {
         onArchive={archiveTree}
         onOpenSettings={() => setSettingsOpen(true)}
         onImport={() => importRef.current?.click()}
-        recoveryAvailable={!!recovery}
-        onRecover={() => recovery && importTree(recovery)}
       />
       <div className="workspace-main">
       {notice && <div className="notice" role="status"><span>{localizeError(notice, locale)}</span><button onClick={() => setNotice(null)} aria-label={t("关闭提示", "Dismiss notification")}>×</button></div>}

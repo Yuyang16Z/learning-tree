@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add a compact question-navigation rail with hover previews, keyboard access and local scroll jumps, including legacy multi-turn nodes. Add selected-text copy beside inline Explain and New branch.
+
+- Keep the preferences editor at a fixed height with internal scrolling.
+- Make confirmed topic deletion permanent within the app: remove automatic deletion backups and the restore-last-deletion action, clear owned browser drafts and preserve unrelated topics and global settings.
+
 - Add topic renaming, reversible archiving and an Archived view in the sidebar, with compact accessible action menus. Preserve original questions, branches, memories and attachments; existing topics remain active after the additive database upgrade.
 - Match the sidebar and browser icon to the native macOS application's mint-green rounded tree mark.
 

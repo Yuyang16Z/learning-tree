@@ -18,8 +18,10 @@ The images use synthetic content and the offline demo model. They demonstrate th
 ## Features
 
 - A continuous conversation alongside an interactive topic map: jump to any turn, pan, zoom and return to your previous view after centering.
+- A slim question rail previews earlier questions and answers on hover or keyboard focus. Click a tick to scroll to that turn without changing the active branch or draft.
 - Rename topics or archive them from the sidebar's **…** menu. Archived topics keep their conversations and branches; view or restore them from **Archived**. Renaming a topic leaves the original questions unchanged.
-- Select text for a quick explanation or create a branch from an answer. Return to the exact source passage when you finish.
+- Confirmed deletion removes a tree's conversations, stored attachments and source-linked memories, then clears its local drafts. There is no in-app undo; see [deletion scope and independent backups](docs/operations.md#troubleshooting).
+- Select text to copy it, request a quick explanation or create a branch from an answer. Return to the exact source passage when you finish.
 - Branch titles summarize the first question you ask, rather than copying the source answer. A new empty branch shows “New branch”.
 - Save your understanding and bring it into the main conversation as an editable draft.
 - Edit a question as a new version, retry interrupted answers, and keep the original record.

@@ -80,6 +80,13 @@ class KnowledgeTree(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now)
 
 
+class TreeIdSequence(SQLModel, table=True):
+    """Content-free high-water marks: id=1 for topics, id=2 for conversation nodes."""
+
+    id: int = Field(default=1, primary_key=True)
+    last_id: int = 0
+
+
 class Node(SQLModel, table=True):
     """A node represents a focused conversation within a tree.
 

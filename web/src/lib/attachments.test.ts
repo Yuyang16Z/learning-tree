@@ -52,4 +52,17 @@ describe("draft-scoped image reads", () => {
     expect(queue.count("A")).toBe(0);
     expect(queue.enqueue("A", image("retry.png"))).toBeNull();
   });
+  it("cancels a deleted draft's pending reads without restoring images or changing another draft", async () => {
+    const { queue, requests, drafts, failed } = setup();
+    queue.enqueue("A", image("removed.png")); queue.enqueue("A", image("queued.png"));
+    queue.enqueue("B", image("kept.png"));
+    queue.cancel("A");
+    requests[0].resolve("removed image"); requests[1].resolve("kept image"); await tick();
+    expect(queue.count("A")).toBe(0);
+    expect(drafts.has("A")).toBe(false);
+    expect(drafts.get("B")).toEqual(["kept image"]);
+    expect(requests).toHaveLength(2);
+    expect(failed).not.toHaveBeenCalled();
+  });
+
 });

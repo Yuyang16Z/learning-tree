@@ -302,6 +302,7 @@ async def upload_document(
     node = session.get(Node, node_id)
     if node is None:
         raise HTTPException(404, "学习节点不存在。")
+    source_identity = (node.tree_id, node.created_at)
     try:
         name = safe_document_name(file.filename)
         content = await file.read(MAX_FILE_BYTES + 1)
@@ -312,29 +313,37 @@ async def upload_document(
         raise HTTPException(422, str(exc)) from exc
     finally:
         await file.close()
-    digest = hashlib.sha256(content).hexdigest()
-    document = session.exec(
-        select(DocumentAttachment).where(
-            DocumentAttachment.tree_id == node.tree_id,
-            DocumentAttachment.sha256 == digest,
-            DocumentAttachment.name == name,
-        )
-    ).first()
-    if document is None:
-        document = DocumentAttachment(
-            tree_id=node.tree_id,
-            name=name,
-            media_type=MEDIA_TYPES[PurePosixPath(name).suffix.lower()],
-            size=len(content),
-            sha256=digest,
-            content=content,
-            sections=sections,
-            warnings=warnings,
-        )
-        session.add(document)
-        session.commit()
-        session.refresh(document)
-    return document_summary(document)
+    # Parsing runs without a lock. Recheck ownership afterwards and serialize
+    # persistence with deletion so an in-flight upload cannot recreate a file.
+    from .routers.nodes import _REQUEST_LOCK
+
+    with _REQUEST_LOCK:
+        node = session.get(Node, node_id, populate_existing=True)
+        if node is None or (node.tree_id, node.created_at) != source_identity:
+            raise HTTPException(404, "学习节点已删除，附件未保存。")
+        digest = hashlib.sha256(content).hexdigest()
+        document = session.exec(
+            select(DocumentAttachment).where(
+                DocumentAttachment.tree_id == node.tree_id,
+                DocumentAttachment.sha256 == digest,
+                DocumentAttachment.name == name,
+            )
+        ).first()
+        if document is None:
+            document = DocumentAttachment(
+                tree_id=node.tree_id,
+                name=name,
+                media_type=MEDIA_TYPES[PurePosixPath(name).suffix.lower()],
+                size=len(content),
+                sha256=digest,
+                content=content,
+                sections=sections,
+                warnings=warnings,
+            )
+            session.add(document)
+            session.commit()
+            session.refresh(document)
+        return document_summary(document)
 
 
 def _get_document(session: Session, document_id: str) -> DocumentAttachment:

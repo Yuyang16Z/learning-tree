@@ -103,6 +103,45 @@ with Session(engine) as session:
     await poll(async () => await editor.inputValue() === changed, 'saved profile survives reload');
     checks.push('Legacy preferences become one editable profile; explicit save persists across reloads');
 
+    const shortHeight = await editor.evaluate(element => element.getBoundingClientRect().height);
+    const longPreferences = Array.from({ length: 80 }, (_, index) => `${String(index + 1).padStart(2, '0')}. Use an example before introducing terminology.`).join('\n');
+    assert(longPreferences.length < 6000);
+    await editor.fill(longPreferences);
+    const geometry = await editor.evaluate(element => ({
+      height: element.getBoundingClientRect().height,
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      overflowY: getComputedStyle(element).overflowY,
+      resize: getComputedStyle(element).resize,
+    }));
+    assert(Math.abs(geometry.height - 180) < 1 && Math.abs(geometry.height - shortHeight) < 1, 'Long preference content keeps the same fixed editor height');
+    assert(geometry.scrollHeight > geometry.clientHeight, 'Long preferences scroll within the textarea');
+    assert(['auto', 'scroll'].includes(geometry.overflowY));
+    assert.equal(geometry.resize, 'none');
+    await editor.evaluate(element => {
+      element.scrollTop = 0;
+      element.closest('.settings-content').scrollTop = 0;
+    });
+    await editor.hover();
+    const parentScroll = await editor.evaluate(element => element.closest('.settings-content').scrollTop);
+    await page.mouse.wheel(0, 180);
+    await poll(async () => await editor.evaluate(element => element.scrollTop > 0), 'wheel scrolls preference content');
+    assert.equal(await editor.evaluate(element => element.closest('.settings-content').scrollTop), parentScroll, 'Scrolling preferences does not move the settings pane');
+    assert.equal(await editor.inputValue(), longPreferences, 'Internal scrolling preserves every character');
+    fs.mkdirSync(path.resolve(__dirname, '../artifacts'), { recursive: true });
+    await page.screenshot({ path: path.resolve(__dirname, '../artifacts/preference-editor-scroll.png') });
+    await editor.fill('x'.repeat(6001));
+    assert.equal((await editor.inputValue()).length, 6001, 'Over-limit draft text is retained for editing, never silently truncated');
+    assert(await page.getByRole('button', { name: 'Save preferences', exact: true }).isDisabled(), 'An over-limit preference cannot be saved');
+    await editor.fill(longPreferences);
+    await page.getByRole('button', { name: 'Save preferences', exact: true }).click();
+    await poll(async () => (await api('/memories/preferences')).content === longPreferences, 'the full multiline profile is saved');
+    await page.reload();
+    await openMemory();
+    assert.equal(await editor.inputValue(), longPreferences);
+    assert(Math.abs((await editor.boundingBox()).height - shortHeight) < 1);
+    checks.push('Long preferences use a fixed 180px editor with internal scrolling; all content persists and over-limit drafts remain intact');
+
     const rows = page.getByTestId('memory-fact');
     await poll(async () => await rows.count() === 10, 'bounded first facts page');
     const search = page.getByRole('searchbox', { name: 'Search memories', exact: true });

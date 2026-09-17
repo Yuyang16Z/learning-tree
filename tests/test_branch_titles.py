@@ -330,7 +330,9 @@ def test_mock_model_retains_question_without_ai_title_call(workspace):
 
 
 @pytest.mark.parametrize("delete_tree", [False, True])
-def test_deleted_branch_and_reused_id_ignore_old_title_result(workspace, monkeypatch, delete_tree):
+def test_deleted_branch_and_replacement_ignore_old_title_result(
+    workspace, monkeypatch, delete_tree
+):
     env = workspace
     tree, branch = create_branch(env)
     _, release, _ = held_title(env, monkeypatch)
@@ -344,9 +346,10 @@ def test_deleted_branch_and_reused_id_ignore_old_title_result(workspace, monkeyp
         replacement = env.client.post(
             f"/nodes/{tree['root_node_id']}/branch", json={"seed_text": SOURCE}
         ).json()
-    # SQLite reuses the greatest deleted ID. A new job must be allowed to run,
-    # and its successful title must survive the old provider eventually returning.
-    assert replacement["id"] == branch["id"]
+    # Replacement nodes keep a distinct identity, including when the largest ID
+    # was deleted. The old provider must not interfere with a new title job.
+    assert replacement["id"] > branch["id"]
+    replacement_id = replacement["id"]
     monkeypatch.setattr(nodes, "summarize_question", lambda *a: "Replacement summary")
     assert ask(env, replacement["id"], "Replacement question")[-1]["done"]
     assert wait_title(env, replacement["id"], "ai")["title"] == "Replacement summary"
@@ -354,7 +357,7 @@ def test_deleted_branch_and_reused_id_ignore_old_title_result(workspace, monkeyp
     for worker in env.workers:
         worker.join(3)
     with Session(env.engine) as session:
-        replacement = session.get(Node, branch["id"])
+        replacement = session.get(Node, replacement_id)
         assert replacement.title == "Replacement summary"
         assert replacement.title_state == "ai"
 

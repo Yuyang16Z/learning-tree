@@ -8,7 +8,7 @@ from . import mcp_client
 from .db import engine
 from .llm import LLMSpec, extract_memories
 from .memory_preferences import begin_memory_write
-from .models import McpServer, Memory, Message, ModelConfig, Node, PreferenceProfile
+from .models import KnowledgeTree, McpServer, Memory, Message, ModelConfig, Node, PreferenceProfile
 from .tools import TOOL_DEFS, execute_tool, mcp_tool_def
 
 
@@ -137,6 +137,10 @@ def extract_and_save(
     if spec.api_key == "mock" or spec.base_url.startswith("mock"):
         return
     with Session(engine) as s:
+        source = s.get(Node, node_id)
+        if not source or source.status != "complete" or source.tree_id != tree_id:
+            return
+        source_identity = (source.tree_id, source.created_at, source.request_id)
         profile = s.get(PreferenceProfile, 1)
         reset_revision = profile.reset_revision if profile is not None else ""
     res = extract_memories(spec, question, answer)
@@ -149,7 +153,12 @@ def extract_and_save(
         if (profile.reset_revision if profile is not None else "") != reset_revision:
             return  # The user cleared memories while this extraction was running.
         source = s.get(Node, node_id)
-        if not source or source.status != "complete":
+        if (
+            not source
+            or source.status != "complete"
+            or (source.tree_id, source.created_at, source.request_id) != source_identity
+            or s.get(KnowledgeTree, source.tree_id) is None
+        ):
             return
         existing = {(m.kind, m.source_node_id, m.content) for m in s.exec(select(Memory)).all()}
         # After the first explicit save, only the user owns their preference profile.

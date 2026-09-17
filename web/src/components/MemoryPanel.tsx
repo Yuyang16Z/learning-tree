@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import type { MemoryFact, MemoryFactsPage, PreferenceProfile } from "../types";
@@ -21,7 +21,6 @@ function isConflict(error: unknown): boolean {
 export function MemoryPanel({ onDirtyChange, onBusyChange, onOpenSource }: Props) {
   const { t } = useI18n();
   const profileId = useId();
-  const profileInput = useRef<HTMLTextAreaElement>(null);
   const [profile, setProfile] = useState<PreferenceProfile | null>(null);
   const [draft, setDraft] = useState("");
   const [profileReload, setProfileReload] = useState(0);
@@ -73,13 +72,6 @@ export function MemoryPanel({ onDirtyChange, onBusyChange, onOpenSource }: Props
     });
     return () => controller.abort();
   }, [profileReload]);
-
-  useEffect(() => {
-    const input = profileInput.current;
-    if (!input) return;
-    input.style.height = "auto";
-    input.style.height = `${Math.min(300, Math.max(148, input.scrollHeight))}px`;
-  }, [draft, profileLoading]);
 
   useEffect(() => {
     const timer = setTimeout(() => setSettledQuery(query.trim()), 200);
@@ -176,7 +168,7 @@ export function MemoryPanel({ onDirtyChange, onBusyChange, onOpenSource }: Props
         </div>
         {profileLoading ? <div className="memory-empty" role="status">{t("正在读取…", "Loading…")}</div> : profile && (
           <>
-            <textarea ref={profileInput} id={`${profileId}-input`} data-testid="preference-editor" className="memory-profile-input" value={draft}
+            <textarea id={`${profileId}-input`} data-testid="preference-editor" className="memory-profile-input" value={draft}
               disabled={saving} onChange={event => { setDraft(event.target.value); setSaved(false); }}
               placeholder={t("写下你希望 AI 记住的偏好，例如：先用简单的例子解释，再介绍术语。", "What should AI remember about you? For example: explain with a simple example before introducing terminology.")} />
             <div className="memory-editor-footer">

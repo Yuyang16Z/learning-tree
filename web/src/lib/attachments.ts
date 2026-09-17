@@ -31,6 +31,7 @@ export function readImage(file: File): Promise<string> {
 export class ImageAttachmentQueue {
   private entries = new Map<string, File[]>();
   private running = new Set<string>();
+  private generations = new Map<string, number>();
   constructor(private options: {
     images: (key: string) => string[];
     read: (file: File) => Promise<string>;
@@ -50,15 +51,26 @@ export class ImageAttachmentQueue {
     return null;
   }
 
+  cancel(key: string) {
+    this.entries.delete(key);
+    this.generations.set(key, (this.generations.get(key) ?? 0) + 1);
+    this.options.changed();
+  }
+
   private async run(key: string) {
     if (this.running.has(key)) return;
     this.running.add(key);
     try {
       let file: File | undefined;
       while ((file = this.entries.get(key)?.[0])) {
-        try { this.options.complete(key, await this.options.read(file)); }
-        catch { this.options.failed(key, file); }
-        this.entries.set(key, (this.entries.get(key) ?? []).slice(1));
+        const generation = this.generations.get(key) ?? 0;
+        try {
+          const image = await this.options.read(file);
+          if (generation === (this.generations.get(key) ?? 0)) this.options.complete(key, image);
+        } catch {
+          if (generation === (this.generations.get(key) ?? 0)) this.options.failed(key, file);
+        }
+        if (generation === (this.generations.get(key) ?? 0)) this.entries.set(key, (this.entries.get(key) ?? []).slice(1));
         this.options.changed();
       }
     } finally { this.running.delete(key); }

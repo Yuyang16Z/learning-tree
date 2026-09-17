@@ -248,6 +248,7 @@ def e2e() -> None:
             run([executable("node"), "scripts/document_smoke.cjs"], env=env)
             run([executable("node"), "scripts/memory_smoke.cjs"], env=env)
             run([executable("node"), "scripts/topic_smoke.cjs"], env=env)
+            run([executable("node"), "scripts/chat_navigation_smoke.cjs"], env=env)
 
 
 def main() -> None:
