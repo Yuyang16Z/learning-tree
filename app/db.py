@@ -12,6 +12,9 @@ engine = create_engine(
 
 # Idempotently add missing columns; create_all creates tables but cannot ALTER existing ones.
 _ADDED_COLUMNS = {
+    "knowledgetree": {
+        "archived": "BOOLEAN NOT NULL DEFAULT 0",
+    },
     "modelconfig": {
         "protocol": "TEXT NOT NULL DEFAULT 'openai'",
         "max_tokens": "INTEGER NOT NULL DEFAULT 4096",

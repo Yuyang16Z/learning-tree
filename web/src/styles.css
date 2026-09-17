@@ -932,7 +932,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--teal); outline-
 .sidebar { width: 208px; padding: 25px 14px 16px; gap: 15px; background: var(--panel); }
 .brand-row { padding: 0 8px 12px; flex-wrap: wrap; gap: 4px; }
 .brand { font-size: 20px; letter-spacing: 1px; font-weight: 650; gap: 9px; }
-.brand-mark { display: inline-grid; place-items: center; width: 28px; height: 30px; background: var(--teal); color: var(--bg); border-radius: 10px 10px 10px 3px; font-size: 25px; font-weight: 400; }
+.brand-mark { display: block; width: 36px; height: 36px; }
 .brand-sub { font-size: 8px; letter-spacing: 1px; color: var(--muted); }
 .new-topic { display: flex; align-items: center; gap: 9px; padding: 11px 13px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); color: var(--text); font-size: 13px; text-align: left; box-shadow: 0 1px 3px #00000004; }
 .new-topic:hover { border-color: var(--teal); }

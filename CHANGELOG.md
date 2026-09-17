@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add topic renaming, reversible archiving and an Archived view in the sidebar, with compact accessible action menus. Preserve original questions, branches, memories and attachments; existing topics remain active after the additive database upgrade.
+- Match the sidebar and browser icon to the native macOS application's mint-green rounded tree mark.
+
 - Add compact question/answer copy controls and a single mixed image/document attachment picker, with draft-scoped upload reservations.
 - Consolidate preferences into an editable, user-managed profile with conflict detection. Add searchable, topic-filtered, paginated fact management, source links, inline corrections and selected deletion; retain source boundaries and invalidate edited fact embeddings.
 

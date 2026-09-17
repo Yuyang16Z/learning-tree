@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ModelConfigIn(BaseModel):
@@ -45,6 +45,27 @@ class TreeOut(BaseModel):
     id: int
     title: str
     root_node_id: int
+    archived: bool = False
+
+
+class TreePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, min_length=1, max_length=300)
+    archived: bool | None = Field(default=None, strict=True)
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def strip_title(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def require_changes(self):
+        if not self.model_fields_set:
+            raise ValueError("Provide a title or archive status")
+        if any(getattr(self, field) is None for field in self.model_fields_set):
+            raise ValueError("Title and archive status cannot be null")
+        return self
 
 
 class NodeOut(BaseModel):

@@ -138,7 +138,9 @@ export const api = {
   deleteMemory: (id: number) => fetch(`${API}/memories/${id}`, { method: "DELETE" }).then(j<unknown>),
   clearMemories: () => fetch(`${API}/memories`, { method: "DELETE" }).then(j<unknown>),
 
-  listTrees: () => fetch(`${API}/trees`).then(j<Tree[]>),
+  listTrees: (includeArchived = false) => fetch(`${API}/trees${includeArchived ? '?include_archived=true' : ''}`).then(j<Tree[]>),
+  updateTree: (id: number, body: { title?: string; archived?: boolean }) =>
+    fetch(`${API}/trees/${id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(j<Tree>),
   createTree: (title: string, root_question?: string) =>
     jsonPost(`${API}/trees`, { title, root_question: root_question ?? null }).then(j<Tree>),
   getTree: (id: number, signal?: AbortSignal) => fetch(`${API}/trees/${id}`, { signal }).then(j<TreeNode[]>),

@@ -18,6 +18,7 @@ The images use synthetic content and the offline demo model. They demonstrate th
 ## Features
 
 - A continuous conversation alongside an interactive topic map: jump to any turn, pan, zoom and return to your previous view after centering.
+- Rename topics or archive them from the sidebar's **…** menu. Archived topics keep their conversations and branches; view or restore them from **Archived**. Renaming a topic leaves the original questions unchanged.
 - Select text for a quick explanation or create a branch from an answer. Return to the exact source passage when you finish.
 - Branch titles summarize the first question you ask, rather than copying the source answer. A new empty branch shows “New branch”.
 - Save your understanding and bring it into the main conversation as an editable draft.

@@ -116,7 +116,7 @@ export default function App() {
   }
 
   async function loadTrees() {
-    const t = await api.listTrees();
+    const t = await api.listTrees(true);
     setTrees(t);
     return t;
   }
@@ -148,7 +148,7 @@ export default function App() {
     loadTrees()
       .then((t) => {
         const saved = readSaved<number | null>("bl-tree", null);
-        const initial = t.find(x => x.id === saved) ?? t[0];
+        const initial = t.find(x => x.id === saved) ?? t.find(x => !x.archived);
         if (initial) selectTree(initial.id, t);
       })
       .catch((e) => setErr(String(e)));
@@ -229,6 +229,42 @@ export default function App() {
     setRecovery(backup);
   }
 
+  function clearTreeSelection() {
+    navigation.current.next();
+    ++mapRevision.current;
+    treeRef.current = null;
+    focusRef.current = null;
+    setActiveTreeId(null);
+    setTreeNodes([]);
+    setActiveNodeId(null);
+    setThread([]);
+    setNavigationAnchor(null);
+    setBusyNavigation(false);
+    setErr(null);
+    saveValue('bl-tree', null);
+  }
+
+  async function renameTree(id: number, title: string) {
+    const updated = await api.updateTree(id, { title });
+    setTrees(current => current.map(tree => tree.id === id ? { ...tree, title: updated.title } : tree));
+  }
+
+  async function archiveTree(id: number, archived: boolean) {
+    const updated = await api.updateTree(id, { archived });
+    setTrees(current => current.map(tree => tree.id === id ? { ...tree, archived: updated.archived } : tree));
+    setNotice(archived
+      ? t("已归档，可在侧栏的「已归档」中查看和恢复。", "Archived. View or restore it from Archived in the sidebar.")
+      : t("已恢复到我的主题。", "Restored to My topics."));
+    // Keep a generating topic open so its Stop control remains reachable.
+    // Drafts stay stored under their existing node IDs when changing topics.
+    const answeringHere = abortRef.current !== null && requestRef.current?.tree === id;
+    if (archived && treeRef.current === id && !answeringHere) {
+      const next = trees.find(tree => tree.id !== id && !tree.archived);
+      if (next) await selectTree(next.id);
+      else clearTreeSelection();
+    }
+  }
+
   async function deleteTree(id: number) {
     if (streaming) { setErr(t("请先停止当前回答，再删除。", "Stop the current response before deleting.")); return; }
     try {
@@ -237,11 +273,9 @@ export default function App() {
       const list = await loadTrees();
       setNotice(t("已删除，整棵树的备份已保留。", "Deleted. A backup of the entire tree is available."));
       if (treeRef.current === id) {
-        if (list[0]) await selectTree(list[0].id, list);
-        else {
-          navigation.current.next(); treeRef.current = null; focusRef.current = null;
-          setActiveTreeId(null); setTreeNodes([]); setActiveNodeId(null); setThread([]);
-        }
+        const next = list.find(tree => !tree.archived);
+        if (next) await selectTree(next.id, list);
+        else clearTreeSelection();
       }
     } catch (e) { setErr(String((e as Error).message ?? e)); }
   }
@@ -450,6 +484,8 @@ export default function App() {
         onSelect={selectTree}
         onNew={() => setNewTreeOpen(true)}
         onDelete={deleteTree}
+        onRename={renameTree}
+        onArchive={archiveTree}
         onOpenSettings={() => setSettingsOpen(true)}
         onImport={() => importRef.current?.click()}
         recoveryAvailable={!!recovery}

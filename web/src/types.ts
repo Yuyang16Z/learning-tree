@@ -1,4 +1,4 @@
-export interface Tree { id: number; title: string; root_node_id: number }
+export interface Tree { id: number; title: string; root_node_id: number; archived: boolean }
 export type NodeStatus = 'idle' | 'pending' | 'complete' | 'error' | 'interrupted';
 export type TitleState = 'legacy' | 'manual' | 'empty' | 'pending' | 'ai' | 'fallback';
 export interface SourceAnchor {

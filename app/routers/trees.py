@@ -23,7 +23,7 @@ from ..documents import (
     safe_document_name,
 )
 from ..models import KnowledgeTree, Memory, MemoryEmbedding, Message, Node
-from ..schemas import NodeOut, TreeIn, TreeOut
+from ..schemas import NodeOut, TreeIn, TreeOut, TreePatch
 from ..service import get_messages
 from .nodes import _GENERATIONS, _REQUEST_LOCK, _TITLE_JOBS, node_metadata
 
@@ -56,14 +56,47 @@ def create_tree(body: TreeIn, session: Session = Depends(get_session)) -> TreeOu
 
 
 @router.get("", response_model=list[TreeOut])
-def list_trees(session: Session = Depends(get_session)) -> list[TreeOut]:
+def list_trees(
+    include_archived: bool = False, session: Session = Depends(get_session)
+) -> list[TreeOut]:
     out = []
-    for tree in session.exec(select(KnowledgeTree).order_by(KnowledgeTree.id)):
+    query = select(KnowledgeTree).order_by(KnowledgeTree.id)
+    if not include_archived:
+        query = query.where(KnowledgeTree.archived.is_(False))
+    for tree in session.exec(query):
         root = session.exec(
             select(Node).where(Node.tree_id == tree.id, Node.parent_id.is_(None)).order_by(Node.id)
         ).first()
-        out.append(TreeOut(id=tree.id, title=tree.title, root_node_id=root.id if root else 0))
+        out.append(
+            TreeOut(
+                id=tree.id,
+                title=tree.title,
+                root_node_id=root.id if root else 0,
+                archived=tree.archived,
+            )
+        )
     return out
+
+
+@router.patch("/{tree_id}", response_model=TreeOut)
+def update_tree(tree_id: int, body: TreePatch, session: Session = Depends(get_session)) -> TreeOut:
+    tree = session.get(KnowledgeTree, tree_id)
+    if not tree:
+        raise HTTPException(404, "知识树不存在")
+    # Sidebar metadata never rewrites root questions, branches, messages or memories.
+    for field, value in body.model_dump(exclude_unset=True).items():
+        setattr(tree, field, value)
+    session.add(tree)
+    session.commit()
+    root = session.exec(
+        select(Node).where(Node.tree_id == tree.id, Node.parent_id.is_(None)).order_by(Node.id)
+    ).first()
+    return TreeOut(
+        id=tree.id,
+        title=tree.title,
+        root_node_id=root.id if root else 0,
+        archived=tree.archived,
+    )
 
 
 class Portable(BaseModel):
@@ -190,6 +223,8 @@ def import_tree(body: dict, session: Session = Depends(get_session)) -> TreeOut:
         parsed_documents.append((old, name, content, sections, warnings))
     # All validation happens before this transaction. Imported IDs are remapped,
     # never overwritten; request IDs and model credentials are not portable.
+    # Archive status is local organization, not portable learning content.
+    # Imports always appear as active topics; keep versions 1 and 2 compatible.
     tree = KnowledgeTree(title=backup.tree.title)
     session.add(tree)
     session.flush()

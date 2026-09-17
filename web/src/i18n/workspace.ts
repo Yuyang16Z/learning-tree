@@ -3,6 +3,8 @@ import type { McpServer } from "../types";
 
 /** Translate known application diagnostics only; never run this over conversation text. */
 const diagnostics: [string, string][] = [
+  ["已归档，可在侧栏的「已归档」中查看和恢复。", "Archived. View or restore it from Archived in the sidebar."],
+  ["已恢复到我的主题。", "Restored to My topics."],
   ["每条消息最多附加 4 个文档。", "Attach up to 4 documents per message."],
   ["文档不存在或不属于当前学习主题，请重新上传。", "This document is missing or belongs to another topic. Upload it again."],
   ["文档提取文本超过 200,000 字符，请拆分后上传。", "Extracted text exceeds 200,000 characters. Split the document before uploading."],

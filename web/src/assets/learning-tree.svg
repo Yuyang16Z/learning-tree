@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none">
+  <!-- Matches desktop/macos/Icon.swift; SVG coordinates use a top-left origin. -->
+  <defs>
+    <linearGradient id="tile" x1="512" y1="98" x2="512" y2="918" gradientUnits="userSpaceOnUse">
+      <stop stop-color="rgb(43%,85%,71%)"/>
+      <stop offset="1" stop-color="rgb(31%,73%,59%)"/>
+    </linearGradient>
+    <filter id="shadow" x="38" y="49" width="948" height="948" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="15" stdDeviation="16" flood-opacity=".23"/>
+    </filter>
+  </defs>
+  <rect x="102" y="98" width="820" height="820" rx="182" fill="url(#tile)" filter="url(#shadow)"/>
+  <rect x="102" y="98" width="820" height="820" rx="182" stroke="white" stroke-opacity=".16" stroke-width="2"/>
+  <path d="M330 374V530C330 546 338 554 354 554H670C686 554 694 546 694 530V374M512 709V374" stroke="rgb(7%,22%,18%)" stroke-width="42" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

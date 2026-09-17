@@ -76,6 +76,7 @@ class KnowledgeTree(SQLModel, table=True):
 
     id: int | None = Field(default=None, primary_key=True)
     title: str
+    archived: bool = False
     created_at: datetime = Field(default_factory=_now)
 
 
