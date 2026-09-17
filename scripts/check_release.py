@@ -33,6 +33,7 @@ PRIVATE_DIRS = {
     "artifacts",
     "node_modules",
     "dist",
+    "build",
     "__pycache__",
     ".pytest_cache",
     ".ruff_cache",
@@ -68,6 +69,7 @@ def main() -> int:
             continue
         forbidden = (
             any(part in PRIVATE_DIRS for part in path.parts)
+            or any(part.lower().endswith(".app") for part in path.parts)
             or (path.name.startswith(".env") and path.name != ".env.example")
             or bool(re.search(r"\.(?:db|sqlite3?)(?:$|-)|\.(?:pem|key|p12)$", path.name))
             or path.parts[0] == "学习资料"

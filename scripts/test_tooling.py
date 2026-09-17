@@ -211,6 +211,9 @@ def test_private_learning_files_are_ignored_in_both_directory_names():
     [
         ("learning-materials/private.txt", "private/generated"),
         ("学习资料/private.txt", "private/generated"),
+        ("build/macos/LearningTree.app/Contents/Info.plist", "private/generated"),
+        ("downloads/LearningTree.app/Contents/Info.plist", "private/generated"),
+        ("desktop/macos/LearningTree.swift", None),
         ("docs/中文.md", "ASCII"),
         ("learning-materials/README.md", None),
     ],

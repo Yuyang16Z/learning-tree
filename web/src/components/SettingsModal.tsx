@@ -2,7 +2,8 @@ import { useEffect, useId, useState } from "react";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import { localizeError, mcpDisplayName } from "../i18n/workspace";
-import type { McpServer, Memory, MemoryRetrievalStatus, ModelCfg } from "../types";
+import type { McpServer, MemoryRetrievalStatus, ModelCfg } from "../types";
+import { MemoryPanel } from "./MemoryPanel";
 
 interface Props {
   models: ModelCfg[];
@@ -15,9 +16,7 @@ interface Props {
   onOpenEditModel: (model: ModelCfg) => void;
   onSetDefault: (id: number) => Promise<void>;
   onOpenMcpConfig: (server: McpServer | null) => void;
-  memories: Memory[];
-  onDeleteMemory: (id: number) => Promise<void>;
-  onClearMemories: () => Promise<void>;
+  onOpenMemorySource: (treeId: number, nodeId: number | null) => void;
   theme: "light" | "dark" | "system";
   onThemeChange: (t: "light" | "dark" | "system") => void;
 }
@@ -124,11 +123,27 @@ export function SettingsModal(props: Props) {
   const titleId = useId();
   const { models, mcpServers, onClose, onDelete, onTest, onAddMock } = props;
   const { onOpenAddModel, onSetDefault, onOpenMcpConfig, theme, onThemeChange } = props;
-  const { memories, onDeleteMemory, onClearMemories } = props;
 
   const [tab, setTab] = useState<Tab>("models");
+  const [memoryVisited, setMemoryVisited] = useState(false);
+  const [memoryDirty, setMemoryDirty] = useState(false);
+  const [memoryBusy, setMemoryBusy] = useState(false);
   const [tests, setTests] = useState<Record<number, { ok: boolean; detail: string }>>({});
   const [testing, setTesting] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!memoryDirty && !memoryBusy) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [memoryDirty, memoryBusy]);
+
+  function canClose() {
+    if (memoryBusy) return false;
+    return !memoryDirty || window.confirm(t("记忆还有未保存的修改，放弃修改并关闭设置吗？", "You have unsaved memory changes. Discard them and close settings?"));
+  }
+
+  function close() { if (canClose()) onClose(); }
 
   async function test(id: number) {
     setTesting(id);
@@ -138,8 +153,8 @@ export function SettingsModal(props: Props) {
   }
 
   return (
-    <div className="overlay" onClick={onClose}>
-      <div className="modal modal-settings" role="dialog" aria-modal="true" aria-labelledby={titleId} onClick={(e) => e.stopPropagation()}>
+    <div className="overlay" onClick={close}>
+      <div className={`modal modal-settings${tab === "memory" ? " memory-settings" : ""}`} role="dialog" aria-modal="true" aria-labelledby={titleId} onClick={(e) => e.stopPropagation()}>
         <h3 id={titleId}>{t("设置", "Settings")}</h3>
 
         <div className="settings-body">
@@ -150,7 +165,7 @@ export function SettingsModal(props: Props) {
             <button className={tab === "mcp" ? "on" : ""} onClick={() => setTab("mcp")}>
               {t("MCP 工具", "MCP tools")}
             </button>
-            <button className={tab === "memory" ? "on" : ""} onClick={() => setTab("memory")}>
+            <button className={tab === "memory" ? "on" : ""} onClick={() => { setMemoryVisited(true); setTab("memory"); }}>
               {t("记忆", "Memory")}
             </button>
             <button className={tab === "appearance" ? "on" : ""} onClick={() => setTab("appearance")}>
@@ -229,44 +244,13 @@ export function SettingsModal(props: Props) {
               </>
             )}
 
-            {tab === "memory" && (
-              <>
-                <div className="sub">
-                  {t("AI 会记住你的偏好和话题结论，供相关提问使用。", "AI saves preferences and topic facts for relevant future questions.")}
-                </div>
-                <MemoryRetrievalPanel />
-                {memories.length === 0 && (
-                  <div className="hint" style={{ marginBottom: 6 }}>{t("还没有记忆，多聊几轮就有了。", "No memories yet. They will appear as you chat.")}</div>
-                )}
-                {memories.some((m) => m.kind === "preference") && (
-                  <div className="section-title" style={{ fontSize: 13 }}>{t("关于你（偏好 / 习惯）", "About you · Preferences")}</div>
-                )}
-                {memories
-                  .filter((m) => m.kind === "preference")
-                  .map((m) => (
-                    <div className="model-row" key={m.id}>
-                      <div className="grow">{m.content}</div>
-                      <button className="btn" onClick={() => onDeleteMemory(m.id)}>{t("删除", "Delete")}</button>
-                    </div>
-                  ))}
-                {memories.some((m) => m.kind === "fact") && (
-                  <div className="section-title" style={{ fontSize: 13 }}>{t("话题事实", "Topic facts")}</div>
-                )}
-                {memories
-                  .filter((m) => m.kind === "fact")
-                  .map((m) => (
-                    <div className="model-row" key={m.id}>
-                      <div className="grow">{m.content}</div>
-                      <button className="btn" onClick={() => onDeleteMemory(m.id)}>{t("删除", "Delete")}</button>
-                    </div>
-                  ))}
-                {memories.length > 0 && (
-                  <div className="row-between" style={{ marginTop: 10 }}>
-                    <span />
-                    <button className="btn btn-danger" onClick={onClearMemories}>{t("全部清空", "Clear all")}</button>
-                  </div>
-                )}
-              </>
+            {memoryVisited && (
+              <div hidden={tab !== "memory"}>
+                <MemoryPanel onDirtyChange={setMemoryDirty} onBusyChange={setMemoryBusy} onOpenSource={(treeId, nodeId) => {
+                  if (canClose()) { onClose(); props.onOpenMemorySource(treeId, nodeId); }
+                }} />
+                {tab === "memory" && <div className="memory-retrieval-footer"><MemoryRetrievalPanel /></div>}
+              </div>
             )}
 
             {tab === "language" && (
@@ -301,7 +285,7 @@ export function SettingsModal(props: Props) {
 
         <div className="row-between" style={{ marginTop: 14 }}>
           <span />
-          <button className="btn" onClick={onClose}>{t("关闭", "Close")}</button>
+          <button className="btn" disabled={memoryBusy} onClick={close}>{t("关闭", "Close")}</button>
         </div>
       </div>
     </div>

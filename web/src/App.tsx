@@ -5,7 +5,6 @@ import { localizeError } from "./i18n/workspace";
 import type {
   McpInput,
   McpServer,
-  Memory,
   ModelCfg,
   ModelInput,
   ThreadNode,
@@ -31,7 +30,6 @@ export default function App() {
   const [models, setModels] = useState<ModelCfg[]>([]);
   const [activeModelId, setActiveModelId] = useState<number | null>(null);
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
-  const [memories, setMemories] = useState<Memory[]>([]);
   const [trees, setTrees] = useState<Tree[]>([]);
   const [activeTreeId, setActiveTreeId] = useState<number | null>(null);
   const [treeNodes, setTreeNodes] = useState<TreeNode[]>([]);
@@ -126,15 +124,6 @@ export default function App() {
   async function loadMcp() {
     setMcpServers(await api.listMcp());
   }
-
-  async function loadMemories() {
-    setMemories(await api.listMemories());
-  }
-
-  useEffect(() => {
-    if (settingsOpen) loadMemories().catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settingsOpen]);
 
   useEffect(() => {
     const resolve = (): "light" | "dark" =>
@@ -417,13 +406,9 @@ export default function App() {
     await loadMcp();
   }
 
-  async function deleteMemory(id: number) {
-    await api.deleteMemory(id);
-    await loadMemories();
-  }
-  async function clearMemories() {
-    await api.clearMemories();
-    await loadMemories();
+  async function openMemorySource(treeId: number, nodeId: number | null) {
+    await selectTree(treeId);
+    if (nodeId !== null && treeRef.current === treeId) await selectNode(nodeId);
   }
 
   function startResize(e: React.MouseEvent) {
@@ -537,9 +522,7 @@ export default function App() {
             setMcpConfigServer(server);
             setMcpConfigOpen(true);
           }}
-          memories={memories}
-          onDeleteMemory={deleteMemory}
-          onClearMemories={clearMemories}
+          onOpenMemorySource={(treeId, nodeId) => void openMemorySource(treeId, nodeId)}
           theme={theme}
           onThemeChange={setTheme}
         />

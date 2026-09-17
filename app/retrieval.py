@@ -13,7 +13,8 @@ from sqlalchemy import JSON, literal
 from sqlalchemy.dialects.sqlite import insert
 from sqlmodel import Session, select
 
-from .models import Memory, MemoryEmbedding, Node
+from .memory_preferences import render_profile
+from .models import Memory, MemoryEmbedding, Node, PreferenceProfile
 from .semantic_models import get_backend
 
 
@@ -43,6 +44,7 @@ class MemoryHit:
 class RetrievalResult:
     text: str = ""
     preferences: list[MemoryHit] = field(default_factory=list)
+    preference_profile: str = ""
     facts: list[MemoryHit] = field(default_factory=list)
     mode: str = "lexical"
     reranked: bool = False
@@ -420,9 +422,20 @@ def retrieve_memory(
                 pass  # The fused ranking remains usable without the optional second stage.
     result.preferences = _revalidate(session, result.preferences, tree_id, source_ids)
     selected = _revalidate(session, selected, tree_id, source_ids)
+    # Read the authoritative profile after potentially slow semantic inference.
+    # An empty user-owned profile suppresses every legacy automatic preference.
+    with Session(session.get_bind()) as fresh:
+        profile = fresh.get(PreferenceProfile, 1)
+        if profile is not None:
+            result.preferences = []
+            result.preference_profile = profile.content
     result.facts = _budget(selected, config.top_k, config.char_budget)
     sections = []
-    if result.preferences:
+    if result.preference_profile:
+        # The full bounded profile travels as one unit; context.py reserves room
+        # for it or omits it whole when mandatory input already fills the budget.
+        sections.append(render_profile(result.preference_profile))
+    elif result.preferences:
         sections.append(
             "【用户偏好（历史记录，当前明确要求优先）】\n"
             + "\n".join(_line(item) for item in result.preferences)

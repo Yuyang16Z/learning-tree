@@ -219,7 +219,7 @@ def start(open_browser: bool = False) -> None:
 
 
 def check() -> None:
-    paths = ["app", "tests", "scripts", "examples", "integrations/mcp"]
+    paths = ["app", "tests", "scripts", "examples", "integrations/mcp", "desktop/macos"]
     run([sys.executable, "-m", "ruff", "check", *paths])
     run([sys.executable, "-m", "ruff", "format", "--check", *paths])
     with tempfile.TemporaryDirectory(prefix="learning-tree-check-") as directory:
@@ -237,11 +237,16 @@ def e2e() -> None:
         env = isolated_env(Path(directory) / "test.db")
         port = free_port()
         base = f"http://{HOST}:{port}"
-        env.update(LEARNING_TREE_E2E="1", LEARNING_TREE_E2E_BASE=base)
+        env.update(
+            LEARNING_TREE_E2E="1",
+            LEARNING_TREE_E2E_BASE=base,
+            LEARNING_TREE_E2E_PYTHON=sys.executable,
+        )
         with background(server_args(port), env) as api:
             wait_ready(base, api)
             run([executable("node"), "scripts/smoke.cjs"], env=env)
             run([executable("node"), "scripts/document_smoke.cjs"], env=env)
+            run([executable("node"), "scripts/memory_smoke.cjs"], env=env)
 
 
 def main() -> None:

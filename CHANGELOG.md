@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add compact question/answer copy controls and a single mixed image/document attachment picker, with draft-scoped upload reservations.
+- Consolidate preferences into an editable, user-managed profile with conflict detection. Add searchable, topic-filtered, paginated fact management, source links, inline corrections and selected deletion; retain source boundaries and invalidate edited fact embeddings.
+
+- Add a native macOS desktop window, Dock icon and safe Applications-folder installer without a default Desktop shortcut. Reuse the local server or back up data and start it automatically; support native file selection, exports, keyboard editing and external links. The app uses the existing project and Python environment, with separate WebKit browser storage.
+
 - Standardize public filenames and ordinary developer comments in English. Rename the macOS launcher to `start-learning-tree.command` and the learning-file library to `learning-materials/`; keep legacy learning files accessible in place and excluded from Git. Restart the app after updating to refresh MCP sessions.
 
 - Add local PDF text-layer, DOCX and UTF-8 text document uploads with extraction previews, original downloads and source-linked question attachments. Bound parsing in a separate process and clearly report unsupported scans, encrypted or malformed documents.

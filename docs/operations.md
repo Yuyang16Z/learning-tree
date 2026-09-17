@@ -20,7 +20,7 @@ An occupied port is not forcibly freed. Ctrl+C stops the app. Use one backend pe
 
 | Location | Contains |
 | --- | --- |
-| `branch_learning.db` | Normal chats, model keys, notes, memory, rebuildable `MemoryEmbedding` vectors and tool configuration. |
+| `branch_learning.db` | Normal chats, model keys, notes, memory, user-managed `PreferenceProfile`, rebuildable `MemoryEmbedding` vectors and tool configuration. |
 | `.runtime/dev.db` | Separate development data and demo configuration. |
 | `.runtime/retrieval/models/` | Pinned public embedding/reranker weights; no chat records. |
 | `.backups/` | Private database copies including credentials. |
@@ -76,7 +76,7 @@ For a tagged version, see the corresponding [release notes](releases/v0.2.0.md).
 
 For full recovery, stop the app, keep a copy of the current data file, and copy a chosen private backup to the configured database path. Start one backend. A database restore does not restore browser drafts, learning files or MCP memory; back those up separately when moving machines.
 
-Tree JSON import creates a new tree and remaps references. Limits are 25 MiB, 2,000 nodes and 12,000 messages. Backups containing question documents use version 2, include original bytes and integrity hashes, and are reparsed on import; version-1 backups remain supported. Embedded originals count toward the JSON limit, so large collections may need a private SQLite backup. Automatic preference/factual memory and MCP memory are not included. Exported conversations and documents can still be private even though model keys are excluded. See [document formats and data flow](documents.md).
+Tree JSON import creates a new tree and remaps references. Limits are 25 MiB, 2,000 nodes and 12,000 messages. Backups containing question documents use version 2, include original bytes and integrity hashes, and are reparsed on import; version-1 backups remain supported. Embedded originals count toward the JSON limit, so large collections may need a private SQLite backup. Automatic preference/factual memory, the user-managed preference profile and MCP memory are not included. Exported conversations and documents can still be private even though model keys are excluded. See [document formats and data flow](documents.md).
 
 ## Troubleshooting
 

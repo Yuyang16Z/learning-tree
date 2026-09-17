@@ -162,7 +162,7 @@ async function poll(callback) {
     await input.fill(ordinaryDraft);
     const originalAnswer = await page.locator(`[data-answer-node="${tree.root_node_id}"]`).innerText();
     await page.locator('.chat-question').first().hover();
-    await page.locator('.chat-question-actions button').first().click();
+    await page.locator('.chat-question-actions').first().getByRole('button', { name: 'Edit', exact: true }).click();
     await page.locator('.chat-revision').waitFor();
     await input.focus();
     const style = await input.evaluate(el => ({ outline: getComputedStyle(el).outlineStyle, shadow: getComputedStyle(el).boxShadow }));
@@ -180,7 +180,7 @@ async function poll(callback) {
     await page.locator('.chat-revision button').click();
     assert.equal(await input.inputValue(), ordinaryDraft);
     checks.push('Editing has no inner focus ring; switching both languages preserves revision and cancel restores the original draft');
-    await page.locator('.chat-answer-actions button').first().click();
+    await page.locator('.chat-answer-actions').first().getByRole('button', { name: 'New branch', exact: true }).click();
     const branch = await poll(async () => (await api(`/trees/${tree.id}`)).find(node => node.kind === 'branch'));
     assert.equal(branch.source_node_id, tree.root_node_id);
     assert(branch.source_message_id);

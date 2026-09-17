@@ -7,7 +7,8 @@ from sqlmodel import Session, select
 from . import mcp_client
 from .db import engine
 from .llm import LLMSpec, extract_memories
-from .models import McpServer, Memory, Message, ModelConfig, Node
+from .memory_preferences import begin_memory_write
+from .models import McpServer, Memory, Message, ModelConfig, Node, PreferenceProfile
 from .tools import TOOL_DEFS, execute_tool, mcp_tool_def
 
 
@@ -135,16 +136,24 @@ def extract_and_save(
     Extraction failures are silent."""
     if spec.api_key == "mock" or spec.base_url.startswith("mock"):
         return
+    with Session(engine) as s:
+        profile = s.get(PreferenceProfile, 1)
+        reset_revision = profile.reset_revision if profile is not None else ""
     res = extract_memories(spec, question, answer)
     prefs, facts = res.get("preferences", []), res.get("facts", [])
     if not prefs and not facts:
         return
     with Session(engine) as s:
+        begin_memory_write(s)
+        profile = s.get(PreferenceProfile, 1)
+        if (profile.reset_revision if profile is not None else "") != reset_revision:
+            return  # The user cleared memories while this extraction was running.
         source = s.get(Node, node_id)
         if not source or source.status != "complete":
             return
         existing = {(m.kind, m.source_node_id, m.content) for m in s.exec(select(Memory)).all()}
-        for p in prefs:
+        # After the first explicit save, only the user owns their preference profile.
+        for p in prefs if profile is None else []:
             if p and ("preference", node_id, p) not in existing:
                 s.add(Memory(kind="preference", content=p, tree_id=None, source_node_id=node_id))
                 existing.add(("preference", node_id, p))

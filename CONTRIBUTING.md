@@ -10,7 +10,9 @@ Issues and pull requests in English or Chinese are welcome. For a substantial fe
 4. Make a focused change, preserving data compatibility and user content.
 5. Run `uv run python scripts/manage.py check`. For chat, settings, navigation or map changes, also run `uv run python scripts/manage.py e2e` after installing its browser as described in the README.
 
-Python is formatted with Ruff: `uv run ruff format app tests scripts examples integrations/mcp`. TypeScript follows the surrounding code. Commit lockfile changes with dependency changes. Add tests for behavior that could regress, using synthetic fixtures and mock providers.
+Python is formatted with Ruff: `uv run ruff format app tests scripts examples integrations/mcp desktop/macos`. TypeScript follows the surrounding code. Commit lockfile changes with dependency changes. Add tests for behavior that could regress, using synthetic fixtures and mock providers.
+
+The [native macOS shell](desktop/macos/README.md) is optional and built from source against an existing local installation. GitHub Actions compiles its Swift app and icon on macOS; installer safeguards are tested in the regular Python suite. Commit desktop source, tests and documentation, not generated `.app` bundles or machine-specific build manifests.
 
 Most changes need no local retrieval models. To work on real embedding/reranking behavior, run `uv run python scripts/manage.py retrieval`, then `uv run python scripts/prepare_retrieval.py --smoke` with hybrid mode enabled. The extra requires approximately 2.55 GiB of weights plus dependencies. Keep model-quality observations separate from mock regression results; see [the validation record](docs/memory-retrieval-validation.md).
 

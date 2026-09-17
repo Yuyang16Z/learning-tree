@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -118,6 +119,47 @@ class MemoryOut(BaseModel):
     kind: str
     content: str
     tree_id: int | None
+
+
+class PreferenceProfileOut(BaseModel):
+    content: str
+    revision: str
+    managed: bool
+
+
+class PreferenceProfileIn(BaseModel):
+    content: str = Field(max_length=6000)
+    revision: str = Field(min_length=1, max_length=100)
+
+
+class FactOut(MemoryOut):
+    source_node_id: int | None
+    tree_title: str | None
+    created_at: datetime
+
+
+class FactTopicOut(BaseModel):
+    tree_id: int | None
+    title: str
+    count: int
+
+
+class FactPageOut(BaseModel):
+    items: list[FactOut]
+    total: int
+    page: int
+    page_size: int
+    topics: list[FactTopicOut]
+
+
+class FactPatch(BaseModel):
+    content: str = Field(min_length=1, max_length=4000)
+    # Legacy facts can exceed the editing limit; preserving the original is required for CAS.
+    expected_content: str
+
+
+class FactDeleteIn(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=1000)
 
 
 class ExplainIn(BaseModel):

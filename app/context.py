@@ -9,6 +9,7 @@ from .context_budget import (
     text_tokens,
 )
 from .context_compaction import summarize_sources
+from .memory_preferences import split_profile
 from .models import Message, Node
 
 BASE_SYSTEM = (
@@ -137,6 +138,11 @@ def build_context(
     base = _full_system([], current, "") + document_note + "\n" + COMPACTION_NOTICE
     if count(base, [last]) > assembly_budget:
         raise ContextBudgetExceeded()
+    profile, memory_note = split_profile(memory_note)
+    # User-edited preferences are not automatically abbreviated into fragments.
+    # Preserve them before older turns if possible; mandatory question/source wins.
+    if profile and count(base + "\n" + profile, [last]) <= assembly_budget - 256:
+        base += "\n" + profile
     available = assembly_budget - count(base, [last])
     # Keep recent complete turns, reserving room for old conditions and sources.
     recent_limit = int(available * 0.60)

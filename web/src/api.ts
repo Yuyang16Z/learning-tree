@@ -5,6 +5,9 @@ import type {
   McpInput,
   McpServer,
   Memory,
+  MemoryFact,
+  MemoryFactsPage,
+  PreferenceProfile,
   MemoryRetrievalStatus,
   ModelCfg,
   ModelInput,
@@ -23,7 +26,7 @@ async function requestError(res: Response): Promise<Error> {
   let detail: any;
   try { const data = await res.json(); detail = data.detail ?? data; } catch { detail = null; }
   const message = typeof detail === 'string' ? detail : detail?.message;
-  return Object.assign(new Error(message ? localizeError(message) : translate("请求失败（{status}），请重试。", "Request failed ({status}). Try again.", { status: res.status })), { meta: typeof detail === 'object' ? detail : undefined });
+  return Object.assign(new Error(message ? localizeError(message) : translate("请求失败（{status}），请重试。", "Request failed ({status}). Try again.", { status: res.status })), { status: res.status, meta: typeof detail === 'object' ? detail : undefined });
 }
 async function j<T>(res: Response): Promise<T> {
   if (!res.ok) throw await requestError(res);
@@ -116,6 +119,18 @@ export const api = {
     jsonPost(`${API}/mcp/${id}/test`, {}).then(j<{ ok: boolean; detail: string; tools: string[] }>),
 
   listMemories: () => fetch(`${API}/memories`).then(j<Memory[]>),
+  getPreferences: (signal?: AbortSignal) =>
+    fetch(`${API}/memories/preferences`, { signal }).then(j<PreferenceProfile>),
+  savePreferences: (body: { content: string; revision: string }) =>
+    fetch(`${API}/memories/preferences`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(j<PreferenceProfile>),
+  listFacts: (filters: { q?: string; tree_id?: number; page?: number; page_size?: number } = {}, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(filters)) if (value !== undefined) query.set(key, String(value));
+    return fetch(`${API}/memories/facts?${query}`, { signal }).then(j<MemoryFactsPage>);
+  },
+  updateMemory: (id: number, body: { content: string; expected_content: string }) =>
+    fetch(`${API}/memories/${id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(j<MemoryFact>),
+  deleteMemories: (ids: number[]) => jsonPost(`${API}/memories/delete`, { ids }).then(j<{ deleted: number }>),
   memoryRetrievalStatus: (signal?: AbortSignal) =>
     fetch(`${API}/memories/retrieval/status`, { signal }).then(j<MemoryRetrievalStatus>),
   prepareMemoryRetrieval: (signal?: AbortSignal) =>

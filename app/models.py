@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from typing import Literal
+from uuid import uuid4
 
 from sqlalchemy import JSON, Column, String
 from sqlmodel import Field, SQLModel
@@ -46,6 +47,17 @@ class MemoryEmbedding(SQLModel, table=True):
     model_key: str = Field(primary_key=True)
     content_hash: str
     vector: list[float] = Field(sa_column=Column(JSON, nullable=False))
+
+
+class PreferenceProfile(SQLModel, table=True):
+    """User-owned singleton; an empty profile intentionally suppresses automatic preferences."""
+
+    id: int = Field(default=1, primary_key=True)
+    content: str = ""
+    revision: str = Field(default_factory=lambda: uuid4().hex)
+    # Clear-all advances this token so an in-flight extraction cannot restore deleted memories.
+    reset_revision: str = ""
+    updated_at: datetime = Field(default_factory=_now)
 
 
 class McpServer(SQLModel, table=True):

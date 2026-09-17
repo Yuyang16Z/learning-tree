@@ -22,9 +22,11 @@ The images use synthetic content and the offline demo model. They demonstrate th
 - Branch titles summarize the first question you ask, rather than copying the source answer. A new empty branch shows “New branch”.
 - Save your understanding and bring it into the main conversation as an editable draft.
 - Edit a question as a new version, retry interrupted answers, and keep the original record.
+- Copy a question or answer from its compact action bar. One attachment button accepts both images and documents, including a mixed selection.
 - Attach PDFs, Word `.docx` files or text documents to a question; preview parsed text, retain the original and keep references through follow-ups, retries and revisions. See [formats, limits and how text reaches the model](docs/documents.md).
 - Budget long conversations per model: keep recent full turns, extract cited source sentences from older context, and let the agent reread eligible originals when needed.
 - Recall relevant learning memories with local multilingual search, while keeping topic facts within the current learning path and user preferences separate.
+- Edit preferences in one text area, and manage topic memories with search, topic filters, pagination, inline corrections, selected deletion and links to their source conversations.
 - Switch **English / 中文** in **Settings → 语言 / Language**. Labels change immediately; your conversations and notes keep their original language.
 - Connect OpenAI-compatible Chat Completions or native Anthropic Messages. Optional MCP tools add web reading, local files, memory, browser actions, thinking steps and time lookup.
 - Export individual trees as JSON and import them without overwriting existing records.
@@ -53,6 +55,16 @@ uv run python scripts/manage.py start --open
 ```
 
 Open **http://127.0.0.1:8099** and add your endpoint, model ID and API key in **Settings → Models & API keys**. This workspace uses a separate database from the demo. On macOS, after setup, you can also double-click `start-learning-tree.command`.
+
+### macOS desktop app
+
+After setup, install a native app in Applications (macOS 14+):
+
+```sh
+uv run --inexact python desktop/macos/build.py --install
+```
+
+Open **LearningTree** from Applications. The app reuses a running local server or backs up your data and starts it automatically, without opening Terminal. Chats, model settings and documents use the existing project; desktop drafts and interface preferences are stored separately from your browser. Keep the project folder in place. This is a local desktop installation, not a standalone installer for other computers. See [desktop setup and behavior](desktop/macos/README.md).
 
 ### Optional semantic memory
 
@@ -83,6 +95,8 @@ Capabilities depend on the provider and model. Native OpenAI Responses and Gemin
 Each branch's first question triggers one short background title request with the question and a source excerpt, without tools or images. Failures keep a question-based label. Established, custom and imported titles are preserved.
 
 Memory facts are limited to valid sources on the active path. Optional semantic retrieval combines BM25 and E5 with reciprocal rank fusion (RRF), then BGE reranking. Preferences use a separate budget, and recent conversation context is retained. This searches built-in memory, not MCP graphs or learning files; relevance is not a truth check. See the [memory architecture](docs/architecture.md#learning-memory-retrieval).
+
+In **Settings → Memory**, existing preferences initially appear together without modifying stored records. Saving makes that profile user-managed: AI will no longer append to or overwrite it, including when you save an empty profile. Temporary study topics belong to topic facts. Fact corrections keep their original source and refresh their retrieval cache; searching all topics in Settings does not expand the sources available to a conversation. See [memory management](docs/memory-management.md).
 
 Long-context handling is separate from memory retrieval: it budgets each request, including tool results, and compresses older conversation into cited original sentences without rewriting stored messages. Estimates are conservative local approximations, not exact provider token counts; compression can omit relevant material. See [context budgets, source rereading and limits](docs/context-budget.md).
 

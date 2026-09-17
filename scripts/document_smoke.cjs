@@ -29,10 +29,14 @@ async function poll(callback, label) {
 
 const file = (name, text) => ({ name, mimeType: 'text/plain', buffer: Buffer.from(text, 'utf8') });
 const note = file('learning-note.md', '# Synthetic learning note\n\nThe sample marker is ORCHID-417.\n\nThis generated fixture contains no personal information.\n');
+const image = { name: 'learning-diagram.png', mimeType: 'image/png', buffer: Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9H0AAAAASUVORK5CYII=', 'base64') };
+const imageDataUrl = `data:${image.mimeType};base64,${image.buffer.toString('base64')}`;
 
 (async () => {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 960 } });
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: base });
   const page = await context.newPage();
   const checks = [], errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -82,6 +86,13 @@ const note = file('learning-note.md', '# Synthetic learning note\n\nThe sample m
     }
     const ids = node => node.messages.filter(message => message.role === 'user').flatMap(message => (message.documents ?? []).map(document => document.id));
 
+    assert.equal(await composer.getByRole('button', { name: 'Add attachments', exact: true }).count(), 1);
+    assert.equal(await composer.getByRole('button', { name: /^(Add images|Add documents)$/ }).count(), 0);
+    assert.equal(await composer.locator('input[type="file"]').count(), 1);
+    assert.match(await upload.getAttribute('accept'), /image\/\*/);
+    assert.match(await upload.getAttribute('accept'), /\.pdf/);
+    checks.push('One attachment button and picker accept both images and documents');
+
     await uploadFile(file('discard-me.txt', 'Generated draft attachment to remove.'));
     await composer.getByRole('button', { name: 'Remove document discard-me.txt', exact: true }).click();
     await poll(async () => await cards(composer).count() === 0, 'removed draft document');
@@ -102,8 +113,16 @@ const note = file('learning-note.md', '# Synthetic learning note\n\nThe sample m
     });
     const pendingUpload = uploadResponse();
     await input.fill('What does the attached learning note say?');
-    await upload.setInputFiles(note);
+    const attachmentsChooserReady = page.waitForEvent('filechooser');
+    await composer.getByRole('button', { name: 'Add attachments', exact: true }).click();
+    const attachmentsChooser = await attachmentsChooserReady;
+    assert(attachmentsChooser.isMultiple());
+    await attachmentsChooser.setFiles([image, note]);
     await uploadEntered;
+    const pendingImage = composer.locator('.chat-pending-images img');
+    await pendingImage.waitFor();
+    assert.equal(await pendingImage.getAttribute('src'), imageDataUrl);
+    assert.equal(await composer.locator('.chat-document-upload .chat-document-name').innerText(), note.name);
     await composer.locator('.chat-document-upload').waitFor();
     assert.equal(await composer.getByRole('button', { name: 'Send question', exact: true }).isDisabled(), true);
     releaseUpload();
@@ -114,6 +133,7 @@ const note = file('learning-note.md', '# Synthetic learning note\n\nThe sample m
     await page.unroute(uploadRoute);
     assert(document.characters > 0);
     checks.push('Upload state blocks sending until the actual local parser returns a document');
+    checks.push('A mixed picker selection shows an image preview and a separately parsed document');
 
     await card(composer, note.name).getByRole('button', { name: 'Preview text', exact: true }).click();
     await poll(async () => (await page.locator('.chat-document-preview').innerText()).includes('ORCHID-417'), 'parsed text preview');
@@ -127,17 +147,35 @@ const note = file('learning-note.md', '# Synthetic learning note\n\nThe sample m
     await page.reload();
     await input.waitFor();
     await card(composer, note.name).waitFor();
+    await pendingImage.waitFor();
+    assert.equal(await pendingImage.getAttribute('src'), imageDataUrl);
     assert.equal(await input.inputValue(), 'What does the attached learning note say?');
     const firstRequest = askRequest();
     await composer.getByRole('button', { name: 'Send question', exact: true }).click();
-    assert.deepEqual((await firstRequest).postDataJSON().document_ids, [document.id]);
+    const firstBody = (await firstRequest).postDataJSON();
+    assert.deepEqual(firstBody.document_ids, [document.id]);
+    assert.deepEqual(firstBody.images, [imageDataUrl]);
     const first = await completed('What does the attached learning note say?');
     assert.equal(first.id, tree.root_node_id);
     assert.deepEqual(ids(first), [document.id]);
+    assert.deepEqual(first.messages.find(message => message.role === 'user').images, [imageDataUrl]);
     const firstTurn = page.locator(`[data-turn-node="${first.id}"]`);
     await card(firstTurn, note.name).waitFor();
+    await firstTurn.locator('.chat-question .chat-images img').waitFor();
+    assert.equal(await firstTurn.locator('.chat-question .chat-images img').getAttribute('src'), imageDataUrl);
     await poll(async () => await cards(composer).count() === 0, 'accepted attachment cleared from composer');
+    assert.equal(await pendingImage.count(), 0);
     checks.push('A draft survives reload; sending binds the parsed document to the saved question and clears the draft');
+    checks.push('A mixed image and document draft survives reload and both attachments reach the saved question');
+
+    const storedAnswer = first.messages.find(message => message.role === 'assistant').content;
+    await firstTurn.getByRole('button', { name: 'Copy answer', exact: true }).click();
+    await firstTurn.locator('.chat-answer-actions').getByRole('button', { name: 'Copied', exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), storedAnswer);
+    await firstTurn.locator('.chat-question').hover();
+    await firstTurn.getByRole('button', { name: 'Copy question', exact: true }).click();
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'What does the attached learning note say?');
+    checks.push('Copy answer writes exact saved Markdown to the actual clipboard; question copy writes only its text');
 
     await page.reload();
     await card(firstTurn, note.name).waitFor();
@@ -230,6 +268,7 @@ const note = file('learning-note.md', '# Synthetic learning note\n\nThe sample m
     await page.screenshot({ path: path.join(output, 'document-smoke-narrow.png'), fullPage: true });
     fs.writeFileSync(path.join(output, 'document-smoke.json'), JSON.stringify({
       passed: true, checks, provider: 'offline mock', database: 'temporary', documents: 'generated synthetic text',
+      images: 'generated one-pixel PNG', clipboard: 'actual browser clipboard',
       answer_quality_evaluated: false,
     }, null, 2));
     console.log(JSON.stringify({ passed: true, checks }));
