@@ -102,7 +102,6 @@
 .chat-compose-box:focus-within { border-color: color-mix(in srgb, var(--teal), var(--border) 60%); box-shadow: 0 3px 15px #00000006; }
 .chat-compose-box textarea { width: 100%; border: 0; outline: 0; border-radius: 0; padding: 0 3px; min-height: 40px; max-height: 160px; resize: none; background: none; color: var(--text); font-size: 13px; line-height: 1.75; box-shadow: none; }
 .chat-compose-box textarea:focus, .chat-compose-box textarea:focus-visible { border: 0; outline: none; box-shadow: none; }
-.chat-compose-box textarea::placeholder { color: var(--muted); opacity: .75; }
 .chat-compose-controls { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
 .chat-compose-right select { border: 0; background: transparent; color: var(--muted); font-size: 10px; padding: 6px 16px 6px 5px; max-width: 165px; cursor: pointer; box-shadow: none; }
 .chat-send { background: var(--teal); color: #fff; border-radius: 10px; border: 0; width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center; flex: none; }
