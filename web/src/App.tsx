@@ -66,7 +66,16 @@ export default function App() {
   const [busyNavigation, setBusyNavigation] = useState(false);
   const streamTargetRef = useRef<number | null>(null);
   const requestRef = useRef<{ from: number; origin: number; tree: number; requestId: string } | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNoticeState] = useState<{ message: string } | null>(null);
+  function setNotice(message: string | null) {
+    // A new event restarts the timer even when its wording is unchanged.
+    setNoticeState(message === null ? null : { message });
+  }
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNoticeState(current => current === notice ? null : current), 10_000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
   const importRef = useRef<HTMLInputElement>(null);
   const pendingTitleIds = treeNodes.filter(node => node.title_state === "pending").map(node => node.id).join(",");
 
@@ -540,7 +549,7 @@ export default function App() {
         onImport={() => importRef.current?.click()}
       />
       <div className="workspace-main">
-      {notice && <div className="notice" role="status"><span>{localizeError(notice, locale)}</span><button onClick={() => setNotice(null)} aria-label={t("关闭提示", "Dismiss notification")}>×</button></div>}
+      {notice && <div className="notice" role="status"><span>{localizeError(notice.message, locale)}</span><button onClick={() => setNotice(null)} aria-label={t("关闭提示", "Dismiss notification")}>×</button></div>}
       {busyNavigation && <div className="loading-line" aria-label={t("正在加载", "Loading")} />}
       <ChatPane
         thread={thread}

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Dismiss top success notices automatically after ten seconds, restarting the timer for each new notice and retaining manual dismissal.
+
 - Add accessible per-node delete menus to the learning map, including failed nodes and expanded follow-up rounds. Confirm the deletion scope, retain independent revisions, and refresh surviving source references. Unify the selected-text Copy, Explain and New branch button styles.
 
 - Load large selected tool sets on demand within a schema budget, preserving exact argument definitions and restricting execution to tools advertised for that model round. Keep original-source readers available, report individual definitions that cannot fit, and finish bounded tool loops with a no-tool answer attempt. Preserve current inputs and stored originals while fitting later tool results.
