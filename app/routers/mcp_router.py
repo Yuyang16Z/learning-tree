@@ -38,7 +38,7 @@ def update_server(
     srv = session.get(McpServer, server_id)
     if not srv:
         raise HTTPException(404, "MCP server 不存在")
-    mcp_client.invalidate({"command": srv.command, "args": srv.args})
+    mcp_client.invalidate(mcp_client.server_spec(srv.command, srv.args))
     srv.label = body.label
     srv.command = body.command
     srv.args = body.args
@@ -54,7 +54,7 @@ def delete_server(server_id: int, session: Session = Depends(get_session)) -> di
     srv = session.get(McpServer, server_id)
     if not srv:
         raise HTTPException(404, "MCP server 不存在")
-    mcp_client.invalidate({"command": srv.command, "args": srv.args})
+    mcp_client.invalidate(mcp_client.server_spec(srv.command, srv.args))
     session.delete(srv)
     session.commit()
     return {"deleted": server_id}
@@ -68,7 +68,7 @@ def toggle_server(
     if not srv:
         raise HTTPException(404, "MCP server 不存在")
     if not enabled:
-        mcp_client.invalidate({"command": srv.command, "args": srv.args})
+        mcp_client.invalidate(mcp_client.server_spec(srv.command, srv.args))
     srv.enabled = enabled
     session.add(srv)
     session.commit()
@@ -81,7 +81,7 @@ def test_server(server_id: int, session: Session = Depends(get_session)) -> McpT
     srv = session.get(McpServer, server_id)
     if not srv:
         raise HTTPException(404, "MCP server 不存在")
-    spec = {"command": srv.command, "args": srv.args}
+    spec = mcp_client.server_spec(srv.command, srv.args)
     try:
         tools = mcp_client.list_tools(spec)
         names = [t["name"] for t in tools]

@@ -1,5 +1,6 @@
 import { getLocale, type Locale } from ".";
 import type { McpServer } from "../types";
+import { managedMcpPreset } from "../lib/chatTools";
 
 /** Translate known application diagnostics only; never run this over conversation text. */
 const diagnostics: [string, string][] = [
@@ -121,16 +122,18 @@ const diagnostics: [string, string][] = [
   ["网络请求失败，请检查连接后重试。", "Network request failed. Check the connection and try again."],
 ];
 const managedNames: Record<string, [string, string]> = {
+  "web-research": ["联网搜索", "Web search"],
   fetch: ["网页阅读", "Web reader"], filesystem: ["学习资料", "Learning files"],
   memory: ["知识记忆", "Knowledge memory"], "sequential-thinking": ["分步思考", "Step-by-step thinking"],
   playwright: ["浏览器", "Browser"], time: ["时间查询", "Time"],
 };
 
 export function mcpDisplayName(server: McpServer, locale: Locale = getLocale()): string {
-  const managed = server.args?.[0]?.replace(/\\/g, "/").endsWith("/integrations/mcp/launch.py");
-  const pair = managed ? managedNames[server.args[1]] : undefined;
+  const preset = managedMcpPreset(server);
+  const pair = preset ? managedNames[preset] : undefined;
   // An edited label is user content, even on a managed server.
-  return pair && server.label === pair[0] ? pair[locale === "en" ? 1 : 0] : server.label;
+  const isDefault = pair && (server.label === pair[0] || (preset === "web-research" && server.label === pair[1]));
+  return isDefault ? pair[locale === "en" ? 1 : 0] : server.label;
 }
 
 export function localizeError(message: string, locale: Locale = getLocale()): string {

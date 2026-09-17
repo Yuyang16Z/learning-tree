@@ -127,6 +127,24 @@ def test_mcp_does_not_inherit_model_keys(monkeypatch):
     assert "PATH" in env
 
 
+def test_combined_web_launcher_only_receives_its_search_key(tmp_path, monkeypatch):
+    launch = load("integrations/mcp/launch.py")
+    launch.DATA = tmp_path / "state"
+    launch.LIBRARY = tmp_path / "learning-materials"
+    launch.LEGACY_LIBRARY = tmp_path / "legacy"
+    launch.PYTHON = tmp_path / "python"
+    launch.PYTHON.touch()
+    monkeypatch.setenv("TAVILY_API_KEY", "test-search-key")
+    monkeypatch.setenv("DEFAULT_API_KEY", "test-model-key")
+    args, env, cwd = launch.command_for("web-research")
+    assert args == [str(launch.PYTHON), str(ROOT / "integrations/mcp/web_research.py")]
+    assert env["TAVILY_API_KEY"] == "test-search-key"
+    assert "DEFAULT_API_KEY" not in env
+    assert cwd == launch.DATA
+    for key in ("fetch", "time"):
+        assert "TAVILY_API_KEY" not in launch.command_for(key)[1]
+
+
 def test_filesystem_only_allows_learning_library(tmp_path, monkeypatch):
     launch = load("integrations/mcp/launch.py")
     launch.DATA = tmp_path / "state"
@@ -304,3 +322,47 @@ def test_mcp_registration_is_idempotent_across_path_formats(tmp_path, monkeypatc
     assert len(servers) == 3
     assert next(server for server in servers if server["id"] == 90) == custom
     assert all(not server["enabled"] for server in servers if server["id"] != 90)
+
+
+@pytest.mark.parametrize("old_label", ["网页阅读", "My reading tool"])
+def test_web_preset_upgrade_reuses_id_and_preserves_other_configuration(monkeypatch, old_label):
+    register = load("integrations/mcp/register.py")
+    monkeypatch.setattr(register.subprocess, "run", lambda *args, **kwargs: None)
+    previous = {
+        "id": 7,
+        "label": old_label,
+        "command": "python",
+        "args": ["/old/project/integrations/mcp/launch.py", "fetch"],
+        "enabled": False,
+    }
+    custom = {
+        "id": 8,
+        "label": "My own service",
+        "command": "python",
+        "args": ["/custom/launch.py", "fetch"],
+        "enabled": True,
+    }
+    servers = [previous.copy(), custom.copy()]
+    writes = []
+
+    def fake_api(path, body=None, method=None):
+        if path == "/health":
+            return {"name": "学习树"}
+        if body is None:
+            assert path == "/mcp"
+            return servers.copy()
+        assert path == "/mcp/7" and method == "PUT"
+        writes.append(body)
+        servers[0] = {"id": 7, **body}
+
+    monkeypatch.setattr(register, "api", fake_api)
+    register.main(["--preset", "web-research"])
+    register.main(["--preset", "web-research"])
+    assert len(writes) == 2
+    assert len(servers) == 2
+    assert servers[1] == custom
+    assert servers[0]["id"] == 7
+    assert servers[0]["enabled"] is False
+    assert servers[0]["args"][-1] == "web-research"
+    expected_label = "联网搜索" if old_label == "网页阅读" else old_label
+    assert servers[0]["label"] == expected_label

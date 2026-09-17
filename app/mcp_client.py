@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 import threading
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -31,6 +32,23 @@ CALL_TIMEOUT = 60.0
 SHUTDOWN_TIMEOUT = 12.0
 MAX_OUTPUT_CHARS = 24_000
 MAX_PENDING_REQUESTS = 32
+
+
+def server_spec(command: str, args: list[str] | None) -> dict:
+    """Share the same launch identity between execution, testing and invalidation."""
+    spec: dict = {"command": command, "args": args}
+    launcher = Path(__file__).resolve().parents[1] / "integrations/mcp/launch.py"
+    if (
+        args
+        and len(args) == 2
+        and args[1] == "web-research"
+        and Path(command).expanduser().resolve() == Path(sys.executable).resolve()
+        and Path(args[0]).expanduser().resolve() == launcher
+        and (key := os.environ.get("TAVILY_API_KEY"))
+    ):
+        # Search credentials are not inherited by arbitrary or other preset servers.
+        spec["env"] = {"TAVILY_API_KEY": key}
+    return spec
 
 
 class MCPConnectionError(RuntimeError):

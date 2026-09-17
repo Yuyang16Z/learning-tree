@@ -13,10 +13,10 @@ from app import mcp_client
 
 CATALOG = json.loads(Path(__file__).with_name("catalog.json").read_text(encoding="utf-8"))
 SPECS = {
-    item["key"]: {
-        "command": str(Path(sys.executable).absolute()),
-        "args": [str(Path(__file__).with_name("launch.py")), item["key"]],
-    }
+    item["key"]: mcp_client.server_spec(
+        str(Path(sys.executable).absolute()),
+        [str(Path(__file__).with_name("launch.py")), item["key"]],
+    )
     for item in CATALOG
 }
 
@@ -52,7 +52,12 @@ def main():
         result = call("time", "get_current_time", {"timezone": "UTC"})
         assert "UTC" in result
         report["checks"].append("时间工具返回真实时区信息")
-        result = call("fetch", "fetch", {"url": "https://example.com", "max_length": 1500})
+        result = call("web-research", "web_search", {"query": "IANA example domains"})
+        assert "https://" in result, result[:500]
+        report["checks"].append("联网搜索返回真实网页链接")
+        result = call(
+            "web-research", "read_webpage", {"url": "https://example.com", "max_length": 1500}
+        )
         assert "documentation examples" in result, result[:500]
         report["checks"].append("网页阅读获取真实网页正文")
         call("filesystem", "write_file", {"path": str(file), "content": token})

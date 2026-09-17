@@ -1,5 +1,5 @@
 [
-  {"key":"fetch","label":"网页阅读","purpose":"提取网页正文","package":"mcp-server-fetch","version":"2026.8.18","source":"https://github.com/modelcontextprotocol/servers/tree/main/src/fetch"},
+  {"key":"web-research","label":"联网搜索","purpose":"搜索资料并读取网页正文","package":"LearningTree web research (ddgs + mcp-server-fetch)","version":"1","source":"https://github.com/Yuyang16Z/learning-tree/tree/main/integrations/mcp"},
   {"key":"filesystem","label":"学习资料","purpose":"读取和整理学习资料目录","package":"@modelcontextprotocol/server-filesystem","version":"2026.8.31","source":"https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem"},
   {"key":"memory","label":"知识记忆","purpose":"保存和检索明确需要记住的知识关系","package":"@modelcontextprotocol/server-memory","version":"2026.8.31","source":"https://github.com/modelcontextprotocol/servers/tree/main/src/memory"},
   {"key":"sequential-thinking","label":"分步思考","purpose":"辅助拆解复杂问题","package":"@modelcontextprotocol/server-sequential-thinking","version":"2026.8.31","source":"https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking"},

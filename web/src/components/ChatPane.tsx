@@ -8,6 +8,7 @@ import { clearAcceptedDraft, moveFollowupDraft, type ChatDraft as Draft } from "
 import { documentMetadata, DocumentUploadQueue } from "../lib/documentUploads";
 import { ATTACHMENT_ACCEPT, attachmentKind, ImageAttachmentQueue, MAX_IMAGES, readImage } from "../lib/attachments";
 import { copyText } from "../lib/clipboard";
+import { hasManagedWebSearch, managedMcpPreset, selectedChatTools } from "../lib/chatTools";
 import { matchesDeletedWorkspace, onWorkspaceDeletion, type WorkspaceDeletion } from "../lib/workspace";
 import { DocumentCards } from "./DocumentCards";
 import { ChatTurnNavigator, turnKey } from "./ChatTurnNavigator";
@@ -94,9 +95,14 @@ function ReasoningBlock({ text }: { text: string }) {
   if (!text) return null;
   return <details className="chat-reasoning"><summary>{t("思考过程", "Reasoning")}</summary><div>{text}</div></details>;
 }
-function ToolSteps({ steps }: { steps: ToolStep[] }) {
+function ToolSteps({ steps, mcpServers }: { steps: ToolStep[]; mcpServers: McpServer[] }) {
   const { t } = useI18n();
   const toolLabels: Record<string, string> = { fetch: t("读取网页", "Read webpage"), web_search: t("联网搜索", "Web search"), search_available_tools: t("查找可用工具", "Find available tools"), read_learning_source: t("回查学习记录", "Read learning history"), read_document_source: t("查阅文档", "Read document") };
+  for (const server of mcpServers) {
+    if (managedMcpPreset(server) !== "web-research") continue;
+    toolLabels[`mcp_${server.id}_web_search`] = t("联网搜索", "Web search");
+    toolLabels[`mcp_${server.id}_read_webpage`] = t("读取网页", "Read webpage");
+  }
   return <>{steps.map((step, i) => <details className="chat-reasoning" key={i}><summary>{toolLabels[step.tool] ?? step.tool}{step.result === null ? t(" · 进行中", " · Running") : t(" · 已完成", " · Done")}</summary>{step.result !== null && <div>{step.result}</div>}</details>)}</>;
 }
 function ImageStrip({ images }: { images: string[] }) {
@@ -182,6 +188,14 @@ export function ChatPane(props: Props) {
   const [useSearch, setUseSearch] = useState(false);
   const [useFetch, setUseFetch] = useState(false);
   const [selectedMcp, setSelectedMcp] = useState<number[]>([]);
+  const hasWebSearchMcp = hasManagedWebSearch(mcpServers);
+  const selectedTools = selectedChatTools(mcpServers, { useSearch, useFetch, selectedMcp });
+  useEffect(() => {
+    if (!hasWebSearchMcp) return;
+    // Hidden legacy choices must not revive if this MCP is later disabled.
+    setUseSearch(false);
+    setUseFetch(false);
+  }, [hasWebSearchMcp]);
   const [selection, setSelection] = useState<SelectionCard | null>(null);
   const [branching, setBranching] = useState(false);
   const [retryingNodeId, setRetryingNodeId] = useState<number | null>(null);
@@ -457,7 +471,7 @@ export function ChatPane(props: Props) {
     const documents = retry ? retry.documents ?? [] : submitted.documents ?? [];
     if (!question && documents.length) question = t("请概括所附文档的主要内容，并注明文件名及页码或段落来源。", "Summarize the attached documents and cite file names and page or paragraph sources.");
     if ((!question && !images.length && !documents.length) || sendingRef.current || streaming || loading || !activeModelId || documentUploads.list(submitted.key).length > 0 || imageUploads.count(submitted.key)) return;
-    const tools = [...(useSearch ? ["web_search"] : []), ...(useFetch ? ["fetch"] : []), ...selectedMcp.filter(id => mcpServers.some(server => server.id === id && server.enabled)).map(id => `mcp_server_${id}`)];
+    const tools = selectedTools;
     sendingRef.current = true;
     let accepted = false;
     setLocalError(null);
@@ -526,7 +540,7 @@ export function ChatPane(props: Props) {
     if (withNote) textareaRef.current?.focus();
   }
   const noModel = !models.length || !activeModelId;
-  const toolCount = Number(useSearch) + Number(useFetch) + selectedMcp.filter(id => mcpServers.some(server => server.id === id && server.enabled)).length;
+  const toolCount = selectedTools.length;
   const displayDraft = draft.key === draftKey ? draft : readDraft(draftKey);
   const draftUploads = documentUploads.list(draftKey);
   const pendingImages = imageUploads.count(draftKey);
@@ -554,11 +568,11 @@ export function ChatPane(props: Props) {
             {!loading && !visibleThread.length && !showStream && <div className="chat-welcome"><span className="chat-eyebrow">{focusedSeed ? t("从这里展开", "Explore from here") : t("新的起点", "A fresh start")}</span><h2>{focusedSeed ? `「${focusedSeed}」` : treeTitle}</h2><p>{t("想先弄懂什么？", "What would you like to understand first?")}</p></div>}
             {visibleThread.map((node, index) => <section className="chat-turn" data-turn-node={node.node_id} data-turn-key={turnKey(node, index)} key={turnKey(node, index)}>
               <div className="chat-question"><ImageStrip images={node.images ?? []} /><DocumentCards documents={node.documents ?? []} /><div>{node.question}</div><div className="chat-question-actions"><CopyButton text={node.question ?? ""} label={t("复制问题", "Copy question")} /><button onClick={() => editNode(node)} disabled={streaming || attachmentsBusy} title={t("编辑后生成新版本，保留原有问答与分支", "Create a new version while keeping the original conversation and branches")}>{t("编辑", "Edit")}</button></div></div>
-              {node.answer != null && <div className="chat-answer"><div className="chat-answer-label"><span className="chat-answer-dot" />{node.answered_by ?? "AI"}{node.status === "error" || node.status === "interrupted" ? <span>{t("· 未完成", "· Incomplete")}</span> : null}</div><ReasoningBlock text={node.reasoning ?? ""} /><ToolSteps steps={node.steps ?? []} /><div className="chat-markdown" data-answer-node={node.node_id} data-message-id={node.answer_message_id ?? undefined} tabIndex={0}><Markdown text={node.answer} /></div>{node.answer.trim() && <div className="chat-answer-actions"><CopyButton text={node.answer} label={t("复制回答", "Copy answer")} /><button onClick={() => void branchAnswer(node)} disabled={branching || streaming || loading} title={t("从这条回答展开一个新的问题", "Explore a new question from this answer")}><Icon name="tree" />{t("新分支", "New branch")}</button></div>}</div>}
+              {node.answer != null && <div className="chat-answer"><div className="chat-answer-label"><span className="chat-answer-dot" />{node.answered_by ?? "AI"}{node.status === "error" || node.status === "interrupted" ? <span>{t("· 未完成", "· Incomplete")}</span> : null}</div><ReasoningBlock text={node.reasoning ?? ""} /><ToolSteps steps={node.steps ?? []} mcpServers={mcpServers} /><div className="chat-markdown" data-answer-node={node.node_id} data-message-id={node.answer_message_id ?? undefined} tabIndex={0}><Markdown text={node.answer} /></div>{node.answer.trim() && <div className="chat-answer-actions"><CopyButton text={node.answer} label={t("复制回答", "Copy answer")} /><button onClick={() => void branchAnswer(node)} disabled={branching || streaming || loading} title={t("从这条回答展开一个新的问题", "Explore a new question from this answer")}><Icon name="tree" />{t("新分支", "New branch")}</button></div>}</div>}
               {!!node.attempts?.length && <details className="chat-reasoning chat-prior-attempts"><summary>{t("之前的未完成回答（{count}）", "Previous incomplete responses ({count})", { count: node.attempts.length })}</summary>{node.attempts.map(attempt => <div className="chat-markdown" data-answer-node={node.node_id} data-message-id={attempt.message_id} key={attempt.message_id}><Markdown text={attempt.content || t("未收到内容", "No content received")} /></div>)}</details>}
               {(node.status === "error" || node.status === "interrupted") && <div className="chat-retry"><span>{node.status === "interrupted" ? t("回答已停止", "Response stopped") : t("这次回答未完成", "This response is incomplete")}</span><button onClick={() => void send(node)} disabled={streaming || noModel}>{t("重试", "Retry")}</button>{node.error && <details><summary>{t("详情", "Details")}</summary><p>{localizeError(node.error, locale)}</p></details>}</div>}
             </section>)}
-            {showStream && <section className="chat-turn chat-live"><div className="chat-question"><ImageStrip images={sendingImages} /><DocumentCards documents={sendingDocuments} /><div>{pendingQuestion}</div></div><div className="chat-answer"><div className="chat-answer-label"><span className="chat-answer-dot is-loading" />{t("正在回答", "Responding")}</div><ReasoningBlock text={liveReasoning} /><ToolSteps steps={liveSteps} /><div className="chat-markdown" aria-live="polite" aria-busy="true">{live ? <Markdown text={live} /> : <span className="chat-typing">•••</span>}</div></div></section>}
+            {showStream && <section className="chat-turn chat-live"><div className="chat-question"><ImageStrip images={sendingImages} /><DocumentCards documents={sendingDocuments} /><div>{pendingQuestion}</div></div><div className="chat-answer"><div className="chat-answer-label"><span className="chat-answer-dot is-loading" />{t("正在回答", "Responding")}</div><ReasoningBlock text={liveReasoning} /><ToolSteps steps={liveSteps} mcpServers={mcpServers} /><div className="chat-markdown" aria-live="polite" aria-busy="true">{live ? <Markdown text={live} /> : <span className="chat-typing">•••</span>}</div></div></section>}
           </div>
         </div>
         <ChatTurnNavigator turns={visibleThread} scrollRef={scrollRef} scopeKey={scrollKey} onJump={() => { stickToBottom.current = false; setAwayFromBottom(true); setSelection(null); selectionRequestRef.current++; }} />
@@ -580,7 +594,7 @@ export function ChatPane(props: Props) {
           <textarea ref={textareaRef} disabled={loading} aria-label={t("输入问题", "Enter a question")} rows={1} value={displayDraft.text} onChange={event => updateDraft({ text: event.target.value })} onPaste={event => { const files = Array.from(event.clipboardData.items).filter(item => item.type.startsWith("image/")); if (files.length) { event.preventDefault(); addAttachments(files.map(item => item.getAsFile()).filter((file): file is File => file !== null)); } }} onCompositionStart={() => { composingRef.current = true; }} onCompositionEnd={() => { composingRef.current = false; compEndAt.current = Date.now(); }} onKeyDown={event => { if (event.key !== "Enter" || event.shiftKey || composingRef.current || event.nativeEvent.isComposing || event.keyCode === 229 || Date.now() - compEndAt.current < 120) return; event.preventDefault(); void send(); }} />
           <div className="chat-compose-controls"><div className="chat-compose-left">
             <button className="chat-icon-button" onClick={() => fileRef.current?.click()} aria-label={t("添加附件", "Add attachments")} title={t("添加图片或文档（图片最多 4 张，每张 4 MB；文档最多 4 份，每份 10 MB）", "Add images or documents (up to 4 images, 4 MB each; up to 4 documents, 10 MB each)")} disabled={loading || (displayDraft.images.length + pendingImages >= MAX_IMAGES && (displayDraft.documents?.length ?? 0) + draftUploads.filter(upload => upload.status !== "error").length >= 4)}><Icon name="attachment" /></button><input hidden ref={fileRef} data-testid="document-upload-input" type="file" accept={ATTACHMENT_ACCEPT} multiple onChange={event => { addAttachments(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
-            <div className="chat-tool-menu" ref={toolMenuRef}><button className={`chat-icon-button ${toolCount ? "is-active" : ""}`} onClick={() => setToolsOpen(!toolsOpen)} aria-label={t("选择工具", "Choose tools")} aria-expanded={toolsOpen} title={t("工具", "Tools")}><Icon name="tools" />{toolCount > 0 && <span className="chat-tool-count">{toolCount}</span>}</button>{toolsOpen && <div className="chat-tool-dropdown"><span className="chat-menu-label">{t("这次提问使用", "Tools for this question")}</span><label><input type="checkbox" checked={useSearch} onChange={event => setUseSearch(event.target.checked)} />{t("联网搜索", "Web search")}</label><label><input type="checkbox" checked={useFetch} onChange={event => setUseFetch(event.target.checked)} />{t("读取网页", "Read webpage")}</label>{mcpServers.filter(server => server.enabled).map(server => <label key={server.id}><input type="checkbox" checked={selectedMcp.includes(server.id)} onChange={() => setSelectedMcp(current => current.includes(server.id) ? current.filter(id => id !== server.id) : [...current, server.id])} />{mcpDisplayName(server, locale)}</label>)}<button onClick={() => { setToolsOpen(false); onOpenSettings(); }}>{t("管理模型与工具 ↗", "Manage models & tools ↗")}</button></div>}</div>
+            <div className="chat-tool-menu" ref={toolMenuRef}><button className={`chat-icon-button ${toolCount ? "is-active" : ""}`} onClick={() => setToolsOpen(!toolsOpen)} aria-label={t("选择工具", "Choose tools")} aria-expanded={toolsOpen} title={t("工具", "Tools")}><Icon name="tools" />{toolCount > 0 && <span className="chat-tool-count">{toolCount}</span>}</button>{toolsOpen && <div className="chat-tool-dropdown"><span className="chat-menu-label">{t("这次提问使用", "Tools for this question")}</span>{!hasWebSearchMcp && <><label><input type="checkbox" checked={useSearch} onChange={event => setUseSearch(event.target.checked)} />{t("联网搜索", "Web search")}</label><label><input type="checkbox" checked={useFetch} onChange={event => setUseFetch(event.target.checked)} />{t("读取网页", "Read webpage")}</label></>}{mcpServers.filter(server => server.enabled).map(server => <label key={server.id}><input type="checkbox" checked={selectedMcp.includes(server.id)} onChange={() => setSelectedMcp(current => current.includes(server.id) ? current.filter(id => id !== server.id) : [...current, server.id])} />{mcpDisplayName(server, locale)}</label>)}<button onClick={() => { setToolsOpen(false); onOpenSettings(); }}>{t("管理模型与工具 ↗", "Manage models & tools ↗")}</button></div>}</div>
           </div><div className="chat-compose-right"><select aria-label={t("选择模型", "Choose model")} value={activeModelId ?? ""} onChange={event => onModelChange(Number(event.target.value))} disabled={!models.length}>{!models.length && <option value="">{t("未连接模型", "No model connected")}</option>}{models.map(model => <option value={model.id} key={model.id}>{model.label}</option>)}</select>{streaming ? <button className="chat-send is-stop" onClick={onStop} aria-label={t("停止回答", "Stop response")} title={t("停止回答", "Stop response")}>■</button> : <button className="chat-send" onClick={() => void send()} disabled={loading || noModel || attachmentsBusy || (!displayDraft.text.trim() && !displayDraft.images.length && !displayDraft.documents?.length)} aria-label={t("发送问题", "Send question")} title={t("发送 · Enter", "Send · Enter")}><Icon name="arrow" /></button>}</div></div>
         </div>
       </div>

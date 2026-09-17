@@ -80,11 +80,17 @@ def command_for(name: str) -> tuple[list[str], dict[str, str], Path]:
     libraries = library_directories()
     if os.name != "nt":
         os.chmod(DATA, 0o700)
-    if name in ("fetch", "time"):
+    if name in ("web-research", "fetch", "time"):
         if not PYTHON.is_file():
             raise RuntimeError(
                 "MCP dependencies missing. Run: uv run python integrations/mcp/install.py"
             )
+        if name == "web-research":
+            # Only the search preset receives its optional search-provider key.
+            if key := os.environ.get("TAVILY_API_KEY"):
+                env["TAVILY_API_KEY"] = key
+            return [str(PYTHON), str(Path(__file__).with_name("web_research.py"))], env, DATA
+        # Keep the previous fetch launcher working until presets are re-registered.
         # The time server detects the operating system's timezone itself.
         return [str(PYTHON), "-m", f"mcp_server_{name}"], env, DATA
     node = shutil.which("node", path=env["PATH"])

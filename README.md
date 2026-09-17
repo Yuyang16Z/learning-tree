@@ -31,7 +31,7 @@ The images use synthetic content and the offline demo model. They demonstrate th
 - Recall relevant learning memories with local multilingual search, while keeping topic facts within the current learning path and user preferences separate.
 - Edit preferences in one text area, and manage topic memories with search, topic filters, pagination, inline corrections, selected deletion and links to their source conversations.
 - Switch **English / 中文** in **Settings → 语言 / Language**. Labels change immediately; your conversations and notes keep their original language.
-- Connect OpenAI-compatible Chat Completions or native Anthropic Messages. Optional MCP tools add web reading, local files, memory, browser actions, thinking steps and time lookup.
+- Connect OpenAI-compatible Chat Completions or native Anthropic Messages. Optional MCP tools add combined web search and reading, local files, memory, browser actions, thinking steps and time lookup.
 - Export individual trees as JSON and import them without overwriting existing records.
 
 LearningTree is a **local, single-user application**. Its offline demo uses fixed responses to demonstrate interactions; it is not a real AI model.

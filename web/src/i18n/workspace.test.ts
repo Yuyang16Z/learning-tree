@@ -39,6 +39,17 @@ describe("localized application diagnostics", () => {
 });
 
 describe("managed MCP display labels", () => {
+  it("localizes either web-search default while preserving custom and unmanaged labels", () => {
+    const search = { ...server, args: [server.args[0], "web-research"] };
+    for (const label of ["联网搜索", "Web search"]) {
+      expect(mcpDisplayName({ ...search, label }, "zh-CN")).toBe("联网搜索");
+      expect(mcpDisplayName({ ...search, label }, "en")).toBe("Web search");
+    }
+    expect(mcpDisplayName({ ...search, label: "我的研究助手" }, "en")).toBe("我的研究助手");
+    expect(mcpDisplayName({ ...search, label: "My research" }, "zh-CN")).toBe("My research");
+    expect(mcpDisplayName({ ...search, label: "Web search", args: ["/custom/server.py", "web-research"] }, "zh-CN")).toBe("Web search");
+  });
+
   it("localizes only the unchanged defaults of recognized managed servers", () => {
     expect(mcpDisplayName(server, "en")).toBe("Learning files");
     expect(mcpDisplayName(server, "zh-CN")).toBe("学习资料");
