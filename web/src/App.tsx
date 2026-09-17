@@ -256,7 +256,7 @@ export default function App() {
     const updated = await api.updateTree(id, { archived });
     setTrees(current => current.map(tree => tree.id === id ? { ...tree, archived: updated.archived } : tree));
     setNotice(archived
-      ? t("已归档，可在侧栏的「已归档」中查看和恢复。", "Archived. View or restore it from Archived in the sidebar.")
+      ? t("已归档，可在设置的「已归档」中查看和恢复。", "Archived. View or restore it from Archived in Settings.")
       : t("已恢复到我的主题。", "Restored to My topics."));
     // Keep a generating topic open so its Stop control remains reachable.
     // Drafts stay stored under their existing node IDs when changing topics.
@@ -583,6 +583,12 @@ export default function App() {
         <SettingsModal
           models={models}
           mcpServers={mcpServers}
+          trees={trees}
+          activeTreeId={activeTreeId}
+          onOpenTree={selectTree}
+          onDeleteTree={deleteTree}
+          onRenameTree={renameTree}
+          onArchiveTree={archiveTree}
           onClose={() => setSettingsOpen(false)}
           onDelete={deleteModel}
           onTest={(id) => api.testModel(id)}

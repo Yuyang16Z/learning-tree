@@ -89,12 +89,15 @@ async function poll(callback, label) {
   const sidebar = page.getByRole('complementary', { name: 'Learning topics', exact: true });
   const topicButton = title => sidebar.getByRole('button', { name: title, exact: true });
   const topicActions = title => sidebar.getByRole('button', { name: `Topic actions: ${title}`, exact: true });
+  const settingsDialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+  const archivedTopics = settingsDialog.getByRole('navigation', { name: 'Archived topics', exact: true });
+  const archivedTopicButton = title => archivedTopics.getByRole('button', { name: title, exact: true });
   const heading = title => page.getByRole('heading', { name: title, exact: true, level: 1 });
   const menuItem = name => page.getByRole('menuitem', { name, exact: true });
   const savedTopic = async () => (await api('/trees?include_archived=true')).find(tree => tree.id === topic.id);
-  async function openMenu(title) {
-    await topicButton(title).hover();
-    await topicActions(title).click();
+  async function openMenu(title, list = sidebar) {
+    await list.getByRole('button', { name: title, exact: true }).hover();
+    await list.getByRole('button', { name: `Topic actions: ${title}`, exact: true }).click();
     await page.getByRole('menu').waitFor();
   }
   async function openRename(title) {
@@ -105,10 +108,9 @@ async function poll(callback, label) {
     return dialog;
   }
   async function showArchived() {
-    await sidebar.getByRole('button', { name: /^Archived(?:\s|$)/ }).click();
-  }
-  async function showActive() {
-    await sidebar.getByRole('button', { name: 'Back to topics', exact: true }).click();
+    await sidebar.getByRole('button', { name: '⚙ Settings', exact: true }).click();
+    await settingsDialog.getByRole('button', { name: 'Archived', exact: true }).click();
+    await archivedTopics.waitFor();
   }
   async function assertLearningUnchanged() {
     assert.deepEqual(await api(`/trees/${topic.id}`), originalNodes, 'Topic organization preserves every node');
@@ -120,6 +122,7 @@ async function poll(callback, label) {
     await heading(originalTitle).waitFor();
     await poll(async () => await page.evaluate(() => localStorage.getItem('bl-recovery') === null), 'obsolete recovery cache is removed at startup');
     assert.equal(await sidebar.getByRole('button', { name: '↶ Restore last deletion', exact: true }).count(), 0);
+    assert.equal(await sidebar.getByRole('button', { name: /^(Archived|Back to topics)$/ }).count(), 0, 'Archived is managed in Settings, not the main sidebar');
 
     // Keyboard users can reach the overflow action and dismiss its menu.
     await topicActions(originalTitle).focus();
@@ -187,18 +190,35 @@ async function poll(callback, label) {
     await page.reload();
     await sidebar.waitFor();
     await showArchived();
-    await topicButton(renamedTitle).click();
+    await archivedTopicButton(renamedTitle).waitFor();
+    assert.equal(await topicButton(renamedTitle).count(), 0, 'An archived topic stays out of the active sidebar');
+    await page.screenshot({ path: path.join(artifacts, 'topic-archive-desktop.png') });
+    await page.setViewportSize({ width: 390, height: 844 });
+    const archivedBounds = await settingsDialog.boundingBox();
+    assert(archivedBounds && archivedBounds.x >= 0 && archivedBounds.x + archivedBounds.width <= 391, 'Archived settings fit a narrow screen');
+    assert(await settingsDialog.evaluate(element => element.scrollWidth <= element.clientWidth + 2));
+    await page.screenshot({ path: path.join(artifacts, 'topic-archive-mobile.png') });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await archivedTopicButton(renamedTitle).click();
+    await settingsDialog.waitFor({ state: 'hidden' });
     await heading(renamedTitle).waitFor();
     assert.equal((await savedTopic()).archived, true, 'Opening an archived topic does not restore it');
-    await page.screenshot({ path: path.join(artifacts, 'topic-archive-desktop.png') });
-    await openMenu(renamedTitle);
+    assert.equal(await topicButton(renamedTitle).count(), 0);
+    await assertLearningUnchanged();
+    await showArchived();
+    await openMenu(renamedTitle, archivedTopics);
+    assert.equal(await menuItem('Rename').count(), 1, 'Archived topics keep their rename action');
+    assert.equal(await menuItem('Delete').count(), 1, 'Archived topics keep their delete action');
     await menuItem('Restore').click();
     await poll(async () => (await savedTopic()).archived === false, 'restore persisted');
-    if (await sidebar.getByRole('button', { name: 'Back to topics', exact: true }).count()) await showActive();
+    await archivedTopicButton(renamedTitle).waitFor({ state: 'hidden' });
+    assert(await settingsDialog.isVisible(), 'Restoring keeps Settings open');
+    assert.equal(await topicButton(renamedTitle).count(), 1, 'Restored topics return to the active sidebar');
+    await settingsDialog.getByRole('button', { name: 'Close', exact: true }).click();
     await topicButton(renamedTitle).click();
     await heading(renamedTitle).waitFor();
     await assertLearningUnchanged();
-    checks.push('Archive survives reload, opens readably without restoring, and restores with the same messages and branches');
+    checks.push('Archived topics live in responsive Settings; opening closes Settings without restoring, while Restore returns them to the sidebar without changing learning content');
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.getByRole('button', { name: 'Open topic list', exact: true }).click();
@@ -284,12 +304,11 @@ async function poll(callback, label) {
     await poll(async () => (await api('/trees?include_archived=true')).find(tree => tree.id === streamingTopic.id)?.archived === true, 'streaming topic archived');
     await heading(streamingTitle).waitFor();
     assert(await stop.isVisible(), 'Archiving an in-flight conversation keeps Stop reachable');
-    assert.equal(await topicButton(streamingTitle).getAttribute('aria-current'), 'page');
+    assert.equal(await topicButton(streamingTitle).count(), 0, 'An archived streaming topic leaves the sidebar while its current chat remains open');
     await stop.click();
     await stop.waitFor({ state: 'hidden' });
     await page.reload(); // Restore native fetch and verify archived selection remains readable.
     await heading(streamingTitle).waitFor();
-    await showActive();
     await topicButton(renamedTitle).click();
     await heading(renamedTitle).waitFor();
     checks.push('Archiving during an open response stream keeps its chat and Stop control available; Stop closes the held stream');
@@ -464,7 +483,8 @@ with Session(engine) as session:
     await heading('Learning space').waitFor();
     await page.getByRole('heading', { name: 'Start with curiosity', exact: true }).waitFor();
     await showArchived();
-    await topicButton(lastTitle).click();
+    await archivedTopicButton(lastTitle).click();
+    await settingsDialog.waitFor({ state: 'hidden' });
     await heading(lastTitle).waitFor();
     checks.push('Archiving the last active topic leaves a clean empty chat and the archived conversation remains accessible');
     assert.deepEqual(errors, []);

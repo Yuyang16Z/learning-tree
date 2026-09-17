@@ -80,7 +80,7 @@ Tree JSON import creates a new tree and remaps references. Limits are 25 MiB, 2,
 
 ## Troubleshooting
 
-Topics can be renamed, archived, restored or deleted from their sidebar **…** menu. Archiving preserves all records and only hides the topic from **My topics**. Open **Archived** to browse or restore it. This state lives in SQLite and is shared between the browser and desktop app; exported JSON omits it and imports appear as active topics. Renaming a topic does not rewrite its original root question.
+Topics can be renamed, archived or deleted from their sidebar **…** menu. Archiving preserves all records and hides the topic from **My topics**. Open **Settings → Archived** to read an archived topic; opening it closes Settings without restoring it. Its **…** menu supports renaming, restoring and deleting. Restoring returns the topic to the sidebar while keeping Settings open. This state lives in SQLite and is shared between the browser and desktop app; exported JSON omits it and imports appear as active topics. Renaming a topic does not rewrite its original root question.
 
 Confirming deletion removes the tree, its nodes and messages (including images),
 stored document originals and extracted sections, source-linked memories and

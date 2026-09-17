@@ -2,12 +2,19 @@ import { useEffect, useId, useState } from "react";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import { localizeError, mcpDisplayName } from "../i18n/workspace";
-import type { McpServer, MemoryRetrievalStatus, ModelCfg } from "../types";
+import type { McpServer, MemoryRetrievalStatus, ModelCfg, Tree } from "../types";
 import { MemoryPanel } from "./MemoryPanel";
+import { TopicList } from "./TopicList";
 
 interface Props {
   models: ModelCfg[];
   mcpServers: McpServer[];
+  trees: Tree[];
+  activeTreeId: number | null;
+  onOpenTree: (id: number) => void;
+  onDeleteTree: (id: number) => void;
+  onRenameTree: (id: number, title: string) => Promise<void>;
+  onArchiveTree: (id: number, archived: boolean) => Promise<void>;
   onClose: () => void;
   onDelete: (id: number) => Promise<void>;
   onTest: (id: number) => Promise<{ ok: boolean; detail: string }>;
@@ -21,7 +28,7 @@ interface Props {
   onThemeChange: (t: "light" | "dark" | "system") => void;
 }
 
-type Tab = "models" | "mcp" | "memory" | "appearance" | "language";
+type Tab = "models" | "mcp" | "memory" | "archived" | "appearance" | "language";
 
 function MemoryRetrievalPanel() {
   const { t } = useI18n();
@@ -168,6 +175,9 @@ export function SettingsModal(props: Props) {
             <button className={tab === "memory" ? "on" : ""} onClick={() => { setMemoryVisited(true); setTab("memory"); }}>
               {t("记忆", "Memory")}
             </button>
+            <button className={tab === "archived" ? "on" : ""} onClick={() => setTab("archived")}>
+              {t("已归档", "Archived")}
+            </button>
             <button className={tab === "appearance" ? "on" : ""} onClick={() => setTab("appearance")}>
               {t("外观", "Appearance")}
             </button>
@@ -177,6 +187,18 @@ export function SettingsModal(props: Props) {
           </div>
 
           <div className="settings-content">
+            {tab === "archived" && (
+              <TopicList
+                trees={props.trees.filter(tree => tree.archived)}
+                activeTreeId={props.activeTreeId}
+                ariaLabel={t("已归档主题", "Archived topics")}
+                emptyLabel={t("还没有归档的主题。", "No archived topics yet.")}
+                onSelect={id => { if (canClose()) { onClose(); props.onOpenTree(id); } }}
+                onDelete={props.onDeleteTree}
+                onRename={props.onRenameTree}
+                onArchive={props.onArchiveTree}
+              />
+            )}
             {tab === "models" && (
               <>
                 <div className="sub">{t("支持 OpenAI 兼容与 Anthropic 原生格式。", "Supports OpenAI-compatible and native Anthropic APIs.")}</div>
