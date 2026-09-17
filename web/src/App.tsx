@@ -391,7 +391,8 @@ export default function App() {
 
   async function onDeleteNode(id: number) {
     const treeId = treeRef.current;
-    if (!treeId || abortRef.current) return;
+    if (!treeId) return;
+    if (abortRef.current) { setErr(t("请先停止当前回答，再删除。", "Stop the current response before deleting.")); return; }
     const target = treeNodes.find(node => node.id === id);
     if (!target) return;
     if (target.parent_id == null) {
@@ -399,7 +400,12 @@ export default function App() {
       if (window.confirm(t("永久删除「{title}」？其中的对话、分支、附件和话题记忆都会删除，且无法撤销。", "Permanently delete “{title}”? Its conversations, branches, attachments, and topic memories will be deleted. This cannot be undone.", { title }))) await deleteTree(treeId);
       return;
     }
-    if (!window.confirm(t("永久删除这个分支及其子分支？相关对话和话题记忆会删除，主题共享附件会保留，且无法撤销。", "Permanently delete this branch and its sub-branches? Related conversations and topic memories will be deleted; topic-shared attachments will remain. This cannot be undone."))) return;
+    const descendants = new Set<number>([id]);
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const node of treeNodes) if (node.parent_id != null && descendants.has(node.parent_id) && !descendants.has(node.id)) { descendants.add(node.id); changed = true; }
+    }
+    if (!window.confirm(t("永久删除「{title}」及其所有后续节点（当前 {count} 个）？相关对话和话题记忆会删除；其他独立分支与修改版本、主题共享附件会保留。此操作无法撤销。", "Permanently delete “{title}” and all its descendant nodes (currently {count})? Related conversations and topic memories will be deleted. Other independent branches and revisions, and topic-shared attachments, will remain. This cannot be undone.", { title: target.title, count: descendants.size - 1 }))) return;
     try {
       // The server may know descendants created in another tab since our last refresh.
       const result = await api.deleteNode(id);
@@ -416,6 +422,12 @@ export default function App() {
         }
       }
       setNotice(t("分支已永久删除。", "Branch permanently deleted."));
+      // Surviving revisions may have had their source references cleared by deletion.
+      try {
+        await refreshTree(treeId);
+        const focus = focusRef.current;
+        if (treeRef.current === treeId && focus !== null) await selectNode(focus);
+      } catch { if (treeRef.current === treeId) setErr(t("分支已删除，刷新记录失败，请重新选择节点。", "The branch was deleted, but refreshing failed. Select the node again.")); }
     } catch (e) { setErr(String((e as Error).message ?? e)); }
   }
 
@@ -574,6 +586,7 @@ export default function App() {
           activeId={activeNodeId}
           onSelect={id => { if (compactLayout) setRightOpen(false); void selectNode(id); }}
           onDelete={onDeleteNode}
+          deleteDisabled={streaming}
           onCollapse={() => { setRightOpen(false); saveValue("bl-map-open", false); }}
           width={rightWidth}
           treeKey={activeTreeId ?? "empty"}

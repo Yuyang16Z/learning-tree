@@ -237,6 +237,228 @@ def test_late_memory_extraction_does_not_write_to_replacement_topic(setup, monke
         assert session.exec(select(Memory)).all() == []
 
 
+def test_delete_failed_retry_subtree_preserves_successful_sibling_revision(setup, monkeypatch):
+    client, engine = setup
+    tree, other = create(client), create(client, "Unrelated topic")
+    root = tree["root_node_id"]
+    attempts = []
+
+    def answer(*args, **kwargs):
+        attempts.append(True)
+        if len(attempts) <= 2:
+            yield "text", "Partial failed answer"
+            raise RuntimeError("Synthetic provider failure")
+        yield "text", "Successful revised answer"
+
+    monkeypatch.setattr(nodes, "stream_chat", answer)
+    monkeypatch.setattr(nodes, "fetch_memory_note", lambda *args, **kwargs: "")
+    monkeypatch.setattr(nodes, "assemble_tools", lambda *args: ([], {}))
+    monkeypatch.setattr(nodes, "_queue_branch_title", lambda *args, **kwargs: None)
+    monkeypatch.setattr(nodes, "extract_and_save", lambda *args, **kwargs: None)
+    with Session(engine) as session:
+        session.add(
+            ModelConfig(
+                label="Offline test",
+                base_url="https://offline.invalid/v1",
+                llm_model="synthetic",
+                api_key="synthetic-key-never-sent",
+            )
+        )
+        session.commit()
+    failed = client.post(f"/nodes/{root}/branch", json={"seed_text": "Shared source quote"}).json()
+    failed_id = failed["id"]
+
+    def ask(question, mode="continue"):
+        response = client.post(f"/nodes/{failed_id}/ask", json={"question": question, "mode": mode})
+        assert response.status_code == 200, response.text
+        return [
+            json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")
+        ][-1]
+
+    assert ask("Question that fails")["status"] == "error"
+    assert ask("", "retry")["status"] == "error"
+    success = ask("Revised successful question", "revise")
+    assert success["done"]
+    revision_id = success["node_id"]
+    assert revision_id != failed_id and len(attempts) == 3
+
+    with Session(engine) as session:
+        revision = session.get(Node, revision_id)
+        assert revision.parent_id == root and revision.revision_of == failed_id
+        assert session.get(Node, failed_id).status == "error"
+        failed_messages = service.get_messages(session, failed_id)
+        assert [m.status for m in failed_messages if m.role == "assistant"] == ["error", "error"]
+        failed_messages[0].images = ["data:image/png;base64,c3ludGhldGlj"]
+        failed_messages[0].document_ids = ["shared-upload"]
+        session.add(failed_messages[0])
+        child = Node(
+            tree_id=tree["id"],
+            parent_id=failed_id,
+            title="Pending descendant",
+            status="pending",
+            request_id="pending-descendant",
+        )
+        session.add(child)
+        session.flush()
+        leaf = Node(
+            tree_id=tree["id"], parent_id=child.id, title="Completed descendant", status="complete"
+        )
+        # A surviving detached reference can occur in imported/legacy trees.
+        reference = Node(
+            tree_id=tree["id"],
+            parent_id=root,
+            title="Keep independent branch",
+            kind="branch",
+            source_node_id=failed_id,
+            source_message_id=failed_messages[-1].id,
+            source_start=0,
+            source_end=7,
+            seed_text="Copied quotation remains useful",
+            learning_note="Keep my own reflection",
+        )
+        session.add_all(
+            [
+                leaf,
+                reference,
+                document("shared-upload", tree["id"]),
+                document("other-upload", other["id"]),
+            ]
+        )
+        session.flush()
+        child_id, leaf_id, reference_id = child.id, leaf.id, reference.id
+        session.add_all(
+            [
+                Message(
+                    node_id=child_id,
+                    role="assistant",
+                    content="Pending partial answer",
+                    status="pending",
+                    reasoning="Private reasoning",
+                    steps=[{"tool": "fixture", "result": "Private result"}],
+                ),
+                Message(node_id=leaf_id, role="assistant", content="Descendant answer"),
+                Message(node_id=reference_id, role="user", content="Keep independent question"),
+                Message(
+                    node_id=other["root_node_id"], role="user", content="Keep unrelated question"
+                ),
+            ]
+        )
+        memories = [
+            Memory(
+                kind="fact",
+                tree_id=tree["id"],
+                source_node_id=failed_id,
+                content="Failed-node fact",
+            ),
+            Memory(
+                kind="preference", source_node_id=child_id, content="Descendant-derived preference"
+            ),
+            Memory(kind="fact", tree_id=tree["id"], source_node_id=leaf_id, content="Leaf fact"),
+            Memory(
+                kind="fact",
+                tree_id=tree["id"],
+                source_node_id=revision_id,
+                content="Keep revised fact",
+            ),
+            Memory(kind="fact", tree_id=tree["id"], content="Keep unattributed topic fact"),
+            Memory(
+                kind="fact",
+                tree_id=other["id"],
+                source_node_id=other["root_node_id"],
+                content="Keep unrelated fact",
+            ),
+        ]
+        session.add_all(memories)
+        session.flush()
+        for memory in memories:
+            session.add(
+                MemoryEmbedding(
+                    memory_id=memory.id, model_key="test", content_hash="hash", vector=[1.0]
+                )
+            )
+        session.commit()
+        removed_ids = {failed_id, child_id, leaf_id}
+        kept_memories = {m.id: m.model_dump() for m in memories[3:]}
+        kept_messages = {
+            m.id: m.model_dump()
+            for m in session.exec(select(Message)).all()
+            if m.node_id not in removed_ids
+        }
+        kept_documents = {
+            d.id: d.model_dump() for d in session.exec(select(documents.DocumentAttachment)).all()
+        }
+        session.refresh(revision)
+        session.refresh(reference)
+        kept_revision = revision.model_dump() | {"revision_of": None}
+        kept_reference = reference.model_dump() | dict.fromkeys(
+            ("source_node_id", "source_message_id", "source_start", "source_end")
+        )
+    pending = nodes.Generation(
+        request_id="pending-descendant",
+        text=["Late answer"],
+        reasoning=["Late reasoning"],
+        steps=[{"tool": "fixture"}],
+    )
+    pending.events.put({"type": "delta", "text": "Buffered answer"})
+    unrelated = nodes.Generation(request_id="unrelated", text=["Keep buffer"])
+    nodes._GENERATIONS.update({child_id: pending, other["root_node_id"]: unrelated})
+    nodes._TITLE_JOBS.update(
+        {failed_id: "failed-title", child_id: "child-title", revision_id: "keep-title"}
+    )
+    deletion = []
+
+    def finish_extraction_after_delete(*args):
+        deletion.append(client.delete(f"/nodes/{failed_id}"))
+        return {"facts": ["Must not be resurrected"], "preferences": ["Must not be resurrected"]}
+
+    monkeypatch.setattr(service, "extract_memories", finish_extraction_after_delete)
+    service.extract_and_save(
+        LLMSpec(
+            label="Offline",
+            base_url="https://offline.invalid",
+            llm_model="synthetic",
+            api_key="synthetic",
+        ),
+        tree["id"],
+        leaf_id,
+        "Question",
+        "Answer",
+    )
+    assert deletion[0].status_code == 200 and set(deletion[0].json()["deleted"]) == removed_ids
+    assert (
+        pending.stop.is_set() and not pending.text and not pending.reasoning and not pending.steps
+    )
+    assert pending.events.empty() and child_id not in nodes._GENERATIONS
+    assert failed_id not in nodes._TITLE_JOBS and child_id not in nodes._TITLE_JOBS
+    assert nodes._TITLE_JOBS[revision_id] == "keep-title"
+    assert not unrelated.stop.is_set() and unrelated.text == ["Keep buffer"]
+    # A provider that finishes after stop cannot recreate its deleted assistant row.
+    pending.text.append("Provider returned after deletion")
+    nodes._persist(child_id, pending, "Offline")
+    assert client.delete(f"/nodes/{failed_id}").status_code == 404
+    for identifier in removed_ids:
+        assert client.get(f"/nodes/{identifier}").status_code == 404
+        assert client.get(f"/nodes/{identifier}/thread").status_code == 404
+    assert client.get(f"/nodes/{revision_id}/thread").status_code == 200
+    assert client.get("/documents/shared-upload/download").status_code == 200
+    with Session(engine) as session:
+        assert all(session.get(Node, identifier) is None for identifier in removed_ids)
+        assert session.get(Node, revision_id).model_dump() == kept_revision
+        assert session.get(Node, reference_id).model_dump() == kept_reference
+        assert {m.id: m.model_dump() for m in session.exec(select(Message)).all()} == kept_messages
+        assert {m.id: m.model_dump() for m in session.exec(select(Memory)).all()} == kept_memories
+        assert {m.memory_id for m in session.exec(select(MemoryEmbedding)).all()} == set(
+            kept_memories
+        )
+        assert {
+            d.id: d.model_dump() for d in session.exec(select(documents.DocumentAttachment)).all()
+        } == kept_documents
+        assert {t.id for t in session.exec(select(KnowledgeTree)).all()} == {
+            tree["id"],
+            other["id"],
+        }
+
+
 def test_topic_ids_are_not_reused_after_deletion_restart_or_import(setup):
     client, engine = setup
     target = create(client)

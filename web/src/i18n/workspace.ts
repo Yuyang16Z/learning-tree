@@ -55,6 +55,7 @@ const diagnostics: [string, string][] = [
   ["回答已结束，刷新记录失败，请重新选择节点。", "The response ended, but the history could not be refreshed. Select the node again."],
   ["停止请求未确认，连接已断开；刷新后可查看状态。", "The stop request was not confirmed. The connection is closed; refresh to check its status."],
   ["分支已永久删除。", "Branch permanently deleted."],
+  ["分支已删除，刷新记录失败，请重新选择节点。", "The branch was deleted, but refreshing failed. Select the node again."],
   ["学习记录已导出。", "Learning history exported."],
   ["学习记录已导入为新主题。", "Learning records imported as a new topic."],
   ["备份文件不能超过 25 MB。", "The backup file must be 25 MB or smaller."],

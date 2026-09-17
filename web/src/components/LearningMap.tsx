@@ -6,6 +6,7 @@ import { navigateMapView } from "../lib/mapCamera";
 import type { Camera, MapViewAction, ReturnView } from "../lib/mapCamera";
 import "./LearningMap.css";
 import { useI18n } from "../i18n";
+import { NodeActions } from "./NodeActions";
 
 interface Props {
   nodes: TreeNode[];
@@ -15,6 +16,7 @@ interface Props {
   onCollapse: () => void;
   width: number;
   treeKey?: string | number;
+  deleteDisabled?: boolean;
 }
 
 const MIN_ZOOM = 0.1;
@@ -38,7 +40,7 @@ function Icon({ name }: { name: "search" | "close" | "collapse" | "focus" | "fit
   return <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }
 
-export function LearningMap({ nodes, activeId, onSelect, onCollapse, width, treeKey }: Props) {
+export function LearningMap({ nodes, activeId, onSelect, onDelete, onCollapse, width, treeKey, deleteDisabled }: Props) {
   const { locale, t } = useI18n();
   const identity = treeKey ?? nodes[0]?.tree_id ?? "empty";
   const tree = useMemo(() => groupTopics(nodes, t("新问题", "New question"), t("新分支", "New branch")), [nodes, locale]);
@@ -272,8 +274,9 @@ export function LearningMap({ nodes, activeId, onSelect, onCollapse, width, tree
                 {group.nodes.length > 1 ? <button type="button" className="lm-round-toggle" onClick={() => setExpanded((old) => toggleSet(old, group.id))} aria-expanded={isExpanded} aria-label={t("{action}{title}的 {count} 轮问答", "{action} {count} turns in {title}", { action: isExpanded ? t("收起", "Collapse") : t("展开", "Expand"), title: group.title, count: group.nodes.length })}>{current && activeRound >= 0 && !isExpanded ? t("{current} / {count} 轮", "{current} / {count} turns", { current: activeRound + 1, count: group.nodes.length }) : t("{count} 轮", "{count} turns", { count: group.nodes.length })} <span aria-hidden="true">{isExpanded ? "⌃" : "⌄"}</span></button> : <span>{(group.nodes[0] as TreeNode & { kind?: string }).kind === "revision" ? t("修改版本", "Revision") : group.nodes[0].seed_text ? t("追问", "Branch") : t("1 轮", "1 turn")}</span>}
                 <span className="lm-card-state">{continuing ? <span className="lm-pending" title={t("正在回答", "Responding")} aria-label={t("正在回答", "Responding")}>···</span> : failing ? <span className="lm-error-dot" title={t("有回答需要重试", "A response needs retrying")} aria-label={t("有回答需要重试", "A response needs retrying")} /> : current ? <span className="lm-current-label">{t("当前", "Current")}</span> : null}</span>
                 {group.children.length > 0 && <button type="button" className="lm-fold" onClick={() => setCollapsed((old) => toggleSet(old, group.id))} disabled={ancestors.has(group.id)} aria-label={ancestors.has(group.id) ? t("当前路径保持展开", "The current path stays expanded") : visibleCollapsed.has(group.id) ? t("展开子分支", "Expand child branches") : t("收起子分支", "Collapse child branches")} aria-expanded={!visibleCollapsed.has(group.id)} title={ancestors.has(group.id) ? t("当前路径保持展开", "The current path stays expanded") : visibleCollapsed.has(group.id) ? t("展开子分支", "Expand child branches") : t("收起子分支", "Collapse child branches")}>{visibleCollapsed.has(group.id) ? `+${group.children.length}` : "−"}</button>}
+                <NodeActions node={group.nodes[0]} onDelete={onDelete} disabled={deleteDisabled} />
               </div>
-              {isExpanded && group.nodes.length > 1 && <div className="lm-rounds">{group.nodes.map((node, index) => <button type="button" key={node.id} className={node.id === activeId ? "selected" : ""} onClick={() => onSelect(node.id)} aria-current={node.id === activeId ? "location" : undefined} title={node.title}><span>{index + 1}</span><span>{node.title || t("新问题", "New question")}</span></button>)}</div>}
+              {isExpanded && group.nodes.length > 1 && <div className="lm-rounds">{group.nodes.map((node, index) => <div className="lm-round-row" key={node.id}><button type="button" className={`lm-round-select${node.id === activeId ? " selected" : ""}`} onClick={() => onSelect(node.id)} aria-current={node.id === activeId ? "location" : undefined} title={node.title}><span>{index + 1}</span><span>{node.title || t("新问题", "New question")}</span></button><NodeActions node={node} onDelete={onDelete} disabled={deleteDisabled} /></div>)}</div>}
             </section>;
           })}
         </div>}

@@ -140,6 +140,8 @@
 .chat-explain-button { border: 0; border-radius: 6px; padding: 7px 11px; background: var(--teal); color: #fff; font-size: 11px !important; }
 .chat-selection-branch { display: inline-flex; align-items: center; gap: 5px; font-size: 11px !important; border: 0; background: none; color: var(--muted); padding: 6px 9px; border-radius: 6px; }
 .chat-selection-branch:hover { background: var(--panel); }
+.chat-selection-card.is-compact :is(.chat-copy-button, .chat-explain-button, .chat-selection-branch) { display: inline-flex; align-items: center; justify-content: center; gap: 5px; width: auto; height: 30px; padding: 6px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 11px !important; }
+.chat-selection-card.is-compact :is(.chat-copy-button, .chat-explain-button, .chat-selection-branch):hover { background: var(--panel-2); color: var(--text); }
 .chat-selection-heading { display: flex; align-items: flex-start; gap: 10px; font-weight: 600; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
 .chat-selection-heading span { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; flex: 1; }
 .chat-selection-heading button { border: 0; background: none; color: var(--muted); font-size: 18px; padding: 0; line-height: 1; }

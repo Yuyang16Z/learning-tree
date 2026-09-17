@@ -1,0 +1,20 @@
+.learning-map .lm-node-actions,
+.learning-map .lm-rounds .lm-node-actions {
+  display: flex; align-items: center; justify-content: center; flex: none;
+  width: 24px; min-width: 24px; height: 24px; padding: 0;
+  border: 0; border-radius: 5px; background: transparent; color: var(--muted);
+}
+.learning-map .lm-node-actions:hover:not(:disabled),
+.learning-map .lm-node-actions[aria-expanded="true"] { background: var(--panel-2); color: var(--text); }
+.learning-map .lm-node-actions:disabled { opacity: .4; }
+.node-actions-menu {
+  position: fixed; z-index: 1500; width: 168px; max-width: calc(100vw - 16px);
+  padding: 5px; border: 1px solid var(--border-strong); border-radius: 9px;
+  background: var(--panel); box-shadow: 0 8px 24px #0003;
+}
+.node-actions-menu button {
+  display: flex; align-items: center; gap: 9px; width: 100%; padding: 9px 10px;
+  border: 0; border-radius: 5px; background: transparent; color: var(--danger);
+  text-align: left; font: inherit; font-size: 13px;
+}
+.node-actions-menu button:hover { background: var(--panel-2); }

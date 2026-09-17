@@ -44,7 +44,8 @@
 .learning-map .lm-fold { display: flex; align-items: center; justify-content: center; min-width: 21px; height: 21px; padding: 0 3px; border-radius: 5px; background: transparent; border: 0; font-size: 11px; margin-left: 3px; }
 .lm-fold:hover:not(:disabled) { background: var(--panel-2); color: var(--text); }
 .lm-rounds { border-top: 1px solid var(--border); padding: 5px 6px; }
-.learning-map .lm-rounds button { display: flex; width: 100%; gap: 7px; align-items: center; height: 32px; border: 0; border-radius: 5px; padding: 0 6px; text-align: left; background: transparent; font-size: 11px; }
+.lm-round-row { display: flex; align-items: center; gap: 2px; }
+.learning-map .lm-rounds .lm-round-select { display: flex; flex: 1; min-width: 0; gap: 7px; align-items: center; height: 32px; border: 0; border-radius: 5px; padding: 0 6px; text-align: left; background: transparent; font-size: 11px; }
 .lm-rounds button > span:first-child { width: 14px; flex: none; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
 .lm-rounds button > span:last-child { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .learning-map .lm-rounds button.selected { background: var(--teal-bg); color: var(--teal); }
