@@ -129,3 +129,17 @@ class Message(SQLModel, table=True):
     # Tool steps: [{"tool":..,"args":..,"result":..}] for collapsible frontend display.
     steps: list | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=_now)
+
+
+class ContextSummary(SQLModel, table=True):
+    """Disposable, source-versioned context compression; never a long-term memory."""
+
+    key: str = Field(primary_key=True)
+    tree_id: int = Field(foreign_key="knowledgetree.id", index=True)
+    source_node_ids: list[int] = Field(sa_column=Column(JSON, nullable=False))
+    source_message_ids: list[int] = Field(sa_column=Column(JSON, nullable=False))
+    fingerprint: str
+    model_fingerprint: str
+    prompt_version: str
+    content: str
+    created_at: datetime = Field(default_factory=_now)

@@ -26,6 +26,7 @@ from ..document_context import (
     make_document_reader,
 )
 from ..documents import DocumentAttachment, document_summary, resolve_documents
+from ..learning_summaries import invalidate_summaries, summarize_history
 from ..llm import LLMSpec, complete, run_agent, stream_chat
 from ..models import Memory, MemoryEmbedding, Message, Node
 from ..schemas import AskIn, BranchIn, ExplainIn, NodePatch, StopIn, TitleIn
@@ -226,11 +227,13 @@ def get_thread_route(node_id: int, session: Session = Depends(get_session)) -> d
 
 @router.patch("/{node_id}")
 def patch_node(node_id: int, body: NodePatch, session: Session = Depends(get_session)) -> dict:
-    node = _get(session, node_id)
-    if "learning_note" in body.model_fields_set:
-        node.learning_note = body.learning_note.strip() if body.learning_note else None
-        session.add(node)
-        session.commit()
+    with _REQUEST_LOCK:
+        node = _get(session, node_id)
+        if "learning_note" in body.model_fields_set:
+            invalidate_summaries(session, node_ids={node_id})
+            node.learning_note = body.learning_note.strip() if body.learning_note else None
+            session.add(node)
+            session.commit()
     return get_node(node_id, session)
 
 
@@ -249,6 +252,7 @@ def delete_node(node_id: int, session: Session = Depends(get_session)) -> dict:
                 n.id for n in session.exec(select(Node).where(Node.parent_id == current)).all()
             )
         discard_node_work(ids)
+        invalidate_summaries(session, node_ids=ids)
         for message in session.exec(select(Message).where(Message.node_id.in_(ids))).all():
             session.delete(message)
         for memory in session.exec(select(Memory).where(Memory.source_node_id.in_(ids))).all():
@@ -701,20 +705,22 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
         session.add(target)
         session.flush()
         if body.mode == "revise":
+            copied_history = []
             for previous in current_messages:
-                session.add(
-                    Message(
-                        node_id=target.id,
-                        role=previous.role,
-                        content=previous.content,
-                        status=previous.status,
-                        answered_by=previous.answered_by,
-                        images=previous.images,
-                        document_ids=previous.document_ids,
-                        reasoning=previous.reasoning,
-                        steps=previous.steps,
-                    )
+                copied = Message(
+                    node_id=target.id,
+                    role=previous.role,
+                    content=previous.content,
+                    status=previous.status,
+                    answered_by=previous.answered_by,
+                    images=previous.images,
+                    document_ids=previous.document_ids,
+                    reasoning=previous.reasoning,
+                    steps=previous.steps,
                 )
+                session.add(copied)
+                copied_history.append(copied)
+            current_messages = copied_history
         if body.mode != "retry":
             session.add(
                 Message(
@@ -898,6 +904,38 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 )
             if generation.stop.is_set():
                 return
+            if context_stats["compacted"] and not is_mock:
+                # Tool selection and source-reader overhead are now final. Only
+                # this pass may generate a summary; preflight never calls a model.
+                generation.events.put({"context_status": "summarizing"})
+                try:
+                    request_system, llm_messages = build_context(
+                        ancestors,
+                        context_target,
+                        context_history,
+                        question_text,
+                        question_images,
+                        memory,
+                        policy=policy,
+                        tool_defs=context_defs,
+                        protocol=spec.protocol,
+                        diagnostics=context_stats,
+                        documents=context_documents,
+                        tool_schema_budget=schema_budget if tool_catalog else 0,
+                        summary_resolver=lambda sources, query, budget: summarize_history(
+                            engine,
+                            spec,
+                            sources,
+                            query,
+                            budget,
+                            stop=generation.stop,
+                            mutation_lock=_REQUEST_LOCK,
+                        ),
+                    )
+                finally:
+                    generation.events.put({"context_status": "ready"})
+                if generation.stop.is_set():
+                    return
             if title_needed:
                 _queue_branch_title(target_id, spec)
                 title_queued = True

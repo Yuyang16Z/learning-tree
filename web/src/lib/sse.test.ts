@@ -35,6 +35,36 @@ describe('stream recovery boundaries', () => {
     expect(await api.ask(1, { question: '问题', config_id: 1 }, { onDelta() {} })).toMatchObject({ node_id: 2 });
     expect(body.locked).toBe(false);
   });
+  it('dispatches only valid context states in order without treating them as answer content', async () => {
+    const events = [
+      { started: true, node_id: 9 },
+      { context_status: 'summarizing' },
+      { context_status: 'unknown', summary: 'private intermediate text' },
+      { context_status: { status: 'ready' } },
+      { context_status: null },
+      { context_status: 'ready' },
+      { reasoning: 'Reasoning' },
+      { delta: '回答' },
+      { done: true, node_id: 9 },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(stream(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')))));
+    const received: string[] = [];
+    const result = await api.ask(1, { question: '问题', config_id: 1 }, {
+      onStart: () => received.push('started'),
+      onContextStatus: status => received.push(status),
+      onReasoning: value => received.push(`reasoning:${value}`),
+      onDelta: value => received.push(`answer:${value}`),
+    });
+    expect(received).toEqual(['started', 'summarizing', 'ready', 'reasoning:Reasoning', 'answer:回答']);
+    expect(result).not.toHaveProperty('context_status');
+    expect(result).not.toHaveProperty('summary');
+  });
+  it('does not mistake context readiness for terminal success', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(stream('data: {"context_status":"summarizing"}\n\ndata: {"context_status":"ready"}\n\n'))));
+    const contextStatus = vi.fn();
+    await expect(api.ask(1, { question: '问题', config_id: 1 }, { onDelta() {}, onContextStatus: contextStatus })).rejects.toThrow('连接中断');
+    expect(contextStatus.mock.calls).toEqual([['summarizing'], ['ready']]);
+  });
   it('invalidates old requests even when returning to the same tree', () => {
     const gate = new NavigationGate(); const a = gate.next(); const b = gate.next(); const c = gate.next();
     expect(gate.current(a)).toBe(false); expect(gate.current(b)).toBe(false); expect(gate.current(c)).toBe(true);

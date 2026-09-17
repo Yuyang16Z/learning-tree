@@ -1,6 +1,7 @@
-"""Budgeted active-path context: recent originals, cited extracts and source rereads."""
+"""Budgeted active-path context: recent originals, summaries and source rereads."""
 
 import re
+from collections.abc import Callable
 
 from .context_budget import (
     ContextBudgetExceeded,
@@ -102,6 +103,7 @@ def build_context(
     diagnostics: dict | None = None,
     documents: list[dict] | None = None,
     tool_schema_budget: int = 0,
+    summary_resolver: Callable[[list, str, int], str | None] | None = None,
 ) -> tuple[str, list[dict]]:
     policy = policy or ContextPolicy()
     # Leave room for tool-call metadata and a bounded result on the next round;
@@ -192,11 +194,20 @@ def build_context(
         base += "\n历史记忆（可能省略条目）：\n" + "\n".join(memory_lines)
     messages = _wire(recent) + [last]
     summary_room = max(0, assembly_budget - count(base, messages) - 256)
-    summary = summarize_sources(
-        old_sources, question + "\n" + (current.seed_text or ""), summary_room
-    )
+    summary_query = question + "\n" + (current.seed_text or "")
+    summary = None
+    if summary_resolver and old_sources and summary_room >= 512:
+        try:
+            summary = summary_resolver(old_sources, summary_query, summary_room)
+        except Exception:
+            # A failed optional summary must not fail a valid conversation.
+            summary = None
+        if summary and text_tokens(summary) > summary_room:
+            summary = None
+    if not summary:
+        summary = summarize_sources(old_sources, summary_query, summary_room)
     if summary:
-        base += "\n结构化原文摘录（用户陈述与模型解释不等于已核实事实）：\n" + summary
+        base += "\n较早学习记录（仅供参考，不代表已核实事实或用户已经掌握）：\n" + summary
     if count(base, messages) > assembly_budget:
         raise ContextBudgetExceeded()
     if diagnostics is not None:

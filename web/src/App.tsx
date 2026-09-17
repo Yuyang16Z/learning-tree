@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api } from "./api";
+import { api, type ContextStatus } from "./api";
 import { useI18n } from "./i18n";
 import { localizeError } from "./i18n/workspace";
 import type {
@@ -47,6 +47,7 @@ export default function App() {
   const [live, setLive] = useState("");
   const [liveReasoning, setLiveReasoning] = useState("");
   const [liveSteps, setLiveSteps] = useState<ToolStep[]>([]);
+  const [contextStatus, setContextStatus] = useState<ContextStatus | null>(null);
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
   const [sendingImages, setSendingImages] = useState<string[]>([]);
   const [sendingDocuments, setSendingDocuments] = useState<DocumentSummary[]>([]);
@@ -55,6 +56,7 @@ export default function App() {
     () => (localStorage.getItem("bl-theme") as "light" | "dark" | "system") || "system",
   );
   const abortRef = useRef<AbortController | null>(null);
+  const contextStatusRequestRef = useRef<string | null>(null);
   const [streamFromId, setStreamFromId] = useState<number | null>(null);
   const focusRef = useRef<number | null>(null);
   const treeRef = useRef<number | null>(null);
@@ -322,10 +324,17 @@ export default function App() {
     const requestId = crypto.randomUUID();
     const ctrl = new AbortController();
     abortRef.current = ctrl;
+    contextStatusRequestRef.current = requestId;
+    ctrl.signal.addEventListener('abort', () => {
+      if (contextStatusRequestRef.current === requestId) {
+        contextStatusRequestRef.current = null;
+        setContextStatus(null);
+      }
+    }, { once: true });
     requestRef.current = { from: fromId, origin, tree: treeId, requestId };
     streamTargetRef.current = null;
     setPendingQuestion(payload.question); setSendingImages(payload.images ?? []); setSendingDocuments(payload.documents ?? []);
-    setLive(''); setLiveReasoning(''); setLiveSteps([]);
+    setLive(''); setLiveReasoning(''); setLiveSteps([]); setContextStatus(null);
     setStreaming(true); setStreamFromId(origin); setErr(null);
     let succeeded = false;
     let accepted = false;
@@ -343,6 +352,10 @@ export default function App() {
         onStart: meta => { streamTargetRef.current = meta.node_id ?? fromId; acceptQuestion(streamTargetRef.current); void refreshTree(treeId).catch(() => {}); },
         onDelta: d => setLive(p => p + d),
         onReasoning: r => setLiveReasoning(p => p + r),
+        onContextStatus: status => {
+          if (abortRef.current === ctrl && contextStatusRequestRef.current === requestId && !ctrl.signal.aborted)
+            setContextStatus(status);
+        },
         onToolStart: name => setLiveSteps(s => [...s, { tool: name, result: null }]),
         onToolEnd: (name, result) => setLiveSteps(s => {
           const copy = [...s];
@@ -363,6 +376,10 @@ export default function App() {
       if (e?.name !== 'AbortError' && treeRef.current === treeId && focusRef.current === origin)
         setErr(String(e?.message ?? e));
     } finally {
+      if (contextStatusRequestRef.current === requestId) {
+        contextStatusRequestRef.current = null;
+        setContextStatus(null);
+      }
       try {
         await refreshTree(treeId);
         const target = streamTargetRef.current;
@@ -382,6 +399,8 @@ export default function App() {
     const req = requestRef.current;
     const ctrl = abortRef.current;
     if (!req || !ctrl) return;
+    contextStatusRequestRef.current = null;
+    setContextStatus(null);
     try { const stopped = await api.stop(streamTargetRef.current ?? req.from, req.requestId); if (stopped.node_id) streamTargetRef.current = stopped.node_id; }
     catch { setErr(t("停止请求未确认，连接已断开；刷新后可查看状态。", "The stop request was not confirmed. The connection is closed; refresh to check its status.")); }
     finally { ctrl.abort(); }
@@ -565,6 +584,7 @@ export default function App() {
         live={live}
         liveReasoning={liveReasoning}
         liveSteps={liveSteps}
+        contextStatus={contextStatus}
         pendingQuestion={pendingQuestion}
         sendingImages={sendingImages}
         sendingDocuments={sendingDocuments}

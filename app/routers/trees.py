@@ -23,6 +23,7 @@ from ..documents import (
     parse_document_limited,
     safe_document_name,
 )
+from ..learning_summaries import invalidate_summaries
 from ..models import KnowledgeTree, Memory, MemoryEmbedding, Message, Node
 from ..schemas import NodeOut, TreeIn, TreeOut, TreePatch
 from ..service import get_messages
@@ -353,6 +354,7 @@ def delete_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
         nodes = session.exec(select(Node).where(Node.tree_id == tree_id)).all()
         ids = [node.id for node in nodes]
         discard_node_work(ids)
+        invalidate_summaries(session, tree_id=tree_id)
         for key in list(_CANCELLED_REQUESTS):
             if key[0] == tree_id:
                 _CANCELLED_REQUESTS.pop(key, None)

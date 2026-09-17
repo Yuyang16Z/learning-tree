@@ -15,10 +15,11 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, create_engine, select
 
 import app.service as service
+from app import learning_summaries
 from app.context_budget import ContextPolicy, estimate_request_tokens
 from app.context_sources import SOURCE_TOOL_NAME
-from app.models import KnowledgeTree, Message, ModelConfig, Node
-from app.routers import nodes
+from app.models import ContextSummary, KnowledgeTree, Message, ModelConfig, Node
+from app.routers import nodes, trees
 from app.tool_catalog import SEARCH_TOOL_NAME, tool_definition_cost
 
 
@@ -91,6 +92,7 @@ def api(tmp_path, monkeypatch):
 
     app = FastAPI()
     app.include_router(nodes.router)
+    app.include_router(trees.router)
 
     def session_override():
         with Session(engine) as session:
@@ -112,6 +114,221 @@ def ask(client, question="继续解释条件。", **kwargs):
     return [
         json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")
     ]
+
+
+def _long_summary_history(engine):
+    with Session(engine) as session:
+        cfg = session.get(ModelConfig, 1)
+        cfg.context_window = 20000
+        session.add(cfg)
+        message = session.get(Message, 2)
+        message.content = "Historical background to a synthetic learning question. " * 100
+        session.add(message)
+        for index in range(3):
+            session.add(Message(node_id=1, role="user", content=f"Earlier learning goal {index}?"))
+            session.add(
+                Message(
+                    node_id=1,
+                    role="assistant",
+                    content=(
+                        f"Background explanation {index}; only under the stated condition. " * 90
+                    ),
+                )
+            )
+        current = session.get(Node, 2)
+        current.seed_text = "CURRENT_QUOTE_MUST_STAY_EXACT"
+        current.learning_note = "CURRENT_NOTE_MUST_STAY_EXACT"
+        session.add(current)
+        session.commit()
+
+
+def test_model_summary_is_only_resolved_once_after_tool_preflight_and_preserves_current(
+    api, monkeypatch
+):
+    client, engine, calls = api
+    _long_summary_history(engine)
+    summaries = []
+
+    def summarize(engine_, spec, sources, query, budget, **kwargs):
+        assert calls["discover"], "Discovery and final schema budgeting must precede summaries"
+        assert engine_ is engine and not kwargs["stop"].is_set()
+        summaries.append((sources, query, budget))
+        assert all(node.tree_id == 1 and node.id not in (3, 4) for node, _ in sources)
+        return "MODEL_SUMMARY_FIXTURE [node=1,message=2]: Earlier explanation; uncertainty remains."
+
+    monkeypatch.setattr(nodes, "summarize_history", summarize)
+    events = ask(client, "CURRENT_QUESTION_MUST_STAY_EXACT")
+    assert events[-1]["status"] == "complete", events
+    assert len(summaries) == 1
+    assert [event["context_status"] for event in events if "context_status" in event] == [
+        "summarizing",
+        "ready",
+    ]
+    _, system, messages, tools = calls["agent"][0]
+    assert "MODEL_SUMMARY_FIXTURE" in system
+    assert "CURRENT_QUOTE_MUST_STAY_EXACT" in system
+    assert "CURRENT_NOTE_MUST_STAY_EXACT" in system
+    assert messages[-1]["content"] == "CURRENT_QUESTION_MUST_STAY_EXACT"
+    assert SOURCE_TOOL_NAME in [tool["function"]["name"] for tool in tools]
+    assert "SYNTHETIC_SIBLING_SECRET" not in system
+    assert "SYNTHETIC_FOREIGN_SECRET" not in system
+    with Session(engine) as session:
+        assert session.get(Message, 2).content.startswith("Historical background")
+
+
+@pytest.mark.parametrize("failure", ["error", "oversized", "empty"])
+def test_optional_summary_failures_keep_the_answer_and_source_access(api, monkeypatch, failure):
+    client, engine, calls = api
+    _long_summary_history(engine)
+
+    def summarize(*args, **kwargs):
+        if failure == "error":
+            raise RuntimeError("SYNTHETIC_PROVIDER_SECRET")
+        return "EXCESSIVE_SUMMARY" * 10000 if failure == "oversized" else None
+
+    monkeypatch.setattr(nodes, "summarize_history", summarize)
+    events = ask(client)
+    assert events[-1]["status"] == "complete", events
+    _, system, messages, tools = calls["agent"][0]
+    assert "EXCESSIVE_SUMMARY" not in system and "SYNTHETIC_PROVIDER_SECRET" not in system
+    assert "原文" in system and "node=1" in system
+    assert SOURCE_TOOL_NAME in [tool["function"]["name"] for tool in tools]
+
+
+def test_short_question_does_not_request_a_summary(api, monkeypatch):
+    client, _, _ = api
+    monkeypatch.setattr(
+        nodes, "summarize_history", lambda *a, **k: pytest.fail("Unnecessary summary call")
+    )
+    events = ask(client)
+    assert events[-1]["status"] == "complete"
+    assert not any("context_status" in event for event in events)
+
+
+def test_legacy_revision_summarizes_and_reads_its_copied_history(api, monkeypatch):
+    client, engine, _ = api
+    _long_summary_history(engine)
+    with Session(engine) as session:
+        originals = session.exec(select(Message).where(Message.node_id == 1)).all()
+        old_ids = {message.id for message in originals}
+        for message in originals:
+            message.node_id = 2
+            session.add(message)
+        last_question = Message(node_id=2, role="user", content="Original question to revise")
+        session.add(last_question)
+        session.commit()
+        question_id = last_question.id
+    payloads, readbacks = [], []
+
+    def summarize(spec, sources, budget):
+        payloads.append(sources)
+        return "REVISED_HISTORY_SUMMARY: Earlier conditions remain relevant."
+
+    def agent(spec, system, messages, tools, execute, **kwargs):
+        assert "REVISED_HISTORY_SUMMARY" in system
+        source_id = next(
+            item["source_id"] for item in payloads[0] if "message=" in item["source_id"]
+        )
+        identifiers = dict(part.split("=") for part in source_id.split(","))
+        assert int(identifiers["node"]) != 2
+        assert int(identifiers["message"]) not in old_ids
+        readbacks.append(
+            json.loads(
+                execute(
+                    SOURCE_TOOL_NAME,
+                    {
+                        "node_id": int(identifiers["node"]),
+                        "message_id": int(identifiers["message"]),
+                        "section": "message",
+                    },
+                )
+            )
+        )
+        yield {"type": "delta", "text": "Revised answer"}
+
+    monkeypatch.setattr(learning_summaries, "summarize_learning_context", summarize)
+    monkeypatch.setattr(nodes, "run_agent", agent)
+    events = ask(client, "Revised question", mode="revise", question_message_id=question_id)
+    assert events[-1]["status"] == "complete", events
+    assert len(payloads) == 1 and readbacks[0]["ok"]
+    with Session(engine) as session:
+        assert session.get(Message, question_id).content == "Original question to revise"
+        assert all(session.get(Message, identifier).node_id == 2 for identifier in old_ids)
+
+
+@pytest.mark.parametrize(
+    "operation,remaining",
+    [
+        ("note", {"sibling", "other-tree"}),
+        ("node", {"sibling", "other-tree"}),
+        ("tree", {"other-tree"}),
+    ],
+)
+def test_source_mutation_routes_clear_only_dependent_summary_cache(api, operation, remaining):
+    client, engine, _ = api
+    with Session(engine) as session:
+        for key, tree_id, node_id in (("current", 1, 2), ("sibling", 1, 3), ("other-tree", 2, 4)):
+            session.add(
+                ContextSummary(
+                    key=key,
+                    tree_id=tree_id,
+                    source_node_ids=[node_id],
+                    source_message_ids=[],
+                    fingerprint="synthetic",
+                    model_fingerprint="synthetic",
+                    prompt_version="synthetic",
+                    content="Disposable synthetic summary",
+                )
+            )
+        session.commit()
+    if operation == "note":
+        response = client.patch("/nodes/2", json={"learning_note": "Corrected understanding"})
+    elif operation == "node":
+        response = client.delete("/nodes/2")
+    else:
+        response = client.delete("/trees/1")
+    assert response.status_code == 200, response.text
+    with Session(engine) as session:
+        assert {row.key for row in session.exec(select(ContextSummary)).all()} == remaining
+
+
+def test_stop_during_summary_does_not_wait_for_provider_or_begin_answer(api, monkeypatch):
+    client, engine, calls = api
+    _long_summary_history(engine)
+    entered, release, request_done = threading.Event(), threading.Event(), threading.Event()
+    errors = []
+
+    def summarize(*args, **kwargs):
+        entered.set()
+        release.wait(5)
+        return "Late summary must not start an answer."
+
+    monkeypatch.setattr(nodes, "summarize_history", summarize)
+
+    def request():
+        try:
+            events = ask(client, request_id="stop-during-summary")
+            assert events[-1]["status"] == "interrupted"
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            request_done.set()
+
+    worker = threading.Thread(target=request, daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(3)
+        generation = nodes._GENERATIONS[2]
+        response = client.post("/nodes/2/stop", json={"request_id": "stop-during-summary"})
+        assert response.status_code == 200
+        assert request_done.wait(2), "Stopping must not wait for an optional summary"
+    finally:
+        release.set()
+        worker.join(5)
+    assert not errors and not worker.is_alive()
+    while generation.events.get(timeout=3) is not None:
+        pass
+    assert not calls["stream"] and not calls["agent"]
 
 
 def make_history_long(engine):

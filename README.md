@@ -88,7 +88,7 @@ No `.env` is needed for normal use. Configure models in Settings. To select anot
 | OpenAI-compatible | Uses Chat Completions; use the base URL and model ID provided by your service. |
 | Anthropic | Native Messages, streaming, images and tool calls. Official base URL: `https://api.anthropic.com`. Output limit defaults to 4,096 tokens. |
 | Editing an API key | Leaving it empty retains the existing key. |
-| Context budget | In the model's **Advanced** settings, set its actual context window and answer reserve. Local estimates and extractive compression need no extra model or download. |
+| Context budget | Set the actual context window and answer reserve in **Advanced**. Long chats can make one extra summary call to the selected model, reuse cached summaries, and fall back to local excerpts. No model download is required. |
 | Optional MCP | Follow the [MCP guide](integrations/mcp/README.md) to install and register six presets, or configure your own server. |
 | Web search | DDGS by default; `TAVILY_API_KEY` opts into Tavily. Errors are reported explicitly. |
 | Learning memory | Keyword retrieval works in the basic installation. Optional local vectors and reranking add semantic retrieval; `MEMORY_RETRIEVAL_MODE=lexical` disables them. |
@@ -101,7 +101,7 @@ Memory facts are limited to valid sources on the active path. Optional semantic 
 
 In **Settings → Memory**, existing preferences initially appear together without modifying stored records. Saving makes that profile user-managed: AI will no longer append to or overwrite it, including when you save an empty profile. Temporary study topics belong to topic facts. Fact corrections keep their original source and refresh their retrieval cache; searching all topics in Settings does not expand the sources available to a conversation. See [memory management](docs/memory-management.md).
 
-Long-context handling is separate from memory retrieval: it budgets each request, including tool results, and compresses older conversation into cited original sentences without rewriting stored messages. Estimates are conservative local approximations, not exact provider token counts; compression can omit relevant material. See [context budgets, source rereading and limits](docs/context-budget.md).
+Long-context handling is separate from memory retrieval: it budgets each request, including tool results, and combines cached model summaries with cited original excerpts without rewriting stored messages. A long conversation can make at most one extra summary call per question, adding provider cost and a short preparation wait; failures fall back to local excerpts. Estimates are conservative local approximations, not exact provider token counts; compression can omit or misinterpret relevant material. See [context budgets, source rereading and limits](docs/context-budget.md).
 
 ## Development and checks
 

@@ -61,10 +61,13 @@ export interface AskBody {
   request_id?: string;
 }
 
+export type ContextStatus = "summarizing" | "ready";
+
 export interface AskHandlers {
   onStart?: (meta: AskMeta) => void;
   onDelta: (s: string) => void;
   onReasoning?: (s: string) => void;
+  onContextStatus?: (status: ContextStatus) => void;
   onToolStart?: (name: string, args: unknown) => void;
   onToolEnd?: (name: string, result: string) => void;
 }
@@ -183,6 +186,7 @@ export const api = {
       if (obj.started) { meta = { ...meta, ...obj }; on.onStart?.(meta); }
       if (typeof obj.delta === 'string') on.onDelta(obj.delta);
       if (typeof obj.reasoning === 'string') on.onReasoning?.(obj.reasoning);
+      if (obj.context_status === 'summarizing' || obj.context_status === 'ready') on.onContextStatus?.(obj.context_status);
       if (obj.tool_start) on.onToolStart?.(obj.tool_start.name, obj.tool_start.args);
       if (obj.tool_end) on.onToolEnd?.(obj.tool_end.name, obj.tool_end.result);
       if (obj.error) { failure = obj.error; meta = { ...meta, ...obj }; }
