@@ -8,6 +8,9 @@ import type {
   MemoryFact,
   MemoryFactsPage,
   PreferenceProfile,
+  PreferenceLearning,
+  PreferenceSupplement,
+  PreferenceSupplementsPage,
   MemoryRetrievalStatus,
   ModelCfg,
   ModelInput,
@@ -126,6 +129,16 @@ export const api = {
     fetch(`${API}/memories/preferences`, { signal }).then(j<PreferenceProfile>),
   savePreferences: (body: { content: string; revision: string }) =>
     fetch(`${API}/memories/preferences`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(j<PreferenceProfile>),
+  getPreferenceLearning: (signal?: AbortSignal) =>
+    fetch(`${API}/memories/preferences/learning`, { signal }).then(j<PreferenceLearning>),
+  setPreferenceLearning: (body: PreferenceLearning) =>
+    fetch(`${API}/memories/preferences/learning`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(j<PreferenceLearning>),
+  listPreferenceSupplements: (page = 1, signal?: AbortSignal) =>
+    fetch(`${API}/memories/preferences/supplements?${new URLSearchParams({ page: String(page), page_size: "10" })}`, { signal }).then(j<PreferenceSupplementsPage>),
+  updatePreferenceSupplement: (id: number, body: { content: string; revision: string }) =>
+    fetch(`${API}/memories/preferences/supplements/${id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(j<PreferenceSupplement>),
+  deletePreferenceSupplement: (id: number, revision: string) =>
+    fetch(`${API}/memories/preferences/supplements/${id}?${new URLSearchParams({ revision })}`, { method: "DELETE" }).then(j<{ deleted: number }>),
   listFacts: (filters: { q?: string; tree_id?: number; page?: number; page_size?: number } = {}, signal?: AbortSignal) => {
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(filters)) if (value !== undefined) query.set(key, String(value));

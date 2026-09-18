@@ -26,7 +26,9 @@ from app.models import (
     Message,
     ModelConfig,
     Node,
+    PreferenceExtraction,
     PreferenceProfile,
+    PreferenceSupplement,
 )
 from app.routers import nodes, trees
 
@@ -62,6 +64,43 @@ def create(client, title="Topic"):
     response = client.post("/trees", json={"title": title})
     assert response.status_code == 200, response.text
     return response.json()
+
+
+@pytest.mark.parametrize("delete_whole_tree", [False, True])
+def test_deletion_purges_supplements_and_extraction_ledger_only_for_its_sources(
+    setup, delete_whole_tree
+):
+    client, engine = setup
+    target, other = create(client), create(client, "Keep")
+    with Session(engine) as session:
+        for tree in (target, other):
+            source = session.get(Node, tree["root_node_id"])
+            source.status = "complete"
+            session.add(source)
+            for scope in ("global", "topic"):
+                session.add(
+                    PreferenceSupplement(
+                        content=f"Derived {tree['id']} {scope}",
+                        evidence="Explicit durable preference",
+                        scope=scope,
+                        tree_id=tree["id"] if scope == "topic" else None,
+                        source_node_id=source.id,
+                        source_tree_id=tree["id"],
+                    )
+                )
+            session.add(
+                PreferenceExtraction(key=str(tree["id"]), node_id=source.id, tree_id=tree["id"])
+            )
+        session.add(PreferenceProfile(content="Keep handwritten profile."))
+        session.commit()
+    endpoint = f"/trees/{target['id']}" if delete_whole_tree else f"/nodes/{target['root_node_id']}"
+    assert client.delete(endpoint).status_code == 200
+    with Session(engine) as session:
+        supplements = session.exec(select(PreferenceSupplement)).all()
+        assert len(supplements) == 2
+        assert {row.source_tree_id for row in supplements} == {other["id"]}
+        assert {row.tree_id for row in session.exec(select(PreferenceExtraction))} == {other["id"]}
+        assert session.get(PreferenceProfile, 1).content == "Keep handwritten profile."
 
 
 def document(identifier, tree_id, content=b"Private source document"):

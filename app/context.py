@@ -187,7 +187,7 @@ def build_context(
     memory_lines = []
     memory_limit = min(3500, available // 6)
     # Keep each sourced memory intact, including multiline qualifications.
-    for line in re.split(r"(?m)(?=^- \[记忆 \d+(?:；来源节点 \d+)?\] )", memory_note):
+    for line in re.split(r"(?m)(?=^- \[(?:记忆|偏好) \d+(?:；来源节点 \d+)?\] )", memory_note):
         if text_tokens("\n".join(memory_lines + [line])) <= memory_limit:
             memory_lines.append(line)
     if memory_lines:

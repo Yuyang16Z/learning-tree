@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep user-written preferences separate from source-linked AI additions, with a learning switch, global/topic scope, editable additions and pending conflict suggestions. Prevent deleted preferences from replaying from the same question, protect manual edits, and remove derived additions with their sources. Unify the Settings frame across tabs with responsive internal scrolling.
+
 - Keep the question composer empty until the user types, without contextual placeholder text.
 
 - Dismiss top success notices automatically after ten seconds, restarting the timer for each new notice and retaining manual dismissal.

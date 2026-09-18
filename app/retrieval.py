@@ -15,6 +15,7 @@ from sqlmodel import Session, select
 
 from .memory_preferences import render_profile
 from .models import Memory, MemoryEmbedding, Node, PreferenceProfile
+from .preference_supplements import eligible_supplements
 from .semantic_models import get_backend
 
 
@@ -40,11 +41,21 @@ class MemoryHit:
     score: float = 0.0
 
 
+@dataclass(frozen=True)
+class PreferenceHit:
+    supplement_id: int
+    source_node_id: int | None
+    content: str
+    scope: str
+    user_edited: bool
+
+
 @dataclass
 class RetrievalResult:
     text: str = ""
     preferences: list[MemoryHit] = field(default_factory=list)
     preference_profile: str = ""
+    supplements: list[PreferenceHit] = field(default_factory=list)
     facts: list[MemoryHit] = field(default_factory=list)
     mode: str = "lexical"
     reranked: bool = False
@@ -315,6 +326,36 @@ def _budget(candidates: list[MemoryHit], limit: int, characters: int) -> list[Me
     return selected if limit > 0 else []
 
 
+def _supplement_line(item: PreferenceHit) -> str:
+    source = f"；来源节点 {item.source_node_id}" if item.source_node_id is not None else ""
+    scope = "当前话题" if item.scope == "topic" else "全局"
+    owner = "用户已编辑" if item.user_edited else "自动记录"
+    return f"- [偏好 {item.supplement_id}{source}] ({scope}，{owner}) {item.content}"
+
+
+def _recall_supplements(session, tree_id, profile, legacy, config) -> list[PreferenceHit]:
+    """Read current eligible additions after inference; never use pending suggestions."""
+    rows = eligible_supplements(session, tree_id)
+    rows.sort(key=lambda row: (row.user_edited, row.updated_at, row.id), reverse=True)
+    seen = {_normalized(item.content) for item in legacy}
+    profile_text = _normalized(profile)
+    remaining, selected = config.preference_budget, []
+    for row in rows:
+        normalized = _normalized(row.content)
+        if not normalized or normalized in seen or (profile_text and normalized in profile_text):
+            continue
+        item = PreferenceHit(row.id, row.source_node_id, row.content, row.scope, row.user_edited)
+        cost = len(_supplement_line(item)) + 1
+        if cost > remaining:
+            continue
+        if len(selected) >= config.preference_limit:
+            break
+        selected.append(item)
+        seen.add(normalized)
+        remaining -= cost
+    return selected
+
+
 def _revalidate(
     session: Session, hits: list[MemoryHit], tree_id: int | None, source_ids: list[int]
 ) -> list[MemoryHit]:
@@ -429,6 +470,9 @@ def retrieve_memory(
         if profile is not None:
             result.preferences = []
             result.preference_profile = profile.content
+        result.supplements = _recall_supplements(
+            fresh, tree_id, result.preference_profile, result.preferences, config
+        )
     result.facts = _budget(selected, config.top_k, config.char_budget)
     sections = []
     if result.preference_profile:
@@ -439,6 +483,13 @@ def retrieve_memory(
         sections.append(
             "【用户偏好（历史记录，当前明确要求优先）】\n"
             + "\n".join(_line(item) for item in result.preferences)
+        )
+    if result.supplements:
+        sections.append(
+            "【偏好补充（仅在适用范围内参考）】\n"
+            "当前明确要求优先，其次是用户编辑的偏好正文，再次是补充。"
+            "补充中用户已编辑的内容优先于自动记录；条件和否定要求必须保留。\n"
+            + "\n".join(_supplement_line(item) for item in result.supplements)
         )
     if result.facts:
         sections.append(

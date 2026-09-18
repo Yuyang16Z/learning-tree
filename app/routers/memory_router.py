@@ -9,7 +9,15 @@ from sqlmodel import Session, select
 
 from ..db import get_session
 from ..memory_preferences import begin_memory_write, read_preferences
-from ..models import KnowledgeTree, Memory, MemoryEmbedding, PreferenceProfile
+from ..models import (
+    KnowledgeTree,
+    Memory,
+    MemoryEmbedding,
+    PreferenceLearningState,
+    PreferenceProfile,
+    PreferenceSupplement,
+)
+from ..preference_supplements import read_learning_state, supplement_out
 from ..schemas import (
     FactDeleteIn,
     FactOut,
@@ -17,8 +25,13 @@ from ..schemas import (
     FactPatch,
     FactTopicOut,
     MemoryOut,
+    PreferenceLearningIn,
+    PreferenceLearningOut,
     PreferenceProfileIn,
     PreferenceProfileOut,
+    PreferenceSupplementOut,
+    PreferenceSupplementPageOut,
+    PreferenceSupplementPatch,
 )
 
 router = APIRouter(prefix="/memories", tags=["memories"])
@@ -33,6 +46,92 @@ def list_memories(session: Session = Depends(get_session)) -> list[MemoryOut]:
 @router.get("/preferences", response_model=PreferenceProfileOut)
 def get_preferences(session: Session = Depends(get_session)) -> PreferenceProfileOut:
     return read_preferences(session)
+
+
+@router.get("/preferences/learning", response_model=PreferenceLearningOut)
+def get_preference_learning(session: Session = Depends(get_session)) -> PreferenceLearningOut:
+    return read_learning_state(session)
+
+
+@router.put("/preferences/learning", response_model=PreferenceLearningOut)
+def save_preference_learning(
+    body: PreferenceLearningIn, session: Session = Depends(get_session)
+) -> PreferenceLearningOut:
+    begin_memory_write(session)
+    current = read_learning_state(session)
+    if body.revision != current.revision:
+        raise HTTPException(409, "偏好学习设置已在其他窗口更新，请重新载入。")
+    state = session.get(PreferenceLearningState, 1) or PreferenceLearningState()
+    state.enabled = body.enabled
+    state.revision = uuid4().hex
+    session.add(state)
+    session.commit()
+    return read_learning_state(session)
+
+
+@router.get("/preferences/supplements", response_model=PreferenceSupplementPageOut)
+def list_preference_supplements(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1, le=100),
+    session: Session = Depends(get_session),
+) -> PreferenceSupplementPageOut:
+    total = session.exec(select(func.count()).select_from(PreferenceSupplement)).one()
+    rows = session.exec(
+        select(PreferenceSupplement)
+        .order_by(PreferenceSupplement.updated_at.desc(), PreferenceSupplement.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return PreferenceSupplementPageOut(
+        items=[supplement_out(session, row) for row in rows],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.patch("/preferences/supplements/{supplement_id}", response_model=PreferenceSupplementOut)
+def edit_preference_supplement(
+    supplement_id: int,
+    body: PreferenceSupplementPatch,
+    session: Session = Depends(get_session),
+) -> PreferenceSupplementOut:
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(422, "偏好内容不能为空。")
+    begin_memory_write(session)
+    supplement = session.get(PreferenceSupplement, supplement_id)
+    if supplement is None:
+        raise HTTPException(404, "偏好补充不存在。")
+    if supplement.revision != body.revision:
+        raise HTTPException(409, "偏好补充已在其他窗口更新，请重新载入后再保存。")
+    supplement.content = content
+    supplement.user_edited = True
+    supplement.revision = uuid4().hex
+    supplement.updated_at = datetime.now(timezone.utc)
+    # Editing a conflicting suggestion does not silently make it an active preference.
+    session.add(supplement)
+    session.commit()
+    session.refresh(supplement)
+    return supplement_out(session, supplement)
+
+
+@router.delete("/preferences/supplements/{supplement_id}")
+def delete_preference_supplement(
+    supplement_id: int,
+    revision: str = Query(min_length=1, max_length=100),
+    session: Session = Depends(get_session),
+) -> dict:
+    begin_memory_write(session)
+    supplement = session.get(PreferenceSupplement, supplement_id)
+    if supplement is None:
+        raise HTTPException(404, "偏好补充不存在。")
+    if supplement.revision != revision:
+        raise HTTPException(409, "偏好补充已在其他窗口更新，请重新载入后再删除。")
+    # The content-free extraction ledger remains, so old inputs cannot recreate this row.
+    session.delete(supplement)
+    session.commit()
+    return {"deleted": supplement_id}
 
 
 @router.put("/preferences", response_model=PreferenceProfileOut)
@@ -169,6 +268,12 @@ def clear_memories(session: Session = Depends(get_session)) -> dict:
     session.execute(delete(MemoryEmbedding))
     n = session.exec(select(func.count()).select_from(Memory)).one()
     session.execute(delete(Memory))
+    n += session.exec(select(func.count()).select_from(PreferenceSupplement)).one()
+    session.execute(delete(PreferenceSupplement))
+    # Keep the replay ledger and invalidate extractions started before clear-all.
+    learning = session.get(PreferenceLearningState, 1) or PreferenceLearningState()
+    learning.revision = uuid4().hex
+    session.add(learning)
     # Retain an empty override, not a missing row: otherwise automatic extraction
     # and stale editors could revive preferences that the user explicitly cleared.
     profile = session.get(PreferenceProfile, 1) or PreferenceProfile()

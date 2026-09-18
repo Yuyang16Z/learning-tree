@@ -225,7 +225,7 @@ def test_clear_all_prevents_inflight_extraction_from_restoring_memories(setup, m
     assert client.get("/memories/preferences").json()["content"] == ""
 
 
-def test_automatic_preferences_continue_until_first_user_save(setup, monkeypatch):
+def test_unverified_legacy_extractor_strings_do_not_create_new_preferences(setup, monkeypatch):
     client, engine = setup
     monkeypatch.setattr(
         service,
@@ -234,9 +234,9 @@ def test_automatic_preferences_continue_until_first_user_save(setup, monkeypatch
     )
     service.extract_and_save(SPEC, 1, 1, "问题", "回答")
     service.extract_and_save(SPEC, 1, 1, "问题", "回答")
-    assert len(client.get("/memories").json()) == 2
+    assert len(client.get("/memories").json()) == 1
     profile = client.get("/memories/preferences").json()
-    assert profile["content"] == "长期偏好生活化例子" and not profile["managed"]
+    assert profile["content"] == "" and not profile["managed"]
 
 
 def test_slow_retrieval_refreshes_profile_and_cannot_recreate_edited_fact_vector(setup):

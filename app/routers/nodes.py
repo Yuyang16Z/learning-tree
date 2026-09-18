@@ -28,7 +28,14 @@ from ..document_context import (
 from ..documents import DocumentAttachment, document_summary, resolve_documents
 from ..learning_summaries import invalidate_summaries, summarize_history
 from ..llm import LLMSpec, complete, run_agent, stream_chat
-from ..models import Memory, MemoryEmbedding, Message, Node
+from ..models import (
+    Memory,
+    MemoryEmbedding,
+    Message,
+    Node,
+    PreferenceExtraction,
+    PreferenceSupplement,
+)
 from ..schemas import AskIn, BranchIn, ExplainIn, NodePatch, StopIn, TitleIn
 from ..service import (
     assemble_tools,
@@ -253,6 +260,10 @@ def delete_node(node_id: int, session: Session = Depends(get_session)) -> dict:
             )
         discard_node_work(ids)
         invalidate_summaries(session, node_ids=ids)
+        session.execute(
+            delete(PreferenceSupplement).where(PreferenceSupplement.source_node_id.in_(ids))
+        )
+        session.execute(delete(PreferenceExtraction).where(PreferenceExtraction.node_id.in_(ids)))
         for message in session.exec(select(Message).where(Message.node_id.in_(ids))).all():
             session.delete(message)
         for memory in session.exec(select(Memory).where(Memory.source_node_id.in_(ids))).all():

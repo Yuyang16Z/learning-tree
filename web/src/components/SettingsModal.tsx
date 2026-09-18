@@ -161,7 +161,7 @@ export function SettingsModal(props: Props) {
 
   return (
     <div className="overlay" onClick={close}>
-      <div className={`modal modal-settings${tab === "memory" ? " memory-settings" : ""}`} role="dialog" aria-modal="true" aria-labelledby={titleId} onClick={(e) => e.stopPropagation()}>
+      <div className="modal modal-settings" role="dialog" aria-modal="true" aria-labelledby={titleId} onClick={(e) => e.stopPropagation()}>
         <h3 id={titleId}>{t("设置", "Settings")}</h3>
 
         <div className="settings-body">

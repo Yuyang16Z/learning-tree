@@ -50,7 +50,7 @@ class MemoryEmbedding(SQLModel, table=True):
 
 
 class PreferenceProfile(SQLModel, table=True):
-    """User-owned singleton; an empty profile intentionally suppresses automatic preferences."""
+    """User-owned singleton; an empty profile intentionally suppresses legacy preferences."""
 
     id: int = Field(default=1, primary_key=True)
     content: str = ""
@@ -58,6 +58,44 @@ class PreferenceProfile(SQLModel, table=True):
     # Clear-all advances this token so an in-flight extraction cannot restore deleted memories.
     reset_revision: str = ""
     updated_at: datetime = Field(default_factory=_now)
+
+
+class PreferenceSupplement(SQLModel, table=True):
+    """Source-linked AI additions kept separate from the user-owned profile."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    content: str
+    scope: Literal["global", "topic"] = Field(
+        default="global", sa_column=Column(String, nullable=False, default="global")
+    )
+    tree_id: int | None = Field(default=None, index=True)
+    source_node_id: int | None = Field(default=None, index=True)
+    source_tree_id: int | None = Field(default=None, index=True)
+    evidence: str
+    status: Literal["active", "pending"] = Field(
+        default="active", sa_column=Column(String, nullable=False, default="active")
+    )
+    user_edited: bool = False
+    revision: str = Field(default_factory=lambda: uuid4().hex)
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)
+
+
+class PreferenceLearningState(SQLModel, table=True):
+    """Singleton switch; revisions invalidate extraction started before a settings change."""
+
+    id: int = Field(default=1, primary_key=True)
+    enabled: bool = True
+    revision: str = Field(default_factory=lambda: uuid4().hex)
+
+
+class PreferenceExtraction(SQLModel, table=True):
+    """Content-free processed-input ledger retained after preference deletion."""
+
+    key: str = Field(primary_key=True)
+    node_id: int = Field(index=True)
+    tree_id: int = Field(index=True)
+    created_at: datetime = Field(default_factory=_now)
 
 
 class McpServer(SQLModel, table=True):

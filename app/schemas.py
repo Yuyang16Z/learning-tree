@@ -153,6 +153,45 @@ class PreferenceProfileIn(BaseModel):
     revision: str = Field(min_length=1, max_length=100)
 
 
+class PreferenceLearningOut(BaseModel):
+    enabled: bool
+    revision: str
+
+
+class PreferenceLearningIn(BaseModel):
+    enabled: bool
+    revision: str = Field(min_length=1, max_length=100)
+
+
+class PreferenceSupplementOut(BaseModel):
+    id: int
+    content: str
+    scope: Literal["global", "topic"]
+    tree_id: int | None
+    source_node_id: int | None
+    source_tree_id: int | None
+    evidence: str
+    status: Literal["active", "pending"]
+    user_edited: bool
+    revision: str
+    created_at: datetime
+    updated_at: datetime
+    tree_title: str | None
+    source_tree_title: str | None
+
+
+class PreferenceSupplementPageOut(BaseModel):
+    items: list[PreferenceSupplementOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class PreferenceSupplementPatch(BaseModel):
+    content: str = Field(min_length=1, max_length=4000)
+    revision: str = Field(min_length=1, max_length=100)
+
+
 class FactOut(MemoryOut):
     source_node_id: int | None
     tree_title: str | None

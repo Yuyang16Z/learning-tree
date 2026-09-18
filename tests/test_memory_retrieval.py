@@ -13,7 +13,14 @@ import pytest
 from sqlalchemy import delete, event
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from app.models import KnowledgeTree, Memory, MemoryEmbedding, Node
+from app.models import (
+    KnowledgeTree,
+    Memory,
+    MemoryEmbedding,
+    Node,
+    PreferenceProfile,
+    PreferenceSupplement,
+)
 from app.retrieval import RetrievalConfig, retrieve_memory
 
 
@@ -80,6 +87,90 @@ def remember(session, content, *, kind="fact", tree_id=1, source_node_id=1):
 
 def ids(result):
     return {hit.memory_id for hit in result.facts}
+
+
+def supplement(session, content, **kwargs):
+    row = PreferenceSupplement(
+        content=content,
+        source_node_id=kwargs.pop("source_node_id", 1),
+        source_tree_id=kwargs.pop("source_tree_id", 1),
+        evidence=content,
+        **kwargs,
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row
+
+
+def test_supplements_coexist_with_manual_profile_and_respect_scope(session):
+    profile = PreferenceProfile(content="Default to Chinese.")
+    session.add(profile)
+    session.commit()
+    global_row = supplement(session, "Use examples first.", source_node_id=4, source_tree_id=2)
+    local = supplement(session, "Keep derivations in this topic.", scope="topic", tree_id=1)
+    supplement(
+        session, "Another topic only.", scope="topic", tree_id=2, source_node_id=4, source_tree_id=2
+    )
+    supplement(session, "Unconfirmed language change.", status="pending")
+    supplement(session, "Failed source preference.", source_node_id=6)
+    result = retrieve_memory(session, 1, [1])
+    assert {item.supplement_id for item in result.supplements} == {global_row.id, local.id}
+    assert result.preference_profile == "Default to Chinese."
+    assert "Default to Chinese." in result.text
+    assert "当前明确要求优先，其次是用户编辑的偏好正文" in result.text
+    assert "当前话题" in result.text
+    assert "Another topic only." not in result.text
+    assert "Unconfirmed language change." not in result.text
+    assert "Failed source preference." not in result.text
+
+
+def test_supplement_budget_keeps_statements_whole_and_prioritizes_user_edits(session):
+    supplement(session, "Never truncate a negation. " * 200)
+    locked = supplement(session, "Keep formulas when discussing mathematics.", user_edited=True)
+    supplement(session, "Automatic preference.")
+    result = retrieve_memory(session, 1, [1], config=RetrievalConfig(preference_limit=1))
+    assert [item.supplement_id for item in result.supplements] == [locked.id]
+    assert locked.content in result.text
+    assert "Never truncate" not in result.text
+    assert "Automatic preference." not in result.text
+
+
+def test_supplements_deleted_during_slow_retrieval_are_not_recalled(session):
+    row = supplement(session, "Addition deleted while retrieving facts.")
+    fact = remember(session, "Relevant test fact.")
+
+    class DeleteDuringRetrieval(Backend):
+        def rerank(self, query, documents):
+            with Session(session.get_bind()) as writer:
+                writer.execute(
+                    delete(PreferenceSupplement).where(PreferenceSupplement.id == row.id)
+                )
+                writer.commit()
+            return super().rerank(query, documents)
+
+    result = retrieve_memory(
+        session, 1, [1], query="test fact", backend=DeleteDuringRetrieval([fact.content])
+    )
+    assert not result.supplements
+    assert row.content not in result.text
+
+
+def test_empty_profile_does_not_disable_new_supplements_and_duplicates_are_suppressed(session):
+    session.add(PreferenceProfile(content=""))
+    session.commit()
+    supplement(session, "Explain with examples.")
+    supplement(session, "Explain with examples.")
+    result = retrieve_memory(session, 1, [1])
+    assert len(result.supplements) == 1
+    assert "Explain with examples." in result.text
+    profile = session.get(PreferenceProfile, 1)
+    profile.content = "Explain with examples."
+    session.add(profile)
+    session.commit()
+    result = retrieve_memory(session, 1, [1])
+    assert not result.supplements
+    assert result.text.count("Explain with examples.") == 1
 
 
 def test_old_relevant_memory_is_not_lost_to_recent_eight_limit(session):

@@ -61,6 +61,29 @@ export interface McpServer { id: number; label: string; command: string; args: s
 export interface McpInput { label: string; command: string; args: string[]; enabled: boolean }
 export interface Memory { id: number; kind: string; content: string; tree_id: number | null }
 export interface PreferenceProfile { content: string; revision: string; managed: boolean }
+export interface PreferenceLearning { enabled: boolean; revision: string }
+export interface PreferenceSupplement {
+  id: number;
+  content: string;
+  scope: "global" | "topic";
+  tree_id: number | null;
+  source_node_id: number | null;
+  source_tree_id: number | null;
+  tree_title: string | null;
+  source_tree_title: string | null;
+  evidence: string;
+  status: "active" | "pending";
+  user_edited: boolean;
+  revision: string;
+  created_at: string;
+  updated_at: string;
+}
+export interface PreferenceSupplementsPage {
+  items: PreferenceSupplement[];
+  total: number;
+  page: number;
+  page_size: number;
+}
 export interface MemoryFact extends Memory {
   source_node_id: number | null;
   tree_title: string | null;

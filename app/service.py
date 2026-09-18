@@ -135,27 +135,85 @@ def fetch_memory_note(
 def extract_and_save(
     spec: LLMSpec, tree_id: int | None, node_id: int, question: str, answer: str
 ) -> None:
-    """Extract, deduplicate and store memories from a question/answer pair in the background.
+    """Best-effort extraction once per user turn; user-owned preferences are immutable.
 
-    Extraction failures are silent."""
+    Claims commit before the provider runs. They contain no conversation text and
+    intentionally survive failures, retries and preference deletion, so replaying
+    an old turn cannot resurrect a preference the user removed.
+    """
+    import hashlib
+    import json
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
+    from .models import PreferenceExtraction, PreferenceSupplement
+    from .preference_learning import (
+        extraction_context,
+        normalize_preference,
+        preference_snapshot,
+        validate_preference,
+    )
+
     if spec.api_key == "mock" or spec.base_url.startswith("mock"):
         return
     with Session(engine) as s:
+        begin_memory_write(s)
         source = s.get(Node, node_id)
-        if not source or source.status != "complete" or source.tree_id != tree_id:
+        if (
+            not source
+            or source.status != "complete"
+            or source.tree_id != tree_id
+            or s.get(KnowledgeTree, source.tree_id) is None
+        ):
             return
         source_identity = (source.tree_id, source.created_at, source.request_id)
-        profile = s.get(PreferenceProfile, 1)
-        reset_revision = profile.reset_revision if profile is not None else ""
-    res = extract_memories(spec, question, answer)
-    prefs, facts = res.get("preferences", []), res.get("facts", [])
-    if not prefs and not facts:
+        # Regenerating an answer changes request_id/answer, but not the source
+        # user message. Legacy multi-turn nodes still distinguish each message.
+        message = s.exec(
+            select(Message)
+            .where(
+                Message.node_id == node_id,
+                Message.role == "user",
+                Message.content == question,
+            )
+            .order_by(Message.id.desc())
+        ).first()
+        message_identity = (message.id, message.content) if message else None
+        claim_material = [
+            node_id,
+            source.created_at.isoformat(),
+            [message.id] if message else [question],
+        ]
+        claim_key = hashlib.sha256(
+            json.dumps(claim_material, ensure_ascii=False).encode()
+        ).hexdigest()
+        if s.get(PreferenceExtraction, claim_key):
+            return
+        snapshot = preference_snapshot(s, tree_id)
+        context = extraction_context(snapshot, question)
+        profile = snapshot["profile"]
+        reset_revision = profile["reset_revision"] if profile else ""
+        s.add(PreferenceExtraction(key=claim_key, node_id=node_id, tree_id=tree_id))
+        s.commit()
+    # No database lock is held during the model request.
+    try:
+        result = extract_memories(spec, question, answer, context)
+    except Exception:  # noqa: BLE001
+        return
+    if not isinstance(result, dict):
+        return
+    preferences, facts = result.get("preferences", []), result.get("facts", [])
+    if not isinstance(preferences, list):
+        preferences = []
+    if not isinstance(facts, list):
+        facts = []
+    if not preferences and not facts:
         return
     with Session(engine) as s:
         begin_memory_write(s)
         profile = s.get(PreferenceProfile, 1)
-        if (profile.reset_revision if profile is not None else "") != reset_revision:
-            return  # The user cleared memories while this extraction was running.
+        if (profile.reset_revision if profile else "") != reset_revision:
+            return
         source = s.get(Node, node_id)
         if (
             not source
@@ -164,14 +222,86 @@ def extract_and_save(
             or s.get(KnowledgeTree, source.tree_id) is None
         ):
             return
-        existing = {(m.kind, m.source_node_id, m.content) for m in s.exec(select(Memory)).all()}
-        # After the first explicit save, only the user owns their preference profile.
-        for p in prefs if profile is None else []:
-            if p and ("preference", node_id, p) not in existing:
-                s.add(Memory(kind="preference", content=p, tree_id=None, source_node_id=node_id))
-                existing.add(("preference", node_id, p))
-        for f in facts:
-            if f and ("fact", node_id, f) not in existing:
-                s.add(Memory(kind="fact", content=f, tree_id=tree_id, source_node_id=node_id))
-                existing.add(("fact", node_id, f))
+        if message_identity:
+            message = s.get(Message, message_identity[0])
+            if not message or (message.id, message.content) != message_identity:
+                return
+        current = preference_snapshot(s, tree_id)
+        if snapshot["state"]["enabled"] and current == snapshot:
+            allowed_ids = {row["id"] for row in context["existing"]}
+            known = {
+                (row["scope"], row["tree_id"], normalize_preference(row["content"]))
+                for row in snapshot["supplements"]
+            }
+            for raw in preferences[:3]:
+                pref = validate_preference(raw, question)
+                if pref is None:
+                    continue
+                owner = tree_id if pref["scope"] == "topic" else None
+                identity = (pref["scope"], owner, normalize_preference(pref["content"]))
+                if identity in known:
+                    continue
+                if profile and identity[2] == normalize_preference(profile.content):
+                    continue
+                pending = pref["conflicts_manual"] or context["manual_context_incomplete"]
+                target = None
+                if pref["action"] == "update":
+                    target = (
+                        s.get(PreferenceSupplement, pref["replace_id"])
+                        if pref["replace_id"] in allowed_ids
+                        else None
+                    )
+                    safe_target = (
+                        target is not None
+                        and target.status == "active"
+                        and not target.user_edited
+                        and target.scope == pref["scope"]
+                        and target.tree_id == owner
+                    )
+                    if not safe_target:
+                        pending = True
+                        target = None
+                elif pref["replace_id"] is not None:
+                    # Contradictory instructions from the extractor need review.
+                    pending = True
+                if target is not None and not pending:
+                    old_identity = (
+                        target.scope,
+                        target.tree_id,
+                        normalize_preference(target.content),
+                    )
+                    target.content = pref["content"]
+                    target.evidence = pref["evidence"]
+                    target.source_node_id = node_id
+                    target.source_tree_id = tree_id
+                    target.revision = uuid4().hex
+                    target.updated_at = datetime.now(timezone.utc)
+                    s.add(target)
+                    known.discard(old_identity)
+                else:
+                    s.add(
+                        PreferenceSupplement(
+                            content=pref["content"],
+                            scope=pref["scope"],
+                            tree_id=owner,
+                            source_node_id=node_id,
+                            source_tree_id=tree_id,
+                            evidence=pref["evidence"],
+                            status="pending" if pending else "active",
+                        )
+                    )
+                known.add(identity)
+        # Topic facts continue even when automatic preference learning is off or
+        # a concurrent preference edit invalidated the preference snapshot.
+        existing = {
+            memory.content
+            for memory in s.exec(
+                select(Memory).where(Memory.kind == "fact", Memory.source_node_id == node_id)
+            ).all()
+        }
+        for fact in facts[:3]:
+            if isinstance(fact, str) and fact.strip() and fact.strip() not in existing:
+                content = fact.strip()
+                s.add(Memory(kind="fact", content=content, tree_id=tree_id, source_node_id=node_id))
+                existing.add(content)
         s.commit()

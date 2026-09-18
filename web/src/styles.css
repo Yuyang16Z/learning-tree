@@ -130,9 +130,10 @@ button {
 
 /* Settings modal: fixed size, left navigation, and an internally scrolling content area */
 .modal.modal-settings {
-  width: 620px;
-  height: 560px;
-  max-height: 86vh;
+  width: 780px;
+  height: 700px;
+  max-width: calc(100vw - 32px);
+  max-height: min(86vh, calc(100dvh - 32px));
   display: flex;
   flex-direction: column;
   overflow: hidden;
