@@ -21,6 +21,8 @@ LearningTree uses React + TypeScript and FastAPI + SQLite/SQLModel. Normal start
 | `app/llm.py`, `app/anthropic_provider.py` | Provider request conversion and deterministic demo behavior. |
 | `app/title_generation.py` | Bounded, question-first branch title requests and plain-text fallback. |
 | `app/mcp_client.py` | Persistent process/session lifecycle and serialized tool calls. |
+| `app/changes.py` | Revisioned, ID-only change notices for other windows and devices. |
+| `app/phone_access.py` | Read-only Tailscale status for **Settings → Phone access**. |
 | `app/db.py`, `app/models.py` | SQLite initialization, additive upgrades and models. |
 
 ## Conversation model
@@ -99,7 +101,17 @@ This pipeline only searches built-in `Memory` records. It does not index full co
 
 The backend persists a pending turn before streaming and uses request IDs to avoid duplicate submission. After acceptance, the composer clears the submitted text; an unaccepted failure retains it. New typing during generation survives automatic navigation.
 
-Server-sent events carry updates. Partial output is retained after interruption or failure and can be inspected after retrying. On startup, leftover pending nodes become interrupted. Only one backend should use a database at a time. Stop prevents subsequent local steps, but cannot undo a remote request or tool action already executed.
+Server-sent events carry updates. An answer runs in a server worker, not in the request that started it: closing the page, reloading or a phone locking only disconnects that viewer. Every event is kept in order for the running answer, so `GET /nodes/{id}/stream?request_id=…&after=N` reattaches and replays only events after `N`; once the answer has ended it reports the stored outcome instead. The browser reattaches automatically after a dropped connection while the page is visible, keeping the text it already shows. Only **Stop**, deleting the node or stopping the server ends an answer. Memory extraction runs after completion even when nobody is connected.
+
+Partial output is checkpointed about every half second, retained after interruption or failure and can be inspected after retrying. On startup, leftover pending nodes become interrupted. Only one backend should use a database at a time. Stop prevents subsequent local steps, but cannot undo a remote request or tool action already executed.
+
+## Other windows and devices
+
+Every client of one backend shares its database, models and MCP configuration, so there is nothing to synchronize between copies. `app/changes.py` records which rows each committed transaction touched: node IDs grouped by topic, and flags for the topic list, models, MCP servers and memory. `GET /changes?since=<cursor>` returns what changed after the cursor; an unknown cursor (new page, restarted server) or one older than the retained history sets `reload`. Notices carry IDs only; pages reload changed data through the normal endpoints and keep unchanged state untouched.
+
+Visible pages poll about every two seconds, stop while hidden, and poll immediately when shown, focused or back online. A page reloads the map when its topic changed and the conversation only when a node on the open path changed, never interrupting its own streaming answer or an in-progress navigation. A question another client is answering shows its checkpointed text with a live status and Stop, and follow-up questions on that node wait until it finishes. Drafts, reading positions, theme and language remain per browser.
+
+The API still has no authentication. Reaching it from another device requires a private network path that you control; see [security policy](../SECURITY.md).
 
 OpenAI-compatible Chat Completions and Anthropic Messages use distinct message, image, stream and tool formats. Mock responses exercise local interactions without paid calls; they do not validate a remote model's capabilities.
 

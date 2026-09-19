@@ -1,0 +1,12 @@
+.phone-access { display: grid; gap: 12px; font-size: 13px; line-height: 1.7; }
+.phone-access p, .phone-access ol { margin: 0; }
+.phone-access ol { padding-left: 20px; display: grid; gap: 6px; }
+.phone-access a { color: var(--teal); }
+.phone-muted { color: var(--muted); font-size: 12px; }
+.phone-copy-line { display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+.phone-copy-line code { flex: 1; min-width: 0; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.phone-copy-line .btn { flex: none; }
+.phone-ready { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
+.phone-ready-text { flex: 1; min-width: 200px; display: grid; gap: 8px; }
+.phone-qr { width: 180px; height: 180px; flex: none; border-radius: 8px; border: 1px solid var(--border); }
+.phone-danger { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--danger); border-radius: 8px; color: var(--danger); }

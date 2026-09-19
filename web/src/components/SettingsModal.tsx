@@ -4,6 +4,7 @@ import { useI18n } from "../i18n";
 import { localizeError, mcpDisplayName } from "../i18n/workspace";
 import type { McpServer, MemoryRetrievalStatus, ModelCfg, Tree } from "../types";
 import { MemoryPanel } from "./MemoryPanel";
+import { PhoneAccessPanel } from "./PhoneAccessPanel";
 import { TopicList } from "./TopicList";
 
 interface Props {
@@ -28,7 +29,7 @@ interface Props {
   onThemeChange: (t: "light" | "dark" | "system") => void;
 }
 
-type Tab = "models" | "mcp" | "memory" | "archived" | "appearance" | "language";
+type Tab = "models" | "mcp" | "phone" | "memory" | "archived" | "appearance" | "language";
 
 function MemoryRetrievalPanel() {
   const { t } = useI18n();
@@ -172,6 +173,9 @@ export function SettingsModal(props: Props) {
             <button className={tab === "mcp" ? "on" : ""} onClick={() => setTab("mcp")}>
               {t("MCP 工具", "MCP tools")}
             </button>
+            <button className={tab === "phone" ? "on" : ""} onClick={() => setTab("phone")}>
+              {t("手机访问", "Phone access")}
+            </button>
             <button className={tab === "memory" ? "on" : ""} onClick={() => { setMemoryVisited(true); setTab("memory"); }}>
               {t("记忆", "Memory")}
             </button>
@@ -265,6 +269,8 @@ export function SettingsModal(props: Props) {
                 </div>
               </>
             )}
+
+            {tab === "phone" && <PhoneAccessPanel />}
 
             {memoryVisited && (
               <div hidden={tab !== "memory"}>
