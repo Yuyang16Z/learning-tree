@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add **Settings → Phone access**. Read-only Tailscale detection shows the one-time `tailscale serve` command, a QR code for the private HTTPS address, and a warning with `tailscale funnel reset` when Funnel makes the unauthenticated app public. The QR encoder is built in, adding no dependency.
+- On touch screens, read text selections once they settle, since iOS long-press selection and handle drags send no pointer events. Dock selection actions at the bottom, away from the system menu and handles, and use 16px form text so iOS no longer zooms on focus.
+- Keep answers generating when their page closes or its connection drops. Record every stream event so a page reconnects automatically and continues after the last event it received; Stop, node deletion and server shutdown still end an answer. Extract memories from completed answers even when no page is connected.
+- Show changes from other windows and devices without reloading: a revisioned, ID-only change feed lets visible pages refresh the topic list, map, open conversation, models and MCP servers. Answers running elsewhere show their progress with a Stop control, and follow-ups on them wait until they finish.
+
 - Keep user-written preferences separate from source-linked AI additions, with a learning switch, global/topic scope, editable additions and pending conflict suggestions. Prevent deleted preferences from replaying from the same question, protect manual edits, and remove derived additions with their sources. Unify the Settings frame across tabs with responsive internal scrolling.
 
 - Keep the question composer empty until the user types, without contextual placeholder text.

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type ContextStatus } from "./api";
+import { api, isStreamLost, type AskHandlers, type AskMeta, type ChangeNotice, type ContextStatus } from "./api";
 import { useI18n } from "./i18n";
 import { localizeError } from "./i18n/workspace";
 import type {
@@ -20,6 +20,8 @@ import { ChatPane } from "./components/ChatPane";
 import { LearningMap } from "./components/LearningMap";
 import { NavigationGate, readSaved, saveValue, clearLegacyRecovery, removeWorkspace, onWorkspaceDeletion, orphanedWorkspaceTrees, orphanedWorkspaceNodes, deletionAffectsRequest } from "./lib/workspace";
 import { mergePendingTitles, pollPendingTitles } from "./lib/titlePolling";
+import { resumeAnswer } from "./lib/answerStream";
+import { keepIfSame, planRefresh, watchChanges } from "./lib/changeFeed";
 import { SettingsModal } from "./components/SettingsModal";
 import { NewTreeModal } from "./components/NewTreeModal";
 import { AddModelModal } from "./components/AddModelModal";
@@ -48,6 +50,7 @@ export default function App() {
   const [liveReasoning, setLiveReasoning] = useState("");
   const [liveSteps, setLiveSteps] = useState<ToolStep[]>([]);
   const [contextStatus, setContextStatus] = useState<ContextStatus | null>(null);
+  const [reconnecting, setReconnecting] = useState(false);
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
   const [sendingImages, setSendingImages] = useState<string[]>([]);
   const [sendingDocuments, setSendingDocuments] = useState<DocumentSummary[]>([]);
@@ -80,6 +83,12 @@ export default function App() {
   }, [notice]);
   const importRef = useRef<HTMLInputElement>(null);
   const pendingTitleIds = treeNodes.filter(node => node.title_state === "pending").map(node => node.id).join(",");
+  // The change watcher outlives renders; it reads the view and handlers through refs.
+  const threadRef = useRef(thread);
+  threadRef.current = thread;
+  const remoteChangesRef = useRef<(notice: ChangeNotice) => Promise<unknown>>(async () => {});
+  remoteChangesRef.current = applyRemoteChanges;
+  useEffect(() => watchChanges({ load: api.changes, apply: notice => remoteChangesRef.current(notice) }), []);
 
   useEffect(() => {
     const breakpoint = window.matchMedia("(max-width: 760px)");
@@ -119,7 +128,7 @@ export default function App() {
 
   async function loadModels() {
     const m = await api.listModels();
-    setModels(m);
+    setModels(keepIfSame(m));
     setActiveModelId((prev) =>
       prev && m.some((x) => x.id === prev) ? prev : m.find(x => x.id === readSaved("bl-model", 0))?.id ?? m.find((x) => x.is_default)?.id ?? m[0]?.id ?? null,
     );
@@ -128,12 +137,12 @@ export default function App() {
   async function loadTrees() {
     const t = await api.listTrees(true);
     for (const treeId of orphanedWorkspaceTrees(t.map(tree => tree.id))) removeWorkspace({ treeId }, false);
-    setTrees(t);
+    setTrees(keepIfSame(t));
     return t;
   }
 
   async function loadMcp() {
-    setMcpServers(await api.listMcp());
+    setMcpServers(keepIfSame(await api.listMcp()));
   }
 
   useEffect(() => {
@@ -228,6 +237,64 @@ export default function App() {
       setTreeNodes(nodes);
     }
     return nodes;
+  }
+
+  // Another window or device changed something: reload only what this view shows.
+  async function applyRemoteChanges(notice: ChangeNotice) {
+    const treeId = treeRef.current;
+    const plan = planRefresh(notice, { treeId, focusId: focusRef.current, threadNodeIds: threadRef.current.map(node => node.node_id) });
+    await Promise.all([
+      plan.models && loadModels(),
+      plan.mcp && loadMcp(),
+      plan.topics && syncTopics(),
+      plan.map && treeId !== null && syncMap(treeId),
+      plan.thread && syncThread(),
+    ]);
+  }
+
+  async function syncTopics() {
+    const list = await loadTrees();
+    const current = treeRef.current;
+    if (current === null || list.some(tree => tree.id === current)) return;
+    // Deleted elsewhere: continue as if it had been deleted here.
+    const next = list.find(tree => !tree.archived);
+    if (next) await selectTree(next.id, list);
+    else clearTreeSelection(false);
+  }
+
+  async function syncMap(treeId: number) {
+    // Background reloads never cancel a newer refresh or navigation.
+    const ticket = mapRevision.current;
+    let nodes: TreeNode[];
+    try { nodes = await api.getTree(treeId); }
+    catch (e) { if ((e as { status?: number }).status === 404) return; throw e; }
+    if (treeRef.current !== treeId || ticket !== mapRevision.current) return;
+    const orphaned = orphanedWorkspaceNodes(treeId, nodes.map(node => node.id));
+    if (orphaned.length) removeWorkspace({ treeId, nodeIds: orphaned }, false);
+    setTreeNodes(keepIfSame(nodes));
+    const focus = focusRef.current;
+    if (focus === null || abortRef.current || nodes.some(node => node.id === focus)) return;
+    // The open question was deleted elsewhere; return to the start of the topic.
+    const start = nodes.find(node => node.parent_id == null)?.id ?? nodes[0]?.id;
+    if (start !== undefined) await selectNode(start);
+  }
+
+  async function syncThread() {
+    const nodeId = focusRef.current, treeId = treeRef.current;
+    // A local answer reloads its own thread when it ends.
+    if (nodeId === null || abortRef.current) return;
+    const ticket = navigation.current.peek();
+    let rows: ThreadNode[];
+    try { rows = await api.getThread(nodeId); }
+    catch (e) { if ((e as { status?: number }).status === 404) return; throw e; }
+    if (navigation.current.current(ticket) && focusRef.current === nodeId && treeRef.current === treeId && !abortRef.current)
+      setThread(keepIfSame(rows));
+  }
+
+  // Stop an answer started in another window or on another device.
+  async function stopNode(nodeId: number) {
+    try { await api.stop(nodeId); await syncThread(); }
+    catch (e) { setErr(String((e as Error).message ?? e)); }
   }
 
   async function createTree(title: string) {
@@ -343,39 +410,60 @@ export default function App() {
       accepted = true;
       payload.onAccepted?.(nodeId);
     };
+    const handlers: AskHandlers = {
+      onStart: meta => { setReconnecting(false); streamTargetRef.current = meta.node_id ?? fromId; acceptQuestion(streamTargetRef.current); void refreshTree(treeId).catch(() => {}); },
+      onDelta: d => setLive(p => p + d),
+      onReasoning: r => setLiveReasoning(p => p + r),
+      onContextStatus: status => {
+        if (abortRef.current === ctrl && contextStatusRequestRef.current === requestId && !ctrl.signal.aborted)
+          setContextStatus(status);
+      },
+      onToolStart: name => setLiveSteps(s => [...s, { tool: name, result: null }]),
+      onToolEnd: (name, result) => setLiveSteps(s => {
+        const copy = [...s];
+        const index = copy.map(x => x.result === null).lastIndexOf(true);
+        if (index >= 0) copy[index] = { tool: name, result };
+        return copy;
+      }),
+    };
+    let unreachable = false;
     try {
-      const meta = await api.ask(fromId, {
-        question: payload.question, config_id: activeModelId,
-        images: payload.images, document_ids: payload.document_ids, tools: payload.tools, deep_think: payload.deep,
-        mode: payload.mode, request_id: requestId, question_message_id: payload.question_message_id,
-      }, {
-        onStart: meta => { streamTargetRef.current = meta.node_id ?? fromId; acceptQuestion(streamTargetRef.current); void refreshTree(treeId).catch(() => {}); },
-        onDelta: d => setLive(p => p + d),
-        onReasoning: r => setLiveReasoning(p => p + r),
-        onContextStatus: status => {
-          if (abortRef.current === ctrl && contextStatusRequestRef.current === requestId && !ctrl.signal.aborted)
-            setContextStatus(status);
-        },
-        onToolStart: name => setLiveSteps(s => [...s, { tool: name, result: null }]),
-        onToolEnd: (name, result) => setLiveSteps(s => {
-          const copy = [...s];
-          const index = copy.map(x => x.result === null).lastIndexOf(true);
-          if (index >= 0) copy[index] = { tool: name, result };
-          return copy;
-        }),
-      }, ctrl.signal);
+      let meta: AskMeta;
+      try {
+        meta = await api.ask(fromId, {
+          question: payload.question, config_id: activeModelId,
+          images: payload.images, document_ids: payload.document_ids, tools: payload.tools, deep_think: payload.deep,
+          mode: payload.mode, request_id: requestId, question_message_id: payload.question_message_id,
+        }, handlers, ctrl.signal);
+      } catch (e) {
+        if (!isStreamLost(e) || ctrl.signal.aborted) throw e;
+        // The answer keeps running on the server, e.g. after a phone locks: reattach when reachable.
+        setReconnecting(true);
+        meta = await resumeAnswer({
+          follow: after => api.follow(fromId, requestId, after, handlers, ctrl.signal),
+          lost: e.meta,
+          signal: ctrl.signal,
+          // Without a start event the question may never have arrived; Stop ends an accepted one.
+          attempts: e.meta.node_id === undefined ? 2 : Infinity,
+          onLost: () => setReconnecting(true),
+        });
+      }
       streamTargetRef.current = meta.node_id ?? streamTargetRef.current ?? fromId;
       acceptQuestion(streamTargetRef.current);
       succeeded = true;
     } catch (e: any) {
+      unreachable = isStreamLost(e);
       if (e?.meta?.node_id && e.meta.request_id === requestId) {
         streamTargetRef.current = e.meta.node_id;
         // A 409 may point to another request already running on this node.
         acceptQuestion(e.meta.node_id);
       }
       if (e?.name !== 'AbortError' && treeRef.current === treeId && focusRef.current === origin)
-        setErr(String(e?.message ?? e));
+        setErr(unreachable
+          ? t("连接中断，暂时无法确认回答状态；恢复连接后会自动更新。", "Connection lost. The response status is unknown; this page updates when the connection returns.")
+          : String(e?.message ?? e));
     } finally {
+      setReconnecting(false);
       if (contextStatusRequestRef.current === requestId) {
         contextStatusRequestRef.current = null;
         setContextStatus(null);
@@ -386,7 +474,7 @@ export default function App() {
         if (target && treeRef.current === treeId && (focusRef.current === origin || focusRef.current === target))
           await selectNode(target);
       } catch (e) {
-        if (treeRef.current === treeId) setErr(t("回答已结束，刷新记录失败，请重新选择节点。", "The response ended, but the history could not be refreshed. Select the node again."));
+        if (treeRef.current === treeId && !unreachable) setErr(t("回答已结束，刷新记录失败，请重新选择节点。", "The response ended, but the history could not be refreshed. Select the node again."));
       }
       abortRef.current = null; requestRef.current = null; streamTargetRef.current = null;
       setStreaming(false); setStreamFromId(null); setLive(''); setLiveReasoning('');
@@ -586,6 +674,7 @@ export default function App() {
         liveReasoning={liveReasoning}
         liveSteps={liveSteps}
         contextStatus={contextStatus}
+        reconnecting={reconnecting}
         pendingQuestion={pendingQuestion}
         sendingImages={sendingImages}
         sendingDocuments={sendingDocuments}
@@ -599,6 +688,7 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
         onAsk={onAsk}
         onStop={onStop}
+        onStopNode={nodeId => void stopNode(nodeId)}
         onBranch={onBranch}
         onDeleteNode={onDeleteNode}
         rightOpen={rightOpen}

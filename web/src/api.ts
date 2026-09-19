@@ -13,6 +13,7 @@ import type {
   PreferenceSupplementsPage,
   MemoryRetrievalStatus,
   ModelCfg,
+  PhoneAccess,
   ModelInput,
   NodeDetail,
   ThreadNode,
@@ -50,6 +51,57 @@ export interface AskMeta {
   error?: string;
   status?: string;
   request_id?: string;
+  /** Last replayable event received; reattaching continues after it. */
+  seq?: number;
+}
+
+/** Record IDs changed elsewhere since `cursor`; `reload` means this page may have missed some. */
+export interface ChangeNotice {
+  cursor: string;
+  reload: boolean;
+  topics: boolean;
+  models: boolean;
+  mcp: boolean;
+  memory: boolean;
+  /** Changed node IDs keyed by topic ID. */
+  trees: Record<string, number[]>;
+}
+
+export type StreamLost = Error & { meta: AskMeta; lost: true };
+
+/** The connection ended before the answer did; the server may still be generating it. */
+export function isStreamLost(error: unknown): error is StreamLost {
+  return typeof error === "object" && error !== null && (error as { lost?: unknown }).lost === true;
+}
+
+const streamLost = (meta: AskMeta): StreamLost =>
+  Object.assign(new Error(localizeError("连接中断，已保留问题，可重试。")), { meta, lost: true as const });
+
+async function relay(res: Response, on: AskHandlers, start: AskMeta, signal?: AbortSignal): Promise<AskMeta> {
+  if (!res.ok) throw await requestError(res);
+  if (!res.body) throw new Error(localizeError("没有收到回答数据，请重试。"));
+  let meta = start;
+  let completed = false;
+  let failure: string | null = null;
+  try {
+    await readSSE(res.body, obj => {
+      if (typeof obj.seq === 'number') meta = { ...meta, seq: obj.seq };
+      if (obj.started) { meta = { ...meta, ...obj }; on.onStart?.(meta); }
+      if (typeof obj.delta === 'string') on.onDelta(obj.delta);
+      if (typeof obj.reasoning === 'string') on.onReasoning?.(obj.reasoning);
+      if (obj.context_status === 'summarizing' || obj.context_status === 'ready') on.onContextStatus?.(obj.context_status);
+      if (obj.tool_start) on.onToolStart?.(obj.tool_start.name, obj.tool_start.args);
+      if (obj.tool_end) on.onToolEnd?.(obj.tool_end.name, obj.tool_end.result);
+      if (obj.error) { failure = obj.error; meta = { ...meta, ...obj }; }
+      if (obj.done) { completed = true; meta = { ...meta, ...obj }; }
+    });
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw streamLost(meta);
+  }
+  if (failure) throw Object.assign(new Error(localizeError(failure)), { meta });
+  if (!completed) throw streamLost(meta);
+  return meta;
 }
 
 export interface AskBody {
@@ -181,32 +233,42 @@ export const api = {
     method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ learning_note }),
   }).then(j<unknown>),
 
-  // Stream text, reasoning, and tool-step callbacks; return completion metadata. The signal can abort the request.
-  async ask(nodeId: number, body: AskBody, on: AskHandlers, signal?: AbortSignal): Promise<AskMeta> {
-    const res = await fetch(`${API}/nodes/${nodeId}/ask`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-      signal,
-    });
-    if (!res.ok) throw await requestError(res);
-    if (!res.body) throw new Error(localizeError("没有收到回答数据，请重试。"));
+  phoneAccess: (signal?: AbortSignal) => fetch(`${API}/phone-access`, { signal, cache: "no-store" }).then(j<PhoneAccess>),
 
-    let meta: AskMeta = {};
-    let completed = false;
-    let failure: string | null = null;
-    await readSSE(res.body, obj => {
-      if (obj.started) { meta = { ...meta, ...obj }; on.onStart?.(meta); }
-      if (typeof obj.delta === 'string') on.onDelta(obj.delta);
-      if (typeof obj.reasoning === 'string') on.onReasoning?.(obj.reasoning);
-      if (obj.context_status === 'summarizing' || obj.context_status === 'ready') on.onContextStatus?.(obj.context_status);
-      if (obj.tool_start) on.onToolStart?.(obj.tool_start.name, obj.tool_start.args);
-      if (obj.tool_end) on.onToolEnd?.(obj.tool_end.name, obj.tool_end.result);
-      if (obj.error) { failure = obj.error; meta = { ...meta, ...obj }; }
-      if (obj.done) { completed = true; meta = { ...meta, ...obj }; }
-    });
-    if (failure) throw Object.assign(new Error(localizeError(failure)), { meta });
-    if (!completed) throw Object.assign(new Error(localizeError('连接中断，已保留问题，可重试。')), { meta });
-    return meta;
+  changes: (since: string, signal?: AbortSignal) =>
+    fetch(`${API}/changes?${new URLSearchParams({ since })}`, { signal, cache: "no-store" }).then(j<ChangeNotice>),
+
+  // Stream text, reasoning, and tool-step callbacks; return completion metadata. The signal can abort the request.
+  // A dropped connection throws a StreamLost error: the answer keeps running on the server.
+  async ask(nodeId: number, body: AskBody, on: AskHandlers, signal?: AbortSignal): Promise<AskMeta> {
+    let res: Response;
+    try {
+      res = await fetch(`${API}/nodes/${nodeId}/ask`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+        signal,
+      });
+    } catch (error) {
+      // Unknown whether the question arrived; reattaching by request ID finds out.
+      if (signal?.aborted) throw error;
+      throw streamLost({ request_id: body.request_id });
+    }
+    return relay(res, on, {}, signal);
+  },
+
+  // Reattach to an accepted answer, receiving only events after `after`.
+  async follow(nodeId: number, requestId: string, after: number, on: AskHandlers, signal?: AbortSignal): Promise<AskMeta> {
+    const resumed: AskMeta = { request_id: requestId, seq: after };
+    let res: Response;
+    try {
+      res = await fetch(`${API}/nodes/${nodeId}/stream?${new URLSearchParams({ request_id: requestId, after: String(after) })}`, { signal, cache: "no-store" });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw streamLost(resumed);
+    }
+    // A proxy in front of a sleeping or restarting server answers 502–504.
+    if (res.status >= 500) throw streamLost(resumed);
+    return relay(res, on, resumed, signal);
   },
 };
