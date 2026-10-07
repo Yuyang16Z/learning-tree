@@ -56,3 +56,30 @@ jobs:
         run: node web/node_modules/playwright/cli.js install chromium --only-shell --with-deps
       - name: Isolated browser smoke test
         run: uv run python scripts/manage.py e2e
+  docker:
+    name: Container image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build image
+        run: docker build --tag learning-tree:ci .
+      - name: Start container with the mock model
+        run: >-
+          docker run --detach --name learning-tree -p 127.0.0.1:8099:8099
+          -e DEFAULT_API_KEY=mock -e DEFAULT_BASE_URL=https://mock.invalid/v1
+          -e DEFAULT_LLM_MODEL=mock learning-tree:ci
+      - name: Wait for the health check
+        run: |
+          for _ in $(seq 1 60); do
+            [ "$(docker inspect --format '{{.State.Health.Status}}' learning-tree)" = healthy ] && exit 0
+            sleep 1
+          done
+          exit 1
+      - name: Runs as a non-root user
+        run: test "$(docker exec learning-tree id -u)" != 0
+      - name: API smoke test against the container
+        run: python3 scripts/docker_smoke.py http://127.0.0.1:8099
+      - name: Container logs
+        if: always()
+        run: docker logs learning-tree || true
