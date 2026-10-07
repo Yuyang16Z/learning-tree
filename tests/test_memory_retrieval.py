@@ -374,6 +374,8 @@ def test_authoritative_memory_deletion_cannot_be_revived_by_vector_cache(session
     memory = remember(session, "需要被删除的 schema 规则。")
     backend = Backend([memory.content])
     assert ids(retrieve_memory(session, 1, [1], query="schema", backend=backend)) == {memory.id}
+    # Like the memory API: cached vectors go with the memory (enforced foreign key).
+    session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory.id))
     session.delete(memory)
     session.commit()
     result = retrieve_memory(session, 1, [1], query="schema", backend=backend)

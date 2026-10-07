@@ -1,0 +1,13 @@
+# docker compose up --build  ->  http://127.0.0.1:8099
+services:
+  learning-tree:
+    build: .
+    image: learning-tree:local
+    ports:
+      - "127.0.0.1:8099:8099" # Loopback only: the API has no authentication.
+    volumes:
+      - learning-tree-data:/data
+    restart: unless-stopped
+
+volumes:
+  learning-tree-data:

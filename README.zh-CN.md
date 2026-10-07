@@ -71,6 +71,16 @@ uv run --inexact python desktop/macos/build.py --install
 
 在「应用程序」里打开 **LearningTree / 学习树** 即可使用，不需要另开终端，也不默认创建桌面快捷方式。应用会复用已经运行的服务；服务未运行时，先备份记录再自动启动。聊天记录、模型配置和文档沿用原项目，桌面版的草稿和界面偏好与浏览器分别保存。请保留原项目文件夹；这是本机桌面版，还不是可直接分发到其他电脑的独立安装包。详见[桌面版安装与使用](desktop/macos/README.md)。
 
+### Docker
+
+在容器中构建并运行，端口只发布到本机回环地址（API 没有账户鉴权）：
+
+```bash
+docker compose up --build
+```
+
+打开 **http://127.0.0.1:8099**。对话、文档和设置保存在 `learning-tree-data` 卷里（`/data/learning_tree.db`）；镜像只包含源码和锁定的依赖，以非 root 用户运行，不包含 MCP 预设和可选的语义模型。需要用其他主机名访问时设置 `ALLOWED_HOSTS`（见 [SECURITY.md](SECURITY.md)）。CI 会构建镜像，并用 mock 模型对容器运行 `scripts/docker_smoke.py`。
+
 ### 可选：语义记忆检索
 
 ```sh

@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "sqlite:///./branch_learning.db"
+    # Extra Host names to accept besides loopback names and Tailscale (*.ts.net),
+    # comma-separated, e.g. "learning.local". Other hosts are rejected (DNS rebinding).
+    allowed_hosts: str = ""
     memory_retrieval_mode: Literal["hybrid", "lexical"] = "hybrid"
 
     # Seed this default model at startup if a key is configured and no models exist.

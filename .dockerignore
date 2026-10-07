@@ -1,0 +1,15 @@
+# Allowlist: only the source needed for the image enters the build context, so local
+# databases, model keys, backups and learning materials can never be copied in.
+*
+!app/
+!integrations/
+!web/
+!pyproject.toml
+!uv.lock
+web/node_modules/
+web/dist/
+integrations/mcp/node_modules/
+**/__pycache__/
+**/*.db
+**/*.db-*
+**/.env*

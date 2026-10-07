@@ -71,6 +71,16 @@ uv run --inexact python desktop/macos/build.py --install
 
 Open **LearningTree** from Applications. The app reuses a running local server or backs up your data and starts it automatically, without opening Terminal. Chats, model settings and documents use the existing project; desktop drafts and interface preferences are stored separately from your browser. Keep the project folder in place. This is a local desktop installation, not a standalone installer for other computers. See [desktop setup and behavior](desktop/macos/README.md).
 
+### Docker
+
+Build and run the app in a container, publishing the port on loopback only (the API has no authentication):
+
+```bash
+docker compose up --build
+```
+
+Open **http://127.0.0.1:8099**. Chats, documents and settings live in the `learning-tree-data` volume (`/data/learning_tree.db`); the image contains only source code and locked dependencies and runs as a non-root user. MCP presets and optional semantic models are not installed in the image. To reach the container under another host name, set `ALLOWED_HOSTS` (see [SECURITY.md](SECURITY.md)). CI builds the image and runs `scripts/docker_smoke.py` against it with the mock model.
+
 ### Optional semantic memory
 
 ```sh
