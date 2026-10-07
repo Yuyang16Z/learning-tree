@@ -94,6 +94,8 @@ const diagnostics: [string, string][] = [
   ["模型没有返回回答，请重试。", "The model returned no answer. Try again."],
   ["生成中断，可重试。", "Generation was interrupted. You can retry."],
   ["连接中断，可重试。", "The connection was interrupted. You can retry."],
+  ["节点已删除。", "This node was deleted."],
+  ["服务器没有收到这个问题，请重新发送。", "The server did not receive this question. Send it again."],
   ["回答保存失败，请检查磁盘空间后重试。", "The response could not be saved. Check disk space and try again."],
   ["模型连接在回答完成前断开，可以重试。", "The model disconnected before completing the response. You can retry."],
   ["模型回答未完整结束，可以重试。", "The model response is incomplete. You can retry."],

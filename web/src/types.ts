@@ -96,6 +96,13 @@ export interface MemoryFactsPage {
   page_size: number;
   topics: { tree_id: number | null; title: string; count: number }[];
 }
+/** How a phone on the same Tailscale network can open this workspace. */
+export interface PhoneAccess {
+  state: 'not_installed' | 'offline' | 'not_served' | 'ready' | 'public';
+  url?: string;
+  host?: string | null;
+  command?: string;
+}
 export interface MemoryRetrievalStatus {
   state: 'ready' | 'preparing' | 'degraded' | 'disabled' | 'not_installed';
   embedding_ready: boolean;

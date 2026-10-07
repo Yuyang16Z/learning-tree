@@ -326,8 +326,7 @@ def test_stop_during_summary_does_not_wait_for_provider_or_begin_answer(api, mon
         release.set()
         worker.join(5)
     assert not errors and not worker.is_alive()
-    while generation.events.get(timeout=3) is not None:
-        pass
+    assert generation.finished.wait(3)
     assert not calls["stream"] and not calls["agent"]
 
 
@@ -578,7 +577,7 @@ def test_stop_during_slow_context_preflight_prevents_memory_discovery_and_models
         release.set()
         worker.join(5)
         if generation is not None:
-            assert generation.events.get(timeout=3) is None
+            assert generation.finished.wait(3) and not generation.log
     assert not worker.is_alive() and not errors
     assert not any(calls[name] for name in calls), (
         "cancelled preflight must not start downstream work"

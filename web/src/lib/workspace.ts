@@ -8,6 +8,8 @@ export function saveValue(key: string, value: unknown) {
 export class NavigationGate {
   private revision = 0;
   next() { return ++this.revision; }
+  /** A background reload's ticket: valid until the next navigation, without cancelling one in progress. */
+  peek() { return this.revision; }
   current(ticket: number) { return ticket === this.revision; }
 }
 

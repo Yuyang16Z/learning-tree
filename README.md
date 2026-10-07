@@ -25,6 +25,8 @@ The images use synthetic content and the offline demo model. They demonstrate th
 - Branch titles summarize the first question you ask, rather than copying the source answer. A new empty branch shows “New branch”.
 - Save your understanding and bring it into the main conversation as an editable draft.
 - Edit a question as a new version, retry interrupted answers, and keep the original record.
+- Answers keep generating on the server when a page closes or a connection drops, and the page reconnects on its own. Other open windows see new questions, branches, settings and running answers within a few seconds.
+- Open the same workspace on your phone through a private Tailscale network: **Settings → Phone access** shows the one-time setup command and a QR code. On touch screens, selection actions dock at the bottom and text fields avoid iOS focus zoom. See [phone access](docs/operations.md#phone-access).
 - Copy a question or answer from its compact action bar. One attachment button accepts both images and documents, including a mixed selection.
 - Attach PDFs, Word `.docx` files or text documents to a question; preview parsed text, retain the original and keep references through follow-ups, retries and revisions. See [formats, limits and how text reaches the model](docs/documents.md).
 - Budget long conversations per model: keep recent full turns, extract cited source sentences from older context, and let the agent reread eligible originals when needed.
@@ -146,7 +148,7 @@ Chats, notes, document originals and parsed text, model keys and tool configurat
 
 Existing memory IDs and content are preserved. SQLite adds a rebuildable `MemoryEmbedding` cache keyed by memory and model revision, with a content hash to detect stale text; deleting memories or their source nodes removes the associated cache entries. Public model weights live in `.runtime/retrieval/models/`. Deleting a memory does not delete the original conversation: the same information may still appear in active-path chat history. Local retrieval does not send text to a separate retrieval service; selected memories still accompany the prompt sent to your configured answer model.
 
-The API has no account authentication; configured MCP servers can execute local programs. Supplied commands bind to `127.0.0.1`. Internet or shared-server deployment requires additional access controls and is outside this release's scope. See [security policy](SECURITY.md).
+The API has no account authentication; configured MCP servers can execute local programs. Supplied commands bind to `127.0.0.1`. Internet or shared-server deployment requires additional access controls and is outside this release's scope; reach it from a phone only through a private network such as [Tailscale Serve](docs/operations.md#phone-access). See [security policy](SECURITY.md).
 
 Databases, keys, `.env`, private learning files, backups and generated artifacts are excluded from Git. Only synthetic examples are included in this repository.
 

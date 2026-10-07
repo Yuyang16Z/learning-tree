@@ -96,6 +96,7 @@
 .chat-retry details { margin-left: auto; max-width: 100%; overflow-wrap: anywhere; }
 .chat-retry summary { cursor: pointer; }
 .chat-retry p { max-height: 90px; overflow: auto; }
+.chat-remote-answer > button { margin-left: auto; }
 .chat-latest { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); padding: 6px 13px; border-radius: 20px; background: var(--bg); border: 1px solid var(--border); box-shadow: 0 3px 12px #00000008; font-size: 11px !important; color: var(--muted); }
 .chat-compose-area { flex: none; padding: 0 28px 24px; width: 100%; max-width: 806px; margin: 0 auto; }
 .chat-compose-box { border: 1px solid var(--border-strong); border-radius: 17px; padding: 14px 14px 10px; background: var(--bg); box-shadow: 0 3px 15px #00000004; transition: border-color .15s, box-shadow .15s; }
@@ -151,6 +152,12 @@
 .chat-selection-footer > button:not(.chat-explain-button) { border: 0; background: none; padding: 6px 0; color: var(--muted); font-size: 11px; }
 .chat-selection-error { color: var(--danger); font-size: 11px; overflow-wrap: anywhere; }
 .chat-selection-error button { display: block; background: none; border: 0; color: var(--teal); padding: 8px 0 0; }
+/* On touch screens the system menu and selection handles surround the text, so actions dock at the bottom. */
+.chat-selection-card.is-docked { left: 12px; right: 12px; bottom: 12px; width: auto; max-width: none; max-height: min(60dvh, calc(100dvh - 24px)); font-size: 14px; }
+.chat-selection-card.is-docked.is-compact { flex-wrap: nowrap; gap: 6px; padding: 6px; }
+.chat-selection-card.is-docked.is-compact :is(.chat-copy-button, .chat-explain-button, .chat-selection-branch) { flex: 1; height: 44px; font-size: 14px !important; }
+.chat-selection-card.is-docked .chat-selection-content .chat-markdown { font-size: 14px; }
+.chat-selection-card.is-docked .chat-selection-footer > button { min-height: 40px; }
 .chat-explaining { color: var(--muted); font-size: 11px; }
 .chat-typing { letter-spacing: 4px; color: var(--muted); animation: chat-pulse 1.3s infinite; }
 .chat-source-flash { border-radius: 6px; animation: chat-source-outline 3.5s ease-out; }

@@ -65,6 +65,16 @@ Enabling an MCP server makes its tools available; it can expose many individual 
 
 If the app reports that a question, quotation, image or individual tool definition exceeds the budget, shorten the mandatory input, reduce attached images, use a smaller relevant tool, or correct the configured window if the provider supports more. An oversized individual schema is reported when requested; enabling a large server no longer automatically sends every definition in every model request. Raising the setting beyond the provider's capacity cannot make the model accept it. Earlier derived context and tool-result bodies may be explicitly shortened in later requests, while stored originals remain intact. See [the context-budget guide](context-budget.md) for source references, protocol handling and compression limits.
 
+## Phone access
+
+A phone uses this computer's backend directly, so records, models and MCP settings are shared without any synchronization. The API has no sign-in: reach it only through a private network you control.
+
+1. Install [Tailscale](https://tailscale.com/download) on this computer and the phone, and sign in to the same account.
+2. Run `tailscale serve --bg 8099` once; the setting persists. It serves `https://<computer>.<tailnet>.ts.net` with a certificate, only to devices in your tailnet. HTTPS is required: the app uses browser features that exist only in secure contexts, so a plain `http://` network address cannot send questions.
+3. Open **Settings → Phone access** and scan the QR code. The panel only reads Tailscale status; it never changes it.
+
+Keep the computer awake while you use it remotely, for example by preventing automatic sleep on the power adapter; a sleeping computer cannot answer. An answer started on the phone keeps running if the phone locks, and the page reconnects when it returns to the foreground. Do not use Tailscale Funnel, router port forwarding or public tunnels: anyone who reaches the API can read your records and run MCP programs on this computer. The panel warns when Funnel exposes the app; `tailscale funnel reset` removes the exposure.
+
 ## Updating and restoring
 
 1. Let active answers finish and stop the app.

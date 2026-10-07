@@ -438,7 +438,7 @@ def test_delete_failed_retry_subtree_preserves_successful_sibling_revision(setup
         reasoning=["Late reasoning"],
         steps=[{"tool": "fixture"}],
     )
-    pending.events.put({"type": "delta", "text": "Buffered answer"})
+    pending.emit({"delta": "Buffered answer"})
     unrelated = nodes.Generation(request_id="unrelated", text=["Keep buffer"])
     nodes._GENERATIONS.update({child_id: pending, other["root_node_id"]: unrelated})
     nodes._TITLE_JOBS.update(
@@ -467,7 +467,7 @@ def test_delete_failed_retry_subtree_preserves_successful_sibling_revision(setup
     assert (
         pending.stop.is_set() and not pending.text and not pending.reasoning and not pending.steps
     )
-    assert pending.events.empty() and child_id not in nodes._GENERATIONS
+    assert not pending.log and child_id not in nodes._GENERATIONS
     assert failed_id not in nodes._TITLE_JOBS and child_id not in nodes._TITLE_JOBS
     assert nodes._TITLE_JOBS[revision_id] == "keep-title"
     assert not unrelated.stop.is_set() and unrelated.text == ["Keep buffer"]

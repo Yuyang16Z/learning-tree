@@ -1,9 +1,8 @@
-"""Durable Q/A nodes: revisions, retries, source anchors and cancellable streams."""
+"""Durable Q/A nodes: revisions, retries, source anchors and resumable streams."""
 
 import asyncio
 import copy
 import json
-import queue
 import threading
 import time
 from dataclasses import dataclass, field
@@ -63,8 +62,11 @@ class Generation:
     request_id: str
     label: str = ""
     stop: threading.Event = field(default_factory=threading.Event)
+    finished: threading.Event = field(default_factory=threading.Event)
     lock: threading.RLock = field(default_factory=threading.RLock)
-    events: queue.Queue = field(default_factory=queue.Queue)
+    # Stream events in order. Viewers keep their own position, so a dropped
+    # connection or a second device can resume without consuming anyone's events.
+    log: list[dict] = field(default_factory=list)
     text: list[str] = field(default_factory=list)
     reasoning: list[str] = field(default_factory=list)
     steps: list[dict] = field(default_factory=list)
@@ -72,9 +74,14 @@ class Generation:
     error: str | None = None
     message_id: int | None = None
 
+    def emit(self, event: dict) -> None:
+        with self.lock:
+            self.log.append(event)
+
 
 _GENERATIONS: dict[int, Generation] = {}
 _CANCELLED_REQUESTS: dict[tuple[int, str], float] = {}
+_STREAM_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 
 def discard_node_work(node_ids) -> None:
@@ -89,11 +96,7 @@ def discard_node_work(node_ids) -> None:
                 generation.text.clear()
                 generation.reasoning.clear()
                 generation.steps.clear()
-                while not generation.events.empty():
-                    try:
-                        generation.events.get_nowait()
-                    except queue.Empty:
-                        break
+                generation.log.clear()
 
 
 def _snapshot(model):
@@ -106,6 +109,66 @@ def _snapshot(model):
 
 def _sse(obj: dict) -> str:
     return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
+
+
+def _outcome(generation: Generation, node_id: int) -> dict:
+    with generation.lock:
+        if generation.status == "complete":
+            return {
+                "done": True,
+                "node_id": node_id,
+                "request_id": generation.request_id,
+                "message_id": generation.message_id,
+                "answered_by": generation.label,
+                "status": "complete",
+            }
+        return {
+            "error": generation.error or "生成中断，可重试。",
+            "node_id": node_id,
+            "request_id": generation.request_id,
+            "status": "interrupted" if generation.status == "pending" else generation.status,
+        }
+
+
+def _stored_outcome(session: Session, node: Node) -> dict:
+    """The final event for an answer that is no longer running in this process."""
+    if node.status == "complete":
+        answer = next(
+            (m for m in reversed(get_messages(session, node.id)) if m.role == "assistant"), None
+        )
+        return {
+            "done": True,
+            "node_id": node.id,
+            "request_id": node.request_id,
+            "message_id": answer.id if answer else None,
+            "answered_by": answer.answered_by if answer else None,
+            "status": "complete",
+        }
+    return {
+        "error": node.error or "生成中断，可重试。",
+        "node_id": node.id,
+        "request_id": node.request_id,
+        "status": node.status if node.status in ("error", "interrupted") else "interrupted",
+    }
+
+
+async def _follow(generation: Generation, node_id: int, opening: dict, after: int = 0):
+    """Relay events after `after` to one viewer. Leaving never stops the answer; Stop does."""
+    yield _sse(opening)
+    sent = max(0, after)
+    while True:
+        with generation.lock:
+            fresh = generation.log[sent:]
+            ended = generation.finished.is_set() or generation.stop.is_set()
+        for seq, event in enumerate(fresh, sent + 1):
+            yield _sse(
+                {**event, "seq": seq, "node_id": node_id, "request_id": generation.request_id}
+            )
+        sent += len(fresh)
+        if ended:
+            break
+        await asyncio.sleep(0.025)
+    yield _sse(_outcome(generation, node_id))
 
 
 def node_metadata(node: Node, messages: list[Message] | None = None) -> dict:
@@ -566,6 +629,30 @@ def stop(
     return {"node_id": node_id, "status": "interrupted" if generation else node.status}
 
 
+@router.get("/{node_id}/stream")
+def follow(
+    node_id: int, request_id: str, after: int = 0, session: Session = Depends(get_session)
+) -> StreamingResponse:
+    """Reattach to an answer after a dropped connection, e.g. a phone locking mid-reply."""
+    with _REQUEST_LOCK:
+        node = _get(session, node_id)
+        target = session.exec(
+            select(Node).where(Node.tree_id == node.tree_id, Node.request_id == request_id)
+        ).first()
+        if target is None:
+            raise HTTPException(
+                404, {"message": "服务器没有收到这个问题，请重新发送。", "status": "missing"}
+            )
+        opening = {"started": True, "resumed": True, "node_id": target.id, "request_id": request_id}
+        generation = _GENERATIONS.get(target.id)
+        if generation is not None and generation.request_id == request_id:
+            events = _follow(generation, target.id, {**opening, "status": "pending"}, after)
+        else:
+            outcome = _stored_outcome(session, target)
+            events = iter([_sse({**opening, "status": outcome["status"]}), _sse(outcome)])
+    return StreamingResponse(events, media_type="text/event-stream", headers=_STREAM_HEADERS)
+
+
 @router.post("/{node_id}/ask")
 def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> StreamingResponse:
     title_needed = False
@@ -918,7 +1005,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             if context_stats["compacted"] and not is_mock:
                 # Tool selection and source-reader overhead are now final. Only
                 # this pass may generate a summary; preflight never calls a model.
-                generation.events.put({"context_status": "summarizing"})
+                generation.emit({"context_status": "summarizing"})
                 try:
                     request_system, llm_messages = build_context(
                         ancestors,
@@ -944,7 +1031,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                         ),
                     )
                 finally:
-                    generation.events.put({"context_status": "ready"})
+                    generation.emit({"context_status": "ready"})
                 if generation.stop.is_set():
                     return
             if title_needed:
@@ -997,7 +1084,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     else:
                         generation.text.append(event["text"])
                         outgoing = {"delta": event["text"]}
-                    generation.events.put(outgoing)
+                    generation.log.append(outgoing)
                 if time.monotonic() - last_checkpoint >= 0.5:
                     _persist(target_id, generation, spec.label)
                     last_checkpoint = time.monotonic()
@@ -1046,81 +1133,29 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     "error",
                     "回答保存失败，请检查磁盘空间后重试。",
                 )
-            generation.events.put(None)
 
-    async def events():
-        worker = threading.Thread(target=produce, daemon=True)
-        worker.start()
+    def run():
+        # The answer belongs to the server, not to one connection: closing the
+        # page or locking a phone leaves it running, and viewers can reattach.
         try:
-            yield _sse(
-                {
-                    "started": True,
-                    "node_id": target_id,
-                    "request_id": request_id,
-                    "status": "pending",
-                }
-            )
-            while True:
-                if generation.stop.is_set():
-                    break
-                try:
-                    event = generation.events.get_nowait()
-                except queue.Empty:
-                    await asyncio.sleep(0.025)
-                    continue
-                if event is None:
-                    break
-                yield _sse({**event, "node_id": target_id, "request_id": request_id})
-            if generation.stop.is_set():
-                with generation.lock:
-                    generation.status, generation.error = "interrupted", "已停止，可重试。"
-                _persist(target_id, generation, spec.label)
-            if generation.status == "complete":
-                yield _sse(
-                    {
-                        "done": True,
-                        "node_id": target_id,
-                        "request_id": request_id,
-                        "message_id": generation.message_id,
-                        "answered_by": spec.label,
-                        "status": "complete",
-                    }
-                )
-            else:
-                yield _sse(
-                    {
-                        "error": generation.error or "生成中断，可重试。",
-                        "node_id": target_id,
-                        "request_id": request_id,
-                        "status": generation.status,
-                    }
-                )
+            produce()
         finally:
-            if generation.status == "pending":
-                with generation.lock:
-                    generation.stop.set()
-                    generation.status, generation.error = "interrupted", "连接中断，可重试。"
-            if generation.status == "interrupted":
-                _persist(target_id, generation, spec.label)
+            generation.finished.set()
             with _REQUEST_LOCK:
                 if _GENERATIONS.get(target_id) is generation:
                     _GENERATIONS.pop(target_id, None)
         # Memory is derived only from completed answers and is source-scoped when
         # recalled; no extra model invocation for interrupted or demo answers.
         if generation.status == "complete" and not is_mock:
+            try:
+                extract_and_save(spec, tree_id, target_id, question_text, "".join(generation.text))
+            except Exception:
+                pass
 
-            def remember():
-                try:
-                    extract_and_save(
-                        spec, tree_id, target_id, question_text, "".join(generation.text)
-                    )
-                except Exception:
-                    pass
-
-            threading.Thread(target=remember, daemon=True).start()
-
+    threading.Thread(target=run, daemon=True).start()
+    opening = {"started": True, "node_id": target_id, "request_id": request_id, "status": "pending"}
     return StreamingResponse(
-        events(),
+        _follow(generation, target_id, opening),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers=_STREAM_HEADERS,
     )

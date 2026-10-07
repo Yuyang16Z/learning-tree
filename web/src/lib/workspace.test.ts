@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clearLegacyRecovery, deletionAffectsRequest, matchesDeletedWorkspace, orphanedWorkspaceNodes, orphanedWorkspaceTrees, purgeWorkspace } from './workspace';
+import { clearLegacyRecovery, deletionAffectsRequest, matchesDeletedWorkspace, NavigationGate, orphanedWorkspaceNodes, orphanedWorkspaceTrees, purgeWorkspace } from './workspace';
 
 function storageWith(values: Record<string, string>) {
   const data = new Map(Object.entries(values));
@@ -120,5 +120,16 @@ describe('permanent workspace cleanup', () => {
     purgeWorkspace({ treeId: 2 }, storage);
     expect(storage.getItem('bl-node:2')).toBeNull();
     expect(storage.getItem('bl-tree')).toBeNull();
+  });
+});
+
+describe('navigation tickets', () => {
+  it('let a background reload commit only until the next navigation, without cancelling one', () => {
+    const gate = new NavigationGate();
+    const navigation = gate.next();
+    const reload = gate.peek();
+    expect(gate.current(navigation) && gate.current(reload)).toBe(true);
+    gate.next();
+    expect(gate.current(reload)).toBe(false);
   });
 });
