@@ -1,10 +1,11 @@
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
 
@@ -60,6 +61,49 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_LOCAL_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
+_STATE_CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _hostname(host_header: str) -> str:
+    value = host_header.strip().lower()
+    if value.startswith("["):  # [::1]:8099
+        return value[1:].split("]", 1)[0]
+    return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
+
+
+def host_allowed(host_header: str) -> bool:
+    """Loopback names, Tailscale Serve names and configured extras only.
+
+    A DNS-rebinding page reaches this server under its own domain, so its Host header
+    gives it away even though the request arrives on 127.0.0.1."""
+    name = _hostname(host_header)
+    extra = {h.strip().lower() for h in settings.allowed_hosts.split(",") if h.strip()}
+    return name in _LOCAL_HOSTNAMES or name.endswith(".ts.net") or name in extra
+
+
+def origin_allowed(origin: str, host_header: str) -> bool:
+    """A local page on any port, or the same origin (for example Tailscale HTTPS)."""
+    parts = urlsplit(origin)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return False  # Includes "null" from sandboxed frames and file pages.
+    return parts.hostname in _LOCAL_HOSTNAMES or parts.netloc.lower() == host_header.lower()
+
+
+@app.middleware("http")
+async def reject_cross_site_requests(request: Request, call_next):
+    host = request.headers.get("host", "")
+    if not host_allowed(host):
+        return JSONResponse({"detail": "不允许的主机名"}, status_code=400)
+    origin = request.headers.get("origin")
+    # CORS only stops a foreign page from reading responses; a body-less cross-site POST
+    # still runs. State changes therefore require a local or same-origin page.
+    if request.method in _STATE_CHANGING and origin is not None:
+        if not origin_allowed(origin, host):
+            return JSONResponse({"detail": "不允许的跨站请求"}, status_code=403)
+    return await call_next(request)
+
 
 for module in (models_router, trees, nodes, mcp_router, memory_router):
     app.include_router(module.router)

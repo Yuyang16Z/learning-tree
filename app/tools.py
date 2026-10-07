@@ -12,6 +12,8 @@ import os
 
 import httpx
 
+from .url_guard import BlockedURL, guarded_get
+
 # OpenAI-compatible tool definitions sent to the model to expose available tools.
 TOOL_DEFS: dict[str, dict] = {
     "fetch": {
@@ -61,13 +63,14 @@ def _fetch(url: str) -> str:
     if not url:
         return "fetch 失败：没有提供 url"
     try:
-        resp = httpx.get(
-            url, timeout=10, follow_redirects=True, headers={"User-Agent": "branch-learning/0.2"}
-        )
+        # Only public addresses, re-checked on every redirect (see url_guard).
+        final_url, resp = guarded_get(url, headers={"User-Agent": "branch-learning/0.2"})
         text = resp.text
         if len(text) > 2000:
             text = text[:2000] + "…（已截断）"
-        return f"[fetch {url} → HTTP {resp.status_code}]\n{text}"
+        return f"[fetch {final_url} → HTTP {resp.status_code}]\n{text}"
+    except BlockedURL as e:
+        return f"fetch 已拒绝：{e}"
     except Exception as e:  # noqa: BLE001
         return f"fetch 失败：{type(e).__name__}: {e}"
 

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -97,13 +97,21 @@ class BranchIn(BaseModel):
     learning_note: str | None = Field(default=None, max_length=10000)
 
 
+# Match the composer: at most four images of 4 MiB each, sent as base64 data URLs.
+MAX_QUESTION_IMAGES = 4
+MAX_IMAGE_URL_CHARS = (4 * 1024 * 1024 * 4) // 3 + 128  # Base64 size plus the data-URL prefix.
+
+
 class AskIn(BaseModel):
     question: str = Field(default="", max_length=100000)
     mode: Literal["continue", "retry", "revise"] = "continue"
     question_message_id: int | None = None
     request_id: str | None = Field(default=None, max_length=100)
     config_id: int | None = None  # Omit to use the default model.
-    images: list[str] | None = None  # Attached data URIs included in model input.
+    # Attached data URIs included in model input.
+    images: list[Annotated[str, Field(max_length=MAX_IMAGE_URL_CHARS)]] | None = Field(
+        default=None, max_length=MAX_QUESTION_IMAGES
+    )
     document_ids: list[str] = Field(default_factory=list, max_length=4)
     tools: list[str] | None = None  # Tools enabled for this request, e.g. ["fetch", "web_search"].
     deep_think: bool = False  # Request reasoning and stream it separately from the answer.
