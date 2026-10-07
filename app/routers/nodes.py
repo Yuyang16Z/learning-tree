@@ -333,16 +333,30 @@ def delete_node(node_id: int, session: Session = Depends(get_session)) -> dict:
             session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory.id))
             session.delete(memory)
         # References outside the deleted subtree must not point to nonexistent nodes.
-        for node in session.exec(select(Node)).all():
+        for node in session.exec(
+            select(Node).where(Node.source_node_id.in_(ids) | Node.revision_of.in_(ids))
+        ).all():
             if node.id in ids:
-                session.delete(node)
-            elif node.source_node_id in ids or node.revision_of in ids:
-                if node.source_node_id in ids:
-                    node.source_node_id = node.source_message_id = None
-                    node.source_start = node.source_end = None
-                if node.revision_of in ids:
-                    node.revision_of = None
-                session.add(node)
+                continue
+            if node.source_node_id in ids:
+                node.source_node_id = node.source_message_id = None
+                node.source_start = node.source_end = None
+            if node.revision_of in ids:
+                node.revision_of = None
+            session.add(node)
+        # SQLite enforces the parent foreign key per statement, so delete children first.
+        doomed = {n.id: n for n in session.exec(select(Node).where(Node.id.in_(ids))).all()}
+        depth: dict[int, int] = {}
+
+        def _depth(node: Node) -> int:
+            if node.id not in depth:
+                parent = doomed.get(node.parent_id)
+                depth[node.id] = 0 if parent is None else _depth(parent) + 1
+            return depth[node.id]
+
+        for node in sorted(doomed.values(), key=_depth, reverse=True):
+            session.delete(node)
+            session.flush()
         session.commit()
     return {"deleted": sorted(ids)}
 

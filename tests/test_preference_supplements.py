@@ -246,6 +246,10 @@ def test_eligible_supplements_filter_status_scope_and_source_validity(setup):
             other_topic.id,
         }
         assert {row.id for row in eligible_supplements(session, None)} == {global_row.id}
+        # Like topic deletion in the app: the topic's nodes go first (enforced foreign key).
+        for node in session.exec(select(Node).where(Node.tree_id == 1)).all():
+            session.delete(node)
+        session.flush()
         session.delete(session.get(KnowledgeTree, 1))
         session.commit()
         assert not eligible_supplements(session, 1)

@@ -1,9 +1,63 @@
+import logging
+import sqlite3
 from collections.abc import Iterator
 
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from .config import settings
+
+logger = logging.getLogger(__name__)
+
+# Writers wait this long for a lock instead of failing at once with "database is locked".
+BUSY_TIMEOUT_MS = 5000
+
+
+@event.listens_for(Engine, "connect")
+def _configure_sqlite(dbapi_connection, _connection_record) -> None:
+    """Apply per-connection SQLite settings to every engine, including test engines.
+
+    SQLite leaves foreign keys unenforced unless each connection turns them on. WAL lets
+    readers continue while one writer commits; in-memory databases keep their own mode.
+    """
+    if not isinstance(dbapi_connection, sqlite3.Connection):
+        return
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        cursor.execute("PRAGMA journal_mode=WAL")
+    finally:
+        cursor.close()
+
+
+@event.listens_for(Engine, "begin")
+def _defer_foreign_keys(connection) -> None:
+    """Check foreign keys at COMMIT rather than per statement.
+
+    The ORM does not order inserts and deletes between tables without relationships, so a
+    child row can be written before its parent inside one flush. Deferral keeps enforcement
+    (a dangling reference still fails the commit) without depending on statement order.
+    SQLite clears this setting at every COMMIT or ROLLBACK, so it is set per transaction.
+    """
+    if connection.dialect.name == "sqlite":
+        connection.exec_driver_sql("PRAGMA defer_foreign_keys=ON")
+
+
+@event.listens_for(Engine, "handle_error")
+def _end_failed_commit(context) -> None:
+    """A COMMIT rejected by a deferred foreign key leaves SQLite's transaction open.
+
+    SQLAlchemy does not roll back the DBAPI connection after a failed commit, so the pooled
+    connection would carry the rejected writes into its next transaction. End it here.
+    """
+    if context.statement is not None or context.connection is None:
+        return  # Only commit failures: statement errors are rolled back normally.
+    dbapi_connection = context.connection.connection.dbapi_connection
+    if isinstance(dbapi_connection, sqlite3.Connection) and dbapi_connection.in_transaction:
+        dbapi_connection.rollback()
+
 
 engine = create_engine(
     settings.database_url,
@@ -63,6 +117,40 @@ def _ensure_columns() -> None:
                         )
 
 
+def _ensure_indexes() -> None:
+    """Back request-ID uniqueness with the database, not only the request lock."""
+    with engine.begin() as conn:
+        duplicate = conn.execute(
+            text(
+                "SELECT tree_id, request_id FROM node WHERE request_id IS NOT NULL "
+                "GROUP BY tree_id, request_id HAVING COUNT(*) > 1 LIMIT 1"
+            )
+        ).first()
+        if duplicate is not None:
+            # Never fail startup over legacy data; the request lock still serializes asks.
+            logger.warning(
+                "Skipping unique request index: tree %s reuses request %s",
+                duplicate[0],
+                duplicate[1],
+            )
+            return
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_node_tree_request "
+                "ON node (tree_id, request_id) WHERE request_id IS NOT NULL"
+            )
+        )
+
+
+def _report_foreign_key_violations() -> None:
+    """Older databases ran without enforcement; report orphans instead of failing startup."""
+    with engine.connect() as conn:
+        rows = conn.execute(text("PRAGMA foreign_key_check")).fetchall()
+    if rows:
+        tables = sorted({row[0] for row in rows})
+        logger.warning("%d row(s) reference missing parents in: %s", len(rows), ", ".join(tables))
+
+
 def init_db() -> None:
     from . import documents  # noqa: F401 -- register the additive document table
 
@@ -70,6 +158,8 @@ def init_db() -> None:
     # messages and branch attachments; the thread API presents every Q/A pair.
     SQLModel.metadata.create_all(engine)
     _ensure_columns()
+    _ensure_indexes()
+    _report_foreign_key_violations()
     from .models import Message, Node
     from .title_generation import fallback_title
 

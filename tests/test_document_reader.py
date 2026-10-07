@@ -8,7 +8,8 @@ os.environ["DEFAULT_API_KEY"] = ""
 os.environ["MEMORY_RETRIEVAL_MODE"] = "lexical"
 
 import pytest
-from sqlmodel import Session, SQLModel, create_engine
+from sqlalchemy import delete
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from app import document_context
 from app.document_context import make_document_reader
@@ -89,6 +90,18 @@ def sources(tmp_path):
         }
     yield engine, state
     engine.dispose()
+
+
+def _delete_subtree(session: Session, node_id: int) -> None:
+    """Delete the way the app does: messages and descendants go with the node, because
+    SQLite now enforces foreign keys and an orphaned child can no longer be committed."""
+    ids, stack = [], [node_id]
+    while stack:
+        current = stack.pop()
+        ids.append(current)
+        stack.extend(n.id for n in session.exec(select(Node).where(Node.parent_id == current)))
+    session.execute(delete(Message).where(Message.node_id.in_(ids)))
+    session.execute(delete(Node).where(Node.id.in_(ids)))
 
 
 def make_reader(sources, limit=32, allowed=None):
@@ -283,7 +296,7 @@ def test_deleted_document_and_deleted_target_invalidate_reader(sources):
     # Missing IDs are skipped without losing directory pagination progress.
     assert call(reader, {"action": "index"})["ok"]
     with Session(engine) as session:
-        session.delete(session.get(Node, state["target"]))
+        _delete_subtree(session, state["target"])
         session.commit()
     assert call(reader, {"action": "index"}) == {
         "ok": False,

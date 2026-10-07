@@ -385,8 +385,9 @@ def delete_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
         ).all():
             session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory.id))
             session.delete(memory)
-        for node in nodes:
-            session.delete(node)
+        # One statement removes parents and children together; SQLite checks the
+        # self-referencing parent key at the end of the statement.
+        session.execute(delete(Node).where(Node.tree_id == tree_id))
         session.execute(delete(DocumentAttachment).where(DocumentAttachment.tree_id == tree_id))
         session.delete(tree)
         session.commit()

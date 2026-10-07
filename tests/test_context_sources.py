@@ -3,8 +3,8 @@
 import json
 
 import pytest
-from sqlalchemy import event
-from sqlmodel import Session, SQLModel, create_engine
+from sqlalchemy import delete, event
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.context_sources import SOURCE_TOOL_DEF, SOURCE_TOOL_NAME, make_source_reader
 from app.models import KnowledgeTree, Message, Node
@@ -168,6 +168,18 @@ def test_fresh_session_returns_current_edited_text_and_notes_without_writes(sour
         event.remove(engine, "before_cursor_execute", record)
 
 
+def _delete_subtree(session: Session, node_id: int) -> None:
+    """Delete the way the app does: messages and descendants go with the node, because
+    SQLite now enforces foreign keys and an orphaned child can no longer be committed."""
+    ids, stack = [], [node_id]
+    while stack:
+        current = stack.pop()
+        ids.append(current)
+        stack.extend(n.id for n in session.exec(select(Node).where(Node.parent_id == current)))
+    session.execute(delete(Message).where(Message.node_id.in_(ids)))
+    session.execute(delete(Node).where(Node.id.in_(ids)))
+
+
 @pytest.mark.parametrize("change", ["delete_source", "delete_target", "reparent", "move_tree"])
 def test_source_membership_is_rechecked_after_each_change(source_db, change):
     engine, allowed, _ = source_db
@@ -175,9 +187,9 @@ def test_source_membership_is_rechecked_after_each_change(source_db, change):
     assert _read(reader, 2, 22)["ok"]
     with Session(engine) as session:
         if change == "delete_source":
-            session.delete(session.get(Node, 2))
+            _delete_subtree(session, 2)  # The current node 3 is a child of 2.
         elif change == "delete_target":
-            session.delete(session.get(Node, 3))
+            _delete_subtree(session, 3)
         else:
             target = session.get(Node, 3)
             if change == "reparent":
