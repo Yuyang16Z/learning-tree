@@ -73,10 +73,24 @@ class Generation:
     status: str = "pending"
     error: str | None = None
     message_id: int | None = None
+    # Viewers waiting for new events, as (event loop, asyncio.Event) pairs. The producer
+    # thread wakes them instead of each viewer polling the log on a timer.
+    waiters: set = field(default_factory=set)
 
     def emit(self, event: dict) -> None:
         with self.lock:
             self.log.append(event)
+        self.wake()
+
+    def wake(self) -> None:
+        """Wake every waiting viewer; safe to call from any thread."""
+        with self.lock:
+            waiters = list(self.waiters)
+        for loop, ready in waiters:
+            try:
+                loop.call_soon_threadsafe(ready.set)
+            except RuntimeError:  # That viewer's event loop has already closed.
+                pass
 
 
 _GENERATIONS: dict[int, Generation] = {}
@@ -97,6 +111,7 @@ def discard_node_work(node_ids) -> None:
                 generation.reasoning.clear()
                 generation.steps.clear()
                 generation.log.clear()
+            generation.wake()
 
 
 def _snapshot(model):
@@ -152,26 +167,51 @@ def _stored_outcome(session: Session, node: Node) -> dict:
     }
 
 
+# A viewer re-reads the log at least this often even without a wake-up.
+FOLLOW_RECHECK_SECONDS = 1.0
+
+
 async def _follow(generation: Generation, node_id: int, opening: dict, after: int = 0):
-    """Relay events after `after` to one viewer. Leaving never stops the answer; Stop does."""
+    """Relay events after `after` to one viewer. Leaving never stops the answer; Stop does.
+
+    The viewer sleeps until the producer thread wakes it (emit, Stop, deletion or finish)
+    rather than polling the log; the slow re-check only guards against a missed wake-up."""
     yield _sse(opening)
     sent = max(0, after)
-    while True:
+    ready = asyncio.Event()
+    waiter = (asyncio.get_running_loop(), ready)
+    with generation.lock:
+        generation.waiters.add(waiter)
+    try:
+        while True:
+            ready.clear()  # Clear before reading, so an event appended after the read wakes us.
+            with generation.lock:
+                fresh = generation.log[sent:]
+                ended = generation.finished.is_set() or generation.stop.is_set()
+            for seq, event in enumerate(fresh, sent + 1):
+                yield _sse(
+                    {**event, "seq": seq, "node_id": node_id, "request_id": generation.request_id}
+                )
+            sent += len(fresh)
+            if ended:
+                break
+            if not fresh:
+                try:
+                    await asyncio.wait_for(ready.wait(), FOLLOW_RECHECK_SECONDS)
+                except asyncio.TimeoutError:
+                    pass
+    finally:
         with generation.lock:
-            fresh = generation.log[sent:]
-            ended = generation.finished.is_set() or generation.stop.is_set()
-        for seq, event in enumerate(fresh, sent + 1):
-            yield _sse(
-                {**event, "seq": seq, "node_id": node_id, "request_id": generation.request_id}
-            )
-        sent += len(fresh)
-        if ended:
-            break
-        await asyncio.sleep(0.025)
+            generation.waiters.discard(waiter)
     yield _sse(_outcome(generation, node_id))
 
 
-def node_metadata(node: Node, messages: list[Message] | None = None) -> dict:
+def node_metadata(
+    node: Node, messages: list[Message] | None = None, *, has_messages: bool | None = None
+) -> dict:
+    """Display metadata; pass has_messages to avoid loading message bodies for a listing."""
+    if has_messages is None:
+        has_messages = bool(messages)
     kind = node.kind
     if node.revision_of:
         kind = "revision"
@@ -180,7 +220,7 @@ def node_metadata(node: Node, messages: list[Message] | None = None) -> dict:
     elif node.parent_id is None:
         kind = "root"
     status = node.status
-    if status == "idle" and messages:
+    if status == "idle" and has_messages:
         status = "complete"
     return {
         "kind": kind,
@@ -632,6 +672,7 @@ def stop(
         if generation:
             with generation.lock:
                 generation.stop.set()
+                generation.wake()
                 generation.status = "interrupted"
                 generation.error = "已停止，可重试。"
         if node.status == "pending":
@@ -1099,6 +1140,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                         generation.text.append(event["text"])
                         outgoing = {"delta": event["text"]}
                     generation.log.append(outgoing)
+                generation.wake()  # Appended with the text under one lock; wake viewers now.
                 if time.monotonic() - last_checkpoint >= 0.5:
                     _persist(target_id, generation, spec.label)
                     last_checkpoint = time.monotonic()
@@ -1155,6 +1197,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             produce()
         finally:
             generation.finished.set()
+            generation.wake()
             with _REQUEST_LOCK:
                 if _GENERATIONS.get(target_id) is generation:
                     _GENERATIONS.pop(target_id, None)

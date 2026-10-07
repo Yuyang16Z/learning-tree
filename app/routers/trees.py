@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import delete
+from sqlalchemy import delete, func
 from sqlmodel import Session, select
 
 from ..context_compaction import forget_tree
@@ -34,14 +34,13 @@ from ..models import (
     PreferenceSupplement,
 )
 from ..schemas import NodeOut, TreeIn, TreeOut, TreePatch
-from ..service import get_messages
 from ..tree_identity import record_node_id, record_tree_id
 from .nodes import _CANCELLED_REQUESTS, _REQUEST_LOCK, discard_node_work, node_metadata
 
 router = APIRouter(prefix="/trees", tags=["trees"])
 
 
-def _node_out(node: Node, session: Session) -> NodeOut:
+def _node_out(node: Node, has_messages: bool) -> NodeOut:
     return NodeOut(
         id=node.id,
         tree_id=node.tree_id,
@@ -49,8 +48,18 @@ def _node_out(node: Node, session: Session) -> NodeOut:
         title=node.title,
         seed_text=node.seed_text,
         has_summary=node.summary is not None,
-        **node_metadata(node, get_messages(session, node.id)),
+        **node_metadata(node, has_messages=has_messages),
     )
+
+
+def _root_ids(session: Session) -> dict[int, int]:
+    """Each topic's first root node, found with one grouped query."""
+    rows = session.exec(
+        select(Node.tree_id, func.min(Node.id))
+        .where(Node.parent_id.is_(None))
+        .group_by(Node.tree_id)
+    ).all()
+    return dict(rows)
 
 
 @router.post("", response_model=TreeOut)
@@ -76,23 +85,19 @@ def create_tree(body: TreeIn, session: Session = Depends(get_session)) -> TreeOu
 def list_trees(
     include_archived: bool = False, session: Session = Depends(get_session)
 ) -> list[TreeOut]:
-    out = []
     query = select(KnowledgeTree).order_by(KnowledgeTree.id)
     if not include_archived:
         query = query.where(KnowledgeTree.archived.is_(False))
-    for tree in session.exec(query):
-        root = session.exec(
-            select(Node).where(Node.tree_id == tree.id, Node.parent_id.is_(None)).order_by(Node.id)
-        ).first()
-        out.append(
-            TreeOut(
-                id=tree.id,
-                title=tree.title,
-                root_node_id=root.id if root else 0,
-                archived=tree.archived,
-            )
+    roots = _root_ids(session)
+    return [
+        TreeOut(
+            id=tree.id,
+            title=tree.title,
+            root_node_id=roots.get(tree.id, 0),
+            archived=tree.archived,
         )
-    return out
+        for tree in session.exec(query)
+    ]
 
 
 @router.patch("/{tree_id}", response_model=TreeOut)
@@ -400,4 +405,14 @@ def get_tree(tree_id: int, session: Session = Depends(get_session)) -> list[Node
     if not session.get(KnowledgeTree, tree_id):
         raise HTTPException(404, "知识树不存在")
     nodes = session.exec(select(Node).where(Node.tree_id == tree_id).order_by(Node.id)).all()
-    return [_node_out(node, session) for node in nodes]
+    # The listing only needs to know whether a node has any message. One grouped query
+    # replaces a per-node query that also loaded every message body and its images.
+    answered = set(
+        session.exec(
+            select(Message.node_id)
+            .join(Node, Node.id == Message.node_id)
+            .where(Node.tree_id == tree_id)
+            .distinct()
+        ).all()
+    )
+    return [_node_out(node, node.id in answered) for node in nodes]
