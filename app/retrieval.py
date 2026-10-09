@@ -213,6 +213,7 @@ def _candidates(session: Session, tree_id: int | None, source_ids: list[int]):
                 Memory.kind == "fact",
                 Memory.tree_id == tree_id,
                 Memory.source_node_id.in_(source_ids),
+                Memory.superseded_by.is_(None),
                 Node.tree_id == tree_id,
                 Node.status.not_in(_INVALID_SOURCE_STATES),
             )
@@ -366,6 +367,7 @@ def _revalidate(
             if (
                 row is None
                 or row.content != item.content
+                or (row.kind == "fact" and row.superseded_by is not None)
                 or not _source_valid(fresh, row, tree_id if row.kind == "fact" else None)
             ):
                 continue

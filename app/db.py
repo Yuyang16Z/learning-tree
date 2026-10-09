@@ -94,6 +94,12 @@ _ADDED_COLUMNS = {
         "steps": "JSON",
         "status": "TEXT NOT NULL DEFAULT 'complete'",
     },
+    "memory": {
+        "fact_type": "TEXT NOT NULL DEFAULT 'conclusion'",
+        "terms": "JSON",
+        "superseded_by": "INTEGER",
+        "updated_at": "DATETIME",
+    },
 }
 
 

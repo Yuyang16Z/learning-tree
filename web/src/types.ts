@@ -84,10 +84,14 @@ export interface PreferenceSupplementsPage {
   page: number;
   page_size: number;
 }
+export type FactType = 'definition' | 'condition' | 'misconception' | 'open_question' | 'learner_state' | 'conclusion';
 export interface MemoryFact extends Memory {
   source_node_id: number | null;
   tree_title: string | null;
   created_at: string;
+  fact_type?: FactType | string;
+  /** Id of the later fact that corrected this one; such facts no longer reach answers. */
+  superseded_by?: number | null;
 }
 export interface MemoryFactsPage {
   items: MemoryFact[];

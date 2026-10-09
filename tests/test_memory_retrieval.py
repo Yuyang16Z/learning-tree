@@ -793,3 +793,33 @@ def test_branch_creation_and_deletion_leave_no_orphan_nodes(session, deletion):
         remaining_ids = {node.id for node in remaining}
         assert created[0]["id"] not in remaining_ids, "deletion must discover the committed child"
         assert all(node.parent_id is None or node.parent_id in remaining_ids for node in remaining)
+
+
+def test_superseded_facts_are_not_recalled_but_their_replacement_is(session):
+    old = remember(session, "旧说法：schema 校验在工具执行之后进行。")
+    new = remember(session, "修正：schema 校验在执行工具之前进行。")
+    old.superseded_by = new.id
+    session.add(old)
+    session.commit()
+    backend = Backend([old.content, new.content])
+
+    result = retrieve_memory(session, 1, [1], query="schema 校验", backend=backend)
+
+    assert ids(result) == {new.id}
+    assert old.content not in result.text and new.content in result.text
+    assert old.content not in sum(backend.document_calls, []), "superseded facts are never embedded"
+
+    # Supersession recorded while ranking runs is honoured by the final revalidation.
+    class SupersedeDuringRerank(Backend):
+        def rerank(self, query, documents):
+            with Session(session.get_bind()) as writer:
+                row = writer.get(Memory, new.id)
+                row.superseded_by = old.id
+                writer.add(row)
+                writer.commit()
+            return super().rerank(query, documents)
+
+    late = retrieve_memory(
+        session, 1, [1], query="schema 校验", backend=SupersedeDuringRerank([new.content])
+    )
+    assert not late.facts

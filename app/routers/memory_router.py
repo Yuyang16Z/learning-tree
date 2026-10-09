@@ -160,6 +160,8 @@ def _fact_out(memory: Memory, title: str | None) -> FactOut:
         source_node_id=memory.source_node_id,
         tree_title=title,
         created_at=memory.created_at,
+        fact_type=memory.fact_type,
+        superseded_by=memory.superseded_by,
     )
 
 
@@ -238,7 +240,7 @@ def edit_fact(memory_id: int, body: FactPatch, session: Session = Depends(get_se
             Memory.kind == "fact",
             Memory.content == body.expected_content,
         )
-        .values(content=content)
+        .values(content=content, updated_at=datetime.now(timezone.utc))
         .execution_options(synchronize_session=False)
     )
     if changed.rowcount != 1:

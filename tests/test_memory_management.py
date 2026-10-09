@@ -77,8 +77,13 @@ def test_additive_profile_table_preserves_existing_memory_ids(tmp_path, monkeypa
     database.init_db()
     database.init_db()
     assert "preferenceprofile" in inspect(engine).get_table_names()
+    columns = {column["name"]: column for column in inspect(engine).get_columns("memory")}
+    assert {"fact_type", "terms", "superseded_by", "updated_at"} <= set(columns)
+    assert not columns["fact_type"]["nullable"]
     with Session(engine) as session:
-        assert session.get(Memory, 104).content == "原有偏好"
+        legacy = session.get(Memory, 104)
+        assert legacy.content == "原有偏好"
+        assert (legacy.fact_type, legacy.terms, legacy.superseded_by) == ("conclusion", None, None)
         assert session.get(PreferenceProfile, 1) is None
     engine.dispose()
 
@@ -294,6 +299,8 @@ def test_facts_search_topics_and_stable_pagination(setup):
     assert found["items"][0]["tree_title"] == "Harness"
     assert found["items"][0]["source_node_id"] == 1
     assert found["items"][0]["created_at"]
+    assert found["items"][0]["fact_type"] == "conclusion"
+    assert found["items"][0]["superseded_by"] is None
     assert client.get("/memories/facts", params={"q": "%_"}).json()["total"] == 1
     assert client.get("/memories/facts", params={"page": 0}).status_code == 422
     assert client.get("/memories/facts", params={"page_size": 101}).status_code == 422
@@ -360,3 +367,36 @@ def test_batch_delete_only_facts_clears_vectors_and_preserves_other_records(setu
         assert session.exec(select(MemoryEmbedding)).all() == []
     assert client.post("/memories/delete", json={"ids": list(range(1001))}).status_code == 422
     assert client.delete(f"/memories/{retained.id}").status_code == 200
+
+
+def test_fact_listing_exposes_structure_and_edits_mark_the_record_updated(setup):
+    client, engine = setup
+    old = add(engine, "旧的定义")
+    with Session(engine) as session:
+        new = Memory(
+            kind="fact",
+            content="修正后的定义",
+            tree_id=1,
+            source_node_id=1,
+            fact_type="misconception",
+            terms=["定义"],
+        )
+        session.add(new)
+        session.flush()
+        stale = session.get(Memory, old.id)
+        stale.superseded_by = new.id
+        session.add(stale)
+        session.commit()
+        new_id = new.id
+    items = {row["id"]: row for row in client.get("/memories/facts").json()["items"]}
+    assert items[new_id]["fact_type"] == "misconception" and items[new_id]["superseded_by"] is None
+    assert items[old.id]["fact_type"] == "conclusion" and items[old.id]["superseded_by"] == new_id
+    patched = client.patch(
+        f"/memories/{new_id}", json={"content": "再次修正", "expected_content": "修正后的定义"}
+    )
+    assert patched.status_code == 200 and patched.json()["fact_type"] == "misconception"
+    with Session(engine) as session:
+        assert session.get(Memory, new_id).updated_at is not None
+        assert session.get(Memory, new_id).terms == ["定义"], "edits keep the structure"
+        result = retrieve_memory(session, 1, [1])
+    assert {hit.memory_id for hit in result.facts} == {new_id}, "superseded facts stay out"

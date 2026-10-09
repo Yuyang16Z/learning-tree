@@ -38,6 +38,16 @@ class Memory(SQLModel, table=True):
     tree_id: int | None = Field(default=None, index=True)  # Unset for global preferences.
     source_node_id: int | None = None
     created_at: datetime = Field(default_factory=_now)
+    # Structured facts: definition | condition | misconception | open_question |
+    # learner_state | conclusion. Legacy rows read as conclusions.
+    fact_type: str = Field(
+        default="conclusion", sa_column=Column(String, nullable=False, default="conclusion")
+    )
+    terms: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    # A later fact that corrects this one; superseded facts leave retrieval and the
+    # search index but stay visible in Settings until deleted.
+    superseded_by: int | None = None
+    updated_at: datetime | None = None  # Set by edits and supersession, not creation.
 
 
 class MemoryEmbedding(SQLModel, table=True):

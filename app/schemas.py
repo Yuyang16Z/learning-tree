@@ -204,6 +204,8 @@ class FactOut(MemoryOut):
     source_node_id: int | None
     tree_title: str | None
     created_at: datetime
+    fact_type: str = "conclusion"
+    superseded_by: int | None = None
 
 
 class FactTopicOut(BaseModel):
