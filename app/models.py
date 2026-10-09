@@ -99,6 +99,18 @@ class PreferenceLearningState(SQLModel, table=True):
     revision: str = Field(default_factory=lambda: uuid4().hex)
 
 
+class RetrievalSettings(SQLModel, table=True):
+    """Singleton: wider memory scopes are opt-in; revisions detect concurrent saves.
+
+    The current learning path is always searched. Siblings and other topics only
+    contribute labelled, separately budgeted facts after the user turns them on."""
+
+    id: int = Field(default=1, primary_key=True)
+    include_siblings: bool = False
+    include_other_trees: bool = False
+    revision: str = Field(default_factory=lambda: uuid4().hex)
+
+
 class PreferenceExtraction(SQLModel, table=True):
     """Content-free processed-input ledger retained after preference deletion."""
 

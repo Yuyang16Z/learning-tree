@@ -124,11 +124,19 @@ def fetch_memory_note(
     quoted_text: str = "",
     existing_text: str = "",
 ) -> str:
-    """Choose relevant memories within the allowed source path, independently of preferences."""
-    from .retrieval import retrieve_memory
+    """Choose relevant memories within the allowed source path, independently of preferences.
 
+    Sibling branches and other topics only join in after the user enabled them in
+    Settings; those hits stay labelled with their origin in the rendered note."""
+    from .retrieval import RetrievalConfig, read_retrieval_settings, retrieve_memory
+
+    scopes = read_retrieval_settings(session)
+    config = RetrievalConfig(
+        include_siblings=scopes.include_siblings,
+        include_other_trees=scopes.include_other_trees,
+    )
     return retrieve_memory(
-        session, tree_id, source_node_ids, query, quoted_text, existing_text
+        session, tree_id, source_node_ids, query, quoted_text, existing_text, config=config
     ).text
 
 

@@ -171,6 +171,18 @@ class PreferenceLearningIn(BaseModel):
     revision: str = Field(min_length=1, max_length=100)
 
 
+class RetrievalSettingsOut(BaseModel):
+    include_siblings: bool
+    include_other_trees: bool
+    revision: str
+
+
+class RetrievalSettingsIn(BaseModel):
+    include_siblings: bool
+    include_other_trees: bool
+    revision: str = Field(min_length=1, max_length=100)
+
+
 class PreferenceSupplementOut(BaseModel):
     id: int
     content: str

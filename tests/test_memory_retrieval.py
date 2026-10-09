@@ -823,3 +823,160 @@ def test_superseded_facts_are_not_recalled_but_their_replacement_is(session):
         session, 1, [1], query="schema 校验", backend=SupersedeDuringRerank([new.content])
     )
     assert not late.facts
+
+
+def test_wider_scopes_are_opt_in_and_labelled_with_their_origin(session):
+    path = remember(session, "当前路径：schema 校验先于工具执行。")
+    sibling = remember(session, "兄弟分支：schema 校验可以放在中间件里。", source_node_id=3)
+    other = remember(session, "另一棵树：schema 校验要考虑版本兼容。", tree_id=2, source_node_id=4)
+    pending = remember(session, "生成中的 schema 校验说明。", source_node_id=5)
+    contents = [path.content, sibling.content, other.content, pending.content]
+
+    default = retrieve_memory(session, 1, [1, 2], query="schema 校验", backend=Backend(contents))
+    assert ids(default) == {path.id}
+    assert "同主题其他分支" not in default.text and "其他主题" not in default.text
+
+    backend = Backend(contents)
+    siblings = retrieve_memory(
+        session,
+        1,
+        [1, 2],
+        query="schema 校验",
+        config=RetrievalConfig(include_siblings=True),
+        backend=backend,
+    )
+    assert ids(siblings) == {path.id, sibling.id}
+    assert "【同一主题其他分支的相关记忆（仅供参考）】" in siblings.text
+    assert (
+        f"- [记忆 {sibling.id}；来源节点 3] （同主题其他分支「兄弟分支」）{sibling.content}"
+        in siblings.text
+    )
+    assert f"- [记忆 {path.id}；来源节点 1] {path.content}" in siblings.text
+    assert siblings.text.index("【当前学习路径的相关记忆】") < siblings.text.index("【同一主题")
+    evaluated = sum(backend.document_calls, [])
+    assert other.content not in evaluated and pending.content not in evaluated
+    assert other.content not in siblings.text and pending.content not in siblings.text
+
+    both = retrieve_memory(
+        session,
+        1,
+        [1, 2],
+        query="schema 校验",
+        config=RetrievalConfig(include_siblings=True, include_other_trees=True),
+        backend=Backend(contents),
+    )
+    assert ids(both) == {path.id, sibling.id, other.id}
+    assert "【其他学习主题的相关记忆（仅供参考）】" in both.text
+    assert f"- [记忆 {other.id}；来源节点 4] （其他主题「另一棵树」）{other.content}" in both.text
+    assert [hit.scope for hit in both.facts] == ["path", "tree", "other"]
+    assert both.facts[2].tree_id == 2 and both.facts[2].tree_title == "另一棵树"
+
+    only_other = retrieve_memory(
+        session,
+        1,
+        [1, 2],
+        query="schema 校验",
+        config=RetrievalConfig(include_other_trees=True),
+        backend=Backend(contents),
+    )
+    assert ids(only_other) == {path.id, other.id}
+    assert sibling.content not in only_other.text
+
+
+def test_wider_hits_share_a_smaller_budget_and_never_displace_path_facts(session):
+    path_facts = [remember(session, f"路径事实 {i}：schema 校验规则 {i}。") for i in range(10)]
+    sibling_facts = [
+        remember(session, f"兄弟事实 {i}：schema 校验补充 {i}。", source_node_id=3)
+        for i in range(10)
+    ]
+    contents = [memory.content for memory in path_facts + sibling_facts]
+    result = retrieve_memory(
+        session,
+        1,
+        [1],
+        query="schema 校验",
+        config=RetrievalConfig(include_siblings=True),
+        backend=Backend(contents),
+    )
+    path_ids = {memory.id for memory in path_facts}
+    sibling_ids = {memory.id for memory in sibling_facts}
+    assert len(ids(result) & path_ids) == 8
+    assert len(ids(result) & sibling_ids) == 4
+    assert [hit.scope for hit in result.facts] == ["path"] * 8 + ["tree"] * 4
+    tight = retrieve_memory(
+        session,
+        1,
+        [1],
+        query="schema 校验",
+        config=RetrievalConfig(include_siblings=True, wider_char_budget=120),
+        backend=Backend(contents),
+    )
+    assert len(ids(tight) & path_ids) == 8
+    assert 0 < len(ids(tight) & sibling_ids) < 4
+    assert sum(len(hit.content) for hit in tight.facts if hit.scope == "tree") <= 120
+
+
+def test_wider_hits_are_revalidated_against_current_records(session):
+    session.add_all([KnowledgeTree(id=3, title="归档树", archived=True)])
+    session.add(Node(id=9, tree_id=3, title="归档树的根", status="complete"))
+    session.commit()
+    sibling = remember(session, "兄弟分支：schema 校验在中间件里。", source_node_id=3)
+    other = remember(session, "另一棵树：schema 版本兼容。", tree_id=2, source_node_id=4)
+    archived = remember(session, "归档树：schema 不应出现。", tree_id=3, source_node_id=9)
+    config = RetrievalConfig(include_siblings=True, include_other_trees=True)
+    backend = Backend([sibling.content, other.content, archived.content])
+    before = retrieve_memory(session, 1, [1], query="schema", config=config, backend=backend)
+    assert ids(before) == {sibling.id, other.id}
+    assert archived.content not in sum(backend.document_calls, [])
+
+    class ChangeDuringRerank(Backend):
+        def rerank(self, query, documents):
+            with Session(session.get_bind()) as writer:
+                node = writer.get(Node, 3)
+                node.status = "error"
+                tree = writer.get(KnowledgeTree, 2)
+                tree.archived = True
+                writer.add_all([node, tree])
+                writer.commit()
+            return super().rerank(query, documents)
+
+    late = retrieve_memory(
+        session,
+        1,
+        [1],
+        query="schema",
+        config=config,
+        backend=ChangeDuringRerank([sibling.content, other.content]),
+    )
+    assert not late.facts and late.text == ""
+
+
+def test_relative_vector_gate_admits_near_top_candidates_but_not_a_weak_set(session):
+    best = remember(session, "最相关的 schema 结论。")
+    close = remember(session, "几乎同样相关的结论。")
+    far = remember(session, "无关的地理记录。")
+    backend = Backend(
+        vectors={
+            best.content: [1.0, 0.0, 0.0],
+            close.content: [0.98, 0.199, 0.0],
+            far.content: [0.9, 0.4359, 0.0],
+        },
+        query_vectors={"量子纠缠": [0.0, 1.0, 0.0]},
+    )
+    config = RetrievalConfig(min_similarity=0.99, rerank=False)
+
+    result = retrieve_memory(session, 1, [1], query="schema", config=config, backend=backend)
+
+    assert result.mode == "hybrid"
+    assert ids(result) == {best.id, close.id}, "a near-top candidate passes the relative gate"
+    assert far.id not in ids(result)
+    assert len(sum(backend.document_calls, [])) == 3
+
+    weak = retrieve_memory(session, 1, [1], query="量子纠缠", config=config, backend=backend)
+    assert weak.mode == "hybrid" and not weak.facts
+    assert len(backend.document_calls) == 1, "cached vectors are reused for the gate"
+
+    strict = RetrievalConfig(min_similarity=0.99, rerank=False, relative_similarity_margin=0.0)
+    assert ids(
+        retrieve_memory(session, 1, [1], query="schema", config=strict, backend=backend)
+    ) == {best.id}

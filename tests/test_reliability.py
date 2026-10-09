@@ -17,7 +17,7 @@ import app.main as main
 import app.service as service
 from app.context import build_context
 from app.llm import LLMSpec, run_agent
-from app.models import KnowledgeTree, Memory, Message, ModelConfig, Node
+from app.models import KnowledgeTree, Memory, Message, ModelConfig, Node, RetrievalSettings
 from app.routers import nodes
 
 
@@ -208,6 +208,21 @@ def test_memory_does_not_cross_sibling_paths(setup):
         session.commit()
         note = service.fetch_memory_note(session, t["id"], [root])
         assert "本路径" in note and "喜欢例子" in note
+        assert "兄弟机密" not in note and "来源不明" not in note
+    # A real sibling branch joins only after the user widens the scope, and stays labelled.
+    sibling = client.post(f"/nodes/{root}/branch", json={"seed_text": "分支引用"}).json()
+    with Session(engine) as session:
+        session.add(
+            Memory(
+                kind="fact", content="兄弟分支结论", tree_id=t["id"], source_node_id=sibling["id"]
+            )
+        )
+        session.commit()
+        assert "兄弟分支结论" not in service.fetch_memory_note(session, t["id"], [root])
+        session.add(RetrievalSettings(include_siblings=True))
+        session.commit()
+        note = service.fetch_memory_note(session, t["id"], [root])
+        assert "（同主题其他分支「" in note and "兄弟分支结论" in note
         assert "兄弟机密" not in note and "来源不明" not in note
 
 
