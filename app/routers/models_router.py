@@ -5,9 +5,9 @@ from sqlalchemy import delete
 from sqlmodel import Session, select
 
 from ..db import get_session
-from ..llm import test_connection
+from ..llm import LLMSpec, discover_limits, test_connection
 from ..models import ModelCalibration, ModelConfig
-from ..schemas import ModelConfigIn, ModelConfigOut, TestOut
+from ..schemas import ModelConfigIn, ModelConfigOut, ModelDiscoverIn, ModelDiscoverOut, TestOut
 from ..service import mask_key, to_spec
 
 router = APIRouter(prefix="/models", tags=["models"])
@@ -38,6 +38,27 @@ def add_model(body: ModelConfigIn, session: Session = Depends(get_session)) -> M
     session.commit()
     session.refresh(cfg)
     return _out(cfg)
+
+
+@router.post("/discover", response_model=ModelDiscoverOut)
+def discover_model(
+    body: ModelDiscoverIn, session: Session = Depends(get_session)
+) -> ModelDiscoverOut:
+    """Suggest a model's context window; the form applies it, nothing is stored here."""
+    api_key = body.api_key.strip()
+    if not api_key and body.config_id is not None:
+        cfg = session.get(ModelConfig, body.config_id)
+        if not cfg:
+            raise HTTPException(404, "模型不存在")
+        api_key = cfg.api_key
+    spec = LLMSpec(
+        label="",
+        base_url=body.base_url.strip(),
+        llm_model=body.llm_model.strip(),
+        api_key=api_key,
+        protocol=body.protocol,
+    )
+    return ModelDiscoverOut(**discover_limits(spec))
 
 
 @router.get("", response_model=list[ModelConfigOut])

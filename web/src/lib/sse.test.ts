@@ -59,6 +59,23 @@ describe('stream recovery boundaries', () => {
     expect(result).not.toHaveProperty('context_status');
     expect(result).not.toHaveProperty('summary');
   });
+  it('hands numeric diagnostics to their handler without leaking them into the result', async () => {
+    const report = { estimated_input_tokens: 1234, actual_input_tokens: 1100, cached_input_tokens: 800, output_tokens: 42, compacted: false, tool_rounds: 2, calibration_ratio: 1, timings_ms: { retrieval: 10, tools: 20, summary: 0, model: 300, total: 400 } };
+    const events = [
+      { started: true, node_id: 9 },
+      { diagnostics: 'not an object' },
+      { diagnostics: [report] },
+      { diagnostics: report, seq: 2 },
+      { delta: '回答' },
+      { done: true, node_id: 9 },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(stream(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')))));
+    const diagnostics = vi.fn();
+    const result = await api.ask(1, { question: '问题', config_id: 1 }, { onDelta() {}, onDiagnostics: diagnostics });
+    expect(diagnostics.mock.calls).toEqual([[report]]);
+    expect(result).not.toHaveProperty('diagnostics');
+    expect(result).toMatchObject({ node_id: 9, seq: 2 });
+  });
   it('does not mistake context readiness for terminal success', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(stream('data: {"context_status":"summarizing"}\n\ndata: {"context_status":"ready"}\n\n'))));
     const contextStatus = vi.fn();

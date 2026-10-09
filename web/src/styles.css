@@ -779,6 +779,8 @@ input[type="checkbox"] {
 .model-advanced { margin: 12px 0; color: var(--muted); font-size: 12px; }
 .model-advanced summary { cursor: pointer; }
 .model-advanced .field { margin-top: 12px; }
+.model-detect-row { display: flex; gap: 6px; align-items: center; }
+.model-detect-row input { flex: 1; min-width: 0; }
 .form-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

@@ -123,8 +123,14 @@ async function api(route, body) {
     await send({ context_status: 'summarizing' });
     await send({ delta: 'Synthetic answer content' });
     await expectLabel('Responding');
+    await send({ diagnostics: { estimated_input_tokens: 1234, actual_input_tokens: 1100, cached_input_tokens: 800, output_tokens: 42, compacted: false, tool_rounds: 2, calibration_ratio: 1, timings_ms: { retrieval: 10, tools: 20, summary: 0, model: 4000, total: 4200 } } });
+    const diagnosticsSummary = page.locator('.chat-live details.chat-diagnostics summary');
+    await diagnosticsSummary.waitFor();
+    assert.equal(await diagnosticsSummary.innerText(), 'Context: est. 1,234 · actual 1,100 tokens (cached 800) · 2 tool rounds · 4.2 s');
+    await expectLabel('Responding');
+    assert.equal(await page.locator('.notice').count(), 0);
     await finish();
-    checks.push('Switching topics hides unrelated progress; ready and actual answer text restore Responding');
+    checks.push('Switching topics hides unrelated progress; ready and actual answer text restore Responding; diagnostics stay a collapsed block under the answer');
 
     await ask('Fresh request has no prior context status');
     await send({ context_status: 'summarizing' });

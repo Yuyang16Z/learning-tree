@@ -18,7 +18,7 @@ from typing import Literal
 
 from openai import OpenAI
 
-from . import anthropic_provider
+from . import anthropic_provider, model_catalog
 from .context_budget import ContextPolicy, fit_request
 from .tool_catalog import SEARCH_TOOL_NAME, ToolCatalog
 
@@ -469,6 +469,104 @@ def extract_memories(
         }
     except Exception:  # noqa: BLE001
         return {"preferences": [], "facts": []}
+
+
+# Keys OpenAI-compatible gateways use for a model's limits in their /models extras.
+_WINDOW_KEYS = ("context_window", "context_length", "max_model_len", "max_context_length")
+_OUTPUT_KEYS = ("max_output_tokens", "max_tokens", "max_completion_tokens")
+DISCOVERY_NOTES = {
+    "provider": "已从服务商获取该模型的上限。",
+    "catalog": "服务商未提供该模型的上下文长度；以下为内置目录的近似值，请核对后保存。",
+    "catalog_after_error": (
+        "无法从服务商获取模型信息（可先用「测试」检查连接和密钥）；"
+        "以下为内置目录的近似值，请核对后保存。"
+    ),
+    "unknown": "服务商未提供该模型的上下文长度，内置目录也没有收录；请按服务商文档填写。",
+    "unknown_after_error": (
+        "无法从服务商获取模型信息，内置目录也没有收录；"
+        "请先用「测试」检查连接和密钥，再按服务商文档填写。"
+    ),
+    "mock": "演示模型没有可检测的上下文窗口。",
+}
+
+
+def _positive_int(value) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def _openai_model_limits(spec: LLMSpec) -> dict | None:
+    """Limits from the matching /models item; None when it carries no window field."""
+    with _client(spec) as api:
+        items = list(api.models.list())
+    wanted = spec.llm_model.strip().lower()
+    for item in items:
+        if str(getattr(item, "id", "")).lower() != wanted:
+            continue
+        extra = getattr(item, "model_extra", None) or {}
+        nested = extra.get("top_provider") if isinstance(extra.get("top_provider"), dict) else {}
+        window = next(
+            (
+                _positive_int(extra.get(key, nested.get(key)))
+                for key in _WINDOW_KEYS
+                if _positive_int(extra.get(key, nested.get(key)))
+            ),
+            None,
+        )
+        output = next(
+            (
+                _positive_int(extra.get(key, nested.get(key)))
+                for key in _OUTPUT_KEYS
+                if _positive_int(extra.get(key, nested.get(key)))
+            ),
+            None,
+        )
+        return {"context_window": window, "max_output_tokens": output} if window else None
+    return None
+
+
+def discover_limits(spec: LLMSpec) -> dict:
+    """Context window and output limit for spec.llm_model: provider, catalog or unknown.
+
+    Provider failures are reduced to fixed notes; their messages are never returned.
+    """
+    if _is_mock(spec):
+        return {
+            "context_window": None,
+            "max_output_tokens": None,
+            "source": "unknown",
+            "note": DISCOVERY_NOTES["mock"],
+        }
+    failed = False
+    try:
+        if spec.protocol == "anthropic":
+            found = anthropic_provider.model_limits(spec)
+        else:
+            found = _openai_model_limits(spec)
+    except Exception:  # noqa: BLE001 - provider errors may contain keys or request bodies
+        found, failed = None, True
+    if found and _positive_int(found.get("context_window")):
+        return {
+            "context_window": found["context_window"],
+            "max_output_tokens": _positive_int(found.get("max_output_tokens")),
+            "source": "provider",
+            "note": DISCOVERY_NOTES["provider"],
+        }
+    window = model_catalog.lookup(spec.llm_model)
+    if window:
+        key = "catalog_after_error" if failed else "catalog"
+        return {
+            "context_window": window,
+            "max_output_tokens": None,
+            "source": "catalog",
+            "note": DISCOVERY_NOTES[key],
+        }
+    key = "unknown_after_error" if failed else "unknown"
+    return {
+        "context_window": None,
+        "max_output_tokens": None,
+        "source": "unknown",
+        "note": DISCOVERY_NOTES[key],
+    }
 
 
 def test_connection(spec: LLMSpec) -> tuple[bool, str]:

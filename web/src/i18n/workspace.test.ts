@@ -23,6 +23,8 @@ describe("localized application diagnostics", () => {
       "PDF 没有可提取的文字，可能是扫描件；暂不支持 OCR，请上传文字版。",
       "第 1, 3 页没有可提取的文字（可能为空白页或扫描图片）；未进行 OCR。",
       "文档不存在或不属于当前学习主题，请重新上传。",
+      "服务商未提供该模型的上下文长度；以下为内置目录的近似值，请核对后保存。",
+      "演示模型没有可检测的上下文窗口。",
     ]) {
       const english = localizeError(original, "en");
       expect(english).not.toBe(original);

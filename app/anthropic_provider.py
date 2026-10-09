@@ -263,6 +263,16 @@ def complete(spec, system: str, history: list[dict]) -> str:
     return "".join(value for kind, value in stream_chat(spec, system, history) if kind == "text")
 
 
+def model_limits(spec) -> dict:
+    """Published limits for the configured model id, from the provider's model info."""
+    with client(spec) as api:
+        info = api.models.retrieve(spec.llm_model)
+    return {
+        "context_window": getattr(info, "max_input_tokens", None),
+        "max_output_tokens": getattr(info, "max_tokens", None),
+    }
+
+
 def test_connection(spec) -> None:
     with client(spec) as api:
         api.messages.create(

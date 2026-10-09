@@ -28,6 +28,17 @@ export interface TreeNode extends LearningFields {
   seed_text: string | null; has_summary: boolean;
 }
 export interface ToolStep { tool: string; result: string | null }
+/** Numbers only: how an answer's request was budgeted, what the provider reported and how long each phase took. */
+export interface AnswerDiagnostics {
+  estimated_input_tokens: number;
+  actual_input_tokens: number | null;
+  cached_input_tokens: number | null;
+  output_tokens: number | null;
+  compacted: boolean;
+  tool_rounds: number;
+  calibration_ratio: number;
+  timings_ms: { retrieval: number; tools: number; summary: number; model: number; total: number };
+}
 export interface DocumentSummary {
   id: string; name: string; media_type: string; size: number; characters: number; warnings: string[];
 }
@@ -37,6 +48,7 @@ export interface DocumentDetail extends DocumentSummary {
 export interface Message {
   id: number; role: 'user' | 'assistant'; content: string; answered_by: string | null;
   images?: string[] | null; reasoning?: string | null; steps?: ToolStep[] | null;
+  diagnostics?: AnswerDiagnostics | null;
   documents?: DocumentSummary[];
 }
 export interface NodeDetail extends LearningFields {
@@ -50,6 +62,7 @@ export interface ThreadNode extends LearningFields {
   question_message_id?: number | null; answer_message_id?: number | null;
   documents?: DocumentSummary[];
   attempts?: { message_id: number; status: string; content: string }[];
+  diagnostics?: AnswerDiagnostics | null;
 }
 export type ModelProtocol = 'openai' | 'anthropic';
 export interface ModelCfg {
@@ -57,6 +70,11 @@ export interface ModelCfg {
   protocol: ModelProtocol; max_tokens: number; context_window: number;
 }
 export interface ModelInput { label: string; base_url: string; llm_model: string; api_key: string; is_default: boolean; protocol: ModelProtocol; max_tokens: number; context_window: number }
+/** A context-window suggestion from the provider or the approximate built-in catalog; the form keeps the final say. */
+export interface ModelDiscovery {
+  context_window: number | null; max_output_tokens: number | null;
+  source: 'provider' | 'catalog' | 'unknown'; note: string;
+}
 export interface McpServer { id: number; label: string; command: string; args: string[]; enabled: boolean }
 export interface McpInput { label: string; command: string; args: string[]; enabled: boolean }
 export interface Memory { id: number; kind: string; content: string; tree_id: number | null }

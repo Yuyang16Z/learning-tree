@@ -1,7 +1,8 @@
 import { useId, useState } from "react";
+import { api } from "../api";
 import { useI18n } from "../i18n";
 import { localizeError } from "../i18n/workspace";
-import type { ModelCfg, ModelInput, ModelProtocol } from "../types";
+import type { ModelCfg, ModelDiscovery, ModelInput, ModelProtocol } from "../types";
 
 interface Props {
   isFirst: boolean;
@@ -27,7 +28,21 @@ export function AddModelModal({ isFirst, model, onClose, onAdd }: Props) {
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [detecting, setDetecting] = useState(false);
+  const [detected, setDetected] = useState<ModelDiscovery | null>(null);
   const close = () => { if (!busy) onClose(); };
+  // Only on request: asks the provider (or the approximate catalog) and fills the window field.
+  async function detect() {
+    if (detecting || busy) return;
+    setDetecting(true);
+    setDetected(null);
+    try {
+      const result = await api.discoverModel({ protocol: form.protocol, base_url: form.base_url.trim(), llm_model: form.llm_model.trim(), api_key: form.api_key.trim(), config_id: model?.id });
+      if (typeof result.context_window === "number") setForm(current => ({ ...current, context_window: result.context_window as number }));
+      setDetected(result);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : t("连接测试失败，请重试。", "Connection test failed. Please try again.")); }
+    finally { setDetecting(false); }
+  }
   const set = (key: "label" | "base_url" | "llm_model" | "api_key") =>
     (event: React.ChangeEvent<HTMLInputElement>) => setForm(current => ({ ...current, [key]: event.target.value }));
 
@@ -86,8 +101,9 @@ export function AddModelModal({ isFirst, model, onClose, onAdd }: Props) {
         <summary>{t("高级设置", "Advanced")}</summary>
         <div className="field">
           <label htmlFor={`${id}-context`}>{t("上下文窗口（tokens）", "Context window (tokens)")}</label>
-          <input id={`${id}-context`} type="number" min={8192} max={2097152} step={1} value={form.context_window || ""} onChange={event => setForm(current => ({ ...current, context_window: Number(event.target.value) }))} disabled={busy} />
+          <div className="model-detect-row"><input id={`${id}-context`} type="number" min={8192} max={2097152} step={1} value={form.context_window || ""} onChange={event => setForm(current => ({ ...current, context_window: Number(event.target.value) }))} disabled={busy} /><button type="button" className="btn" onClick={() => void detect()} disabled={busy || detecting || !form.base_url.trim() || !form.llm_model.trim()} title={t("向服务商查询该模型的上下文窗口；查不到时使用内置近似目录", "Ask the provider for this model's context window; falls back to an approximate built-in catalog")}>{detecting ? t("检测中…", "Detecting…") : t("检测", "Detect")}</button></div>
           <div className="hint">{t("按服务商提供的模型上下文容量填写。", "Use the model context capacity specified by your provider.")}</div>
+          {detected && <div className={detected.source === "unknown" ? "test-bad" : "test-ok"} role="status">{localizeError(detected.note, locale)}{detected.max_output_tokens ? ` ${t("服务商最大输出 {tokens} tokens。", "Provider max output {tokens} tokens.", { tokens: detected.max_output_tokens })}` : ""}</div>}
         </div>
         <div className="field">
           <label htmlFor={`${id}-tokens`}>{form.protocol === "anthropic" ? t("最大输出长度（tokens）", "Max output tokens") : t("回答预留（tokens）", "Answer reserve (tokens)")}</label>

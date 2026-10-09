@@ -68,6 +68,7 @@
 .chat-reasoning { font-size: 11px; color: var(--muted); margin: 8px 0 12px; }
 .chat-reasoning summary { cursor: pointer; padding: 4px 0; }
 .chat-reasoning > div { max-height: 260px; overflow: auto; white-space: pre-wrap; line-height: 1.7; border-left: 1px solid var(--border); padding-left: 12px; margin-top: 7px; }
+.chat-diagnostics summary, .chat-diagnostics > div { font-variant-numeric: tabular-nums; }
 .chat-images { display: flex; flex-wrap: wrap; gap: 6px; }
 .chat-images:empty { display: none; }
 .chat-documents { display: grid; gap: 7px; margin: 0 0 10px; min-width: 0; }

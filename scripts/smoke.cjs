@@ -134,6 +134,20 @@ async function poll(callback) {
     await modelForm.getByLabel('API format', { exact: true }).selectOption('anthropic');
     await modelForm.getByRole('spinbutton', { name: 'Max output tokens', exact: true }).waitFor();
     assert.equal(await contextWindow.inputValue(), '32768');
+    // Detection is explicit: the field keeps its default until the button asks the (fixture) provider.
+    const discoverRoute = '**/api/models/discover';
+    const discoverBodies = [];
+    await page.route(discoverRoute, route => {
+      discoverBodies.push(route.request().postDataJSON());
+      return route.fulfill({ json: { context_window: 1048576, max_output_tokens: null, source: 'catalog', note: '服务商未提供该模型的上下文长度；以下为内置目录的近似值，请核对后保存。' } });
+    });
+    await modelForm.getByRole('button', { name: 'Detect', exact: true }).click();
+    await modelForm.getByRole('status').filter({ hasText: 'approximate value from the built-in catalog' }).waitFor();
+    assert.equal(await contextWindow.inputValue(), '1048576');
+    assert.equal(discoverBodies.length, 1);
+    assert.equal(discoverBodies[0].protocol, 'anthropic');
+    assert.equal(discoverBodies[0].api_key, '', 'A blank key means the stored key is used server-side');
+    await page.unroute(discoverRoute);
     await modelForm.getByLabel('API format', { exact: true }).selectOption('openai');
     const answerReserve = modelForm.getByRole('spinbutton', { name: 'Answer reserve (tokens)', exact: true });
     await contextWindow.fill('8192');
@@ -147,7 +161,7 @@ async function poll(callback) {
     await modelForm.waitFor({ state: 'hidden' });
     assert.equal((await api('/models'))[0].context_window, 65536);
     await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click();
-    checks.push('Model settings expose context capacity for both protocols, reject unusable budgets and persist valid settings');
+    checks.push('Model settings expose context capacity for both protocols, detect windows only on request, reject unusable budgets and persist valid settings');
     await page.reload();
     await input.waitFor();
     await assertLocale('en');

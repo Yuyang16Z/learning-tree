@@ -2,9 +2,12 @@ import { readSSE } from "./lib/sse";
 import { getLocale, translate } from "./i18n";
 import { localizeError } from "./i18n/workspace";
 import type {
+  AnswerDiagnostics,
   McpInput,
   McpServer,
   Memory,
+  ModelDiscovery,
+  ModelProtocol,
   MemoryFact,
   MemoryFactsPage,
   PreferenceProfile,
@@ -92,6 +95,7 @@ async function relay(res: Response, on: AskHandlers, start: AskMeta, signal?: Ab
       if (obj.context_status === 'summarizing' || obj.context_status === 'ready') on.onContextStatus?.(obj.context_status);
       if (obj.tool_start) on.onToolStart?.(obj.tool_start.name, obj.tool_start.args);
       if (obj.tool_end) on.onToolEnd?.(obj.tool_end.name, obj.tool_end.result);
+      if (obj.diagnostics && typeof obj.diagnostics === 'object' && !Array.isArray(obj.diagnostics)) on.onDiagnostics?.(obj.diagnostics as AnswerDiagnostics);
       if (obj.error) { failure = obj.error; meta = { ...meta, ...obj }; }
       if (obj.done) { completed = true; meta = { ...meta, ...obj }; }
     });
@@ -125,6 +129,8 @@ export interface AskHandlers {
   onContextStatus?: (status: ContextStatus) => void;
   onToolStart?: (name: string, args: unknown) => void;
   onToolEnd?: (name: string, result: string) => void;
+  /** Numeric request/usage/timing summary, sent once before the answer ends. */
+  onDiagnostics?: (diagnostics: AnswerDiagnostics) => void;
 }
 
 export const api = {
@@ -161,6 +167,9 @@ export const api = {
   setDefaultModel: (id: number) => jsonPost(`${API}/models/${id}/default`, {}).then(j<ModelCfg>),
   testModel: (id: number) =>
     jsonPost(`${API}/models/${id}/test`, {}).then(j<{ ok: boolean; detail: string }>),
+  // Explicit only: the form asks the provider (or the approximate catalog) when the user clicks Detect.
+  discoverModel: (body: { protocol: ModelProtocol; base_url: string; llm_model: string; api_key?: string; config_id?: number }) =>
+    jsonPost(`${API}/models/discover`, body).then(j<ModelDiscovery>),
 
   listMcp: () => fetch(`${API}/mcp`).then(j<McpServer[]>),
   addMcp: (body: McpInput) => jsonPost(`${API}/mcp`, body).then(j<McpServer>),

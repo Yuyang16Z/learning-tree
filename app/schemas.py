@@ -24,6 +24,21 @@ class ModelConfigIn(BaseModel):
         return self
 
 
+class ModelDiscoverIn(BaseModel):
+    protocol: Literal["openai", "anthropic"] = "openai"
+    base_url: str = Field(min_length=1, max_length=2000)
+    llm_model: str = Field(min_length=1, max_length=200)
+    api_key: str = ""  # Blank with config_id: use the stored key of that configuration.
+    config_id: int | None = None
+
+
+class ModelDiscoverOut(BaseModel):
+    context_window: int | None
+    max_output_tokens: int | None
+    source: Literal["provider", "catalog", "unknown"]
+    note: str
+
+
 class ModelConfigOut(BaseModel):
     id: int
     label: str

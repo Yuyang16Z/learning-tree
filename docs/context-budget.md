@@ -10,7 +10,7 @@ Open **Settings → Models & API keys**, add or edit a model, and expand **Advan
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| Context window | 32,768 | The capacity used for local request budgeting. Set it to the actual window supported by your provider and model. It is not automatically discovered from the model name. |
+| Context window | 32,768 | The capacity used for local request budgeting. Set it to the actual window supported by your provider and model. **Detect** asks the provider (Anthropic model information, or the `context_length`/`max_model_len`-style extras of an OpenAI-compatible `/models` list), falls back to an approximate built-in catalog for well-known model families, fills the field and tells you which source answered; it never runs automatically, and the value is only stored when you save the form. |
 | Answer reserve / Max output tokens | 4,096 | Space withheld from the local input budget. For native Anthropic it is also the requested output limit; OpenAI-compatible requests keep provider-controlled output length. |
 
 The local input allowance is:
@@ -103,7 +103,7 @@ See [local operation and backups](operations.md), [architecture](architecture.md
 
 ## 中文说明
 
-在模型「高级设置」填写实际上下文窗口与回答预留，默认分别为 **32,768 / 4,096**。系统另外保留估算余量，逐轮检查系统提示、问题、引用、图片、历史和工具信息。按字符类别估算的 token 数（中日韩文字约 0.7、可见 ASCII 约 0.33、空白约 0.1、其他非 ASCII 字符 1，再乘 1.15 安全系数）与固定图片开销只是本地估算，不是服务商的精确 token 计数，也不能保证所有请求必定被服务商接受。真实（非演示）回答且估算不少于 2,000 单位、服务商返回用量时，系统按模型记录「实际 ÷ 估算」比例（指数平均，限制在 0.5–3.0，存于可重建的 `ModelCalibration` 表，删除模型时一并删除）；比例大于 1 时按比例缩小该模型的本地输入预算，小于 1 不会放大。每条回答另外保存估算、实际用量、缓存命中、工具轮数与耗时等数字诊断，显示在回答下方，不随学习记录导出。OpenAI 兼容接口的回答预留不等于输出上限；Anthropic 仍使用其最大输出参数。
+在模型「高级设置」填写实际上下文窗口与回答预留，默认分别为 **32,768 / 4,096**；点「检测」可向服务商查询该模型的上下文窗口（查不到时使用内置的近似目录并明确标注），填入表单后仍由你核对保存，不会自动运行。系统另外保留估算余量，逐轮检查系统提示、问题、引用、图片、历史和工具信息。按字符类别估算的 token 数（中日韩文字约 0.7、可见 ASCII 约 0.33、空白约 0.1、其他非 ASCII 字符 1，再乘 1.15 安全系数）与固定图片开销只是本地估算，不是服务商的精确 token 计数，也不能保证所有请求必定被服务商接受。真实（非演示）回答且估算不少于 2,000 单位、服务商返回用量时，系统按模型记录「实际 ÷ 估算」比例（指数平均，限制在 0.5–3.0，存于可重建的 `ModelCalibration` 表，删除模型时一并删除）；比例大于 1 时按比例缩小该模型的本地输入预算，小于 1 不会放大。每条回答另外保存估算、实际用量、缓存命中、工具轮数与耗时等数字诊断，显示在回答下方，不随学习记录导出。OpenAI 兼容接口的回答预留不等于输出上限；Anthropic 仍使用其最大输出参数。
 
 短对话保持完整；长对话优先保留当前问题、引用、笔记和能容纳的近期完整问答，较早内容由当前选择的模型按需生成摘要，每次提问最多新增一次摘要调用，可能增加费用和短暂等待。摘要记录学习目标、已讲内容、未解决疑问、纠正与条件，不能把「已讲过」当成「已掌握」。结果按来源分块缓存，后续复用；空间不足时按本轮问题的词项相关性选择待生成和已缓存的来源块，同分优先较近的来源，并为未摘要来源预留原句摘录空间。其他旧内容保留本地原句摘录。摘要失败、超时、引用无效或过长时，继续用本地摘录，不阻断正常回答。这是本地相关性启发式，不能保证找全细节；演示模式和短对话不调用摘要，划词解释仍使用本地摘录。
 
