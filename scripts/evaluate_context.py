@@ -15,6 +15,11 @@ from app.context_budget import ContextPolicy, estimate_request_tokens, fit_reque
 from app.models import Message, Node
 
 
+def numbers(stats: dict) -> dict:
+    """Keep numeric/boolean diagnostics only; prompt text never enters the evidence file."""
+    return {key: value for key, value in stats.items() if isinstance(value, (bool, int, float))}
+
+
 def evaluate() -> dict:
     policy = ContextPolicy()
     condition = "只有在验证集完全独立于训练过程时，才能把验证结果用于模型选择。"
@@ -47,7 +52,7 @@ def evaluate() -> dict:
     system, messages = build_context(path, current, [], question, policy=policy, diagnostics=stats)
     blob = system + json.dumps(messages, ensure_ascii=False)
     long_path = {
-        **stats,
+        **numbers(stats),
         "middle_condition_retained": condition in blob,
         "question_preserved": messages[-1]["content"] == question,
         "quote_preserved": current.seed_text in system,
@@ -81,7 +86,7 @@ def evaluate() -> dict:
         path, current, [], question, [image], policy=policy, diagnostics=image_stats
     )
     images = {
-        **image_stats,
+        **numbers(image_stats),
         "current_image_intact": messages3[-1]["content"][1]["image_url"]["url"] == image,
     }
     assert (
@@ -125,7 +130,11 @@ def evaluate() -> dict:
     assert tools["estimated_input_tokens"] <= policy.input_budget
     return {
         "scope": "Synthetic deterministic validation; no private data, model API, or answer-quality claims.",
-        "estimator": "UTF-8 bytes plus metadata and fixed image reservations; not provider token counts.",
+        "estimator": (
+            "Character-class token estimate (CJK 0.7, visible ASCII 0.33, whitespace 0.1, "
+            "other non-ASCII 1.0 units per character, x1.15 safety factor) plus metadata and "
+            "fixed image reservations; not provider token counts."
+        ),
         "policy": {**asdict(policy), "input_budget": policy.input_budget},
         "long_path": long_path,
         "source_update": source_update,

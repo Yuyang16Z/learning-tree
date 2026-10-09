@@ -8,9 +8,12 @@ import pytest
 from app.context_budget import (
     HISTORY_OMISSION,
     SYSTEM_OMISSION,
+    TOOL_OMISSION,
     ContextBudgetExceeded,
     ContextPolicy,
+    _trim_result,
     estimate_request_tokens,
+    estimate_text_tokens,
     fit_request,
 )
 
@@ -56,6 +59,49 @@ def tool_group(size=20000, *, native=False):
             for call in calls
         ],
     ]
+
+
+def filler(prefix: str, units: int, char: str = "x") -> str:
+    """The longest prefix + char*n whose token estimate stays within units."""
+    low, high = 0, max(1, units * 4)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if estimate_text_tokens(prefix + char * mid) <= units:
+            low = mid
+        else:
+            high = mid - 1
+    return prefix + char * low
+
+
+def test_estimator_counts_character_classes_not_bytes():
+    chinese = "只有满足条件才能执行。" * 100
+    english = ("explain the condition carefully " * 125).strip()
+    assert estimate_text_tokens("") == 0
+    # CJK text costs far less than its three bytes per character.
+    assert 600 <= estimate_text_tokens(chinese) <= 1300
+    assert estimate_text_tokens(chinese) < len(chinese.encode("utf-8")) / 3
+    # ASCII prose costs roughly a token per three characters, whitespace almost nothing.
+    assert 800 <= estimate_text_tokens(english) <= 1500
+    assert estimate_text_tokens(" " * 1000) < estimate_text_tokens("x" * 1000) / 2
+    # Other non-ASCII code points stay conservative at about one unit each.
+    assert estimate_text_tokens("🙂" * 100) >= 100
+    assert estimate_text_tokens("é" * 100) >= 100
+    # Request estimates use the same scale as the text estimator.
+    assert estimate_request_tokens("", [{"role": "user", "content": chinese}]) < 1500
+
+
+@pytest.mark.parametrize("text,minimum_chars", [("中" * 10000, 1000), ("x" * 10000, 2200)])
+def test_trimmed_tool_results_are_sliced_by_characters_and_fit_the_token_budget(
+    text, minimum_chars
+):
+    trimmed = _trim_result(text, 1000)
+    assert estimate_text_tokens(trimmed) <= 1000
+    assert TOOL_OMISSION in trimmed
+    assert trimmed.startswith(text[0]) and trimmed.endswith(text[-1])
+    # A byte-based slice would keep roughly a third of these characters.
+    assert len(trimmed) - len(TOOL_OMISSION) >= minimum_chars
+    assert _trim_result(text, 10).count(TOOL_OMISSION) == 1
+    assert _trim_result(text, 100000) == text
 
 
 def test_policy_reserves_output_and_estimation_headroom():
@@ -251,7 +297,7 @@ def test_three_tool_rounds_reclaim_optional_system_before_trimming_results(proto
         - 32
         - estimate_request_tokens(core, initial_messages, tools, protocol)
     )
-    memory_note = "OPTIONAL_HISTORY:" + "x" * (room - len("OPTIONAL_HISTORY:") - 1)
+    memory_note = filler("OPTIONAL_HISTORY:", room)
     diagnostics = {}
     system, messages = build_context(
         [],
@@ -273,7 +319,7 @@ def test_three_tool_rounds_reclaim_optional_system_before_trimming_results(proto
             "type": "function",
             "function": {"name": "lookup", "arguments": '{"q":"a distinct source"}'},
         }
-        assistant = {"role": "assistant", "content": "explanation " * 60, "tool_calls": [call]}
+        assistant = {"role": "assistant", "content": "explanation " * 200, "tool_calls": [call]}
         if protocol == "anthropic":
             assistant["_anthropic_content"] = [
                 {
@@ -541,7 +587,7 @@ def test_long_path_compaction_preserves_conditions_quote_question_and_original_r
 
     ancestors, current = synthetic_path()
     condition = "只有事先得到明确授权，才允许修改外部系统。"
-    ancestors[0][1][1].content = "早期普通背景。" * 500 + condition + "末尾普通背景。" * 500
+    ancestors[0][1][1].content = "早期普通背景。" * 2000 + condition + "末尾普通背景。" * 2000
     current.seed_text = "本次引用原文不能丢失。"
     current.learning_note = "我还不理解这里的适用条件。"
     original_nodes = [node.model_dump() for node, _ in ancestors] + [current.model_dump()]
@@ -571,7 +617,7 @@ def test_changed_source_does_not_reuse_stale_compacted_claim():
     ancestors, current = synthetic_path()
     old_condition = "只有批准甲条件，才允许执行。"
     new_condition = "只有批准乙条件，才允许执行。"
-    ancestors[0][1][1].content = "合成背景。" * 1000 + old_condition
+    ancestors[0][1][1].content = "合成背景。" * 3000 + old_condition
     policy = ContextPolicy(window_tokens=8192, output_tokens=1024)
     first = build_context(ancestors, current, [], "执行前提是什么？", policy=policy)
     assert old_condition in context_text(*first)
@@ -603,7 +649,7 @@ def test_compaction_excludes_foreign_tree_sources_even_if_they_match_query():
     from app.models import Message, Node
 
     ancestors, current = synthetic_path()
-    ancestors[0][1][1].content = "普通背景。" * 1000
+    ancestors[0][1][1].content = "普通背景。" * 3000
     forbidden = "其他知识树的授权秘密。"
     ancestors.insert(
         0,
@@ -661,7 +707,7 @@ def test_multiline_memory_is_kept_or_omitted_as_one_record_with_its_conditions()
 
     _, current = synthetic_path(length=1)
     claim = "允许删除已有文件。"
-    condition = "只有" + "完整备份已经得到确认，" * 70 + "才执行删除。"
+    condition = "只有" + "完整备份已经得到确认，" * 300 + "才执行删除。"
     record = f"- [记忆 42；来源节点 1] {claim}\n  {condition}"
     memory = "【当前路径历史记忆】\n" + record
     system, messages = build_context(

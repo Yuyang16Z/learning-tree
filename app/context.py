@@ -7,7 +7,7 @@ from .context_budget import (
     ContextBudgetExceeded,
     ContextPolicy,
     estimate_request_tokens,
-    text_tokens,
+    estimate_text_tokens,
 )
 from .context_compaction import summarize_sources
 from .memory_preferences import split_profile
@@ -23,6 +23,16 @@ COMPACTION_NOTICE = (
     "[较早内容已结构化压缩；摘录可能省略细节，不能据此猜测。原文保留，"
     "可用 read_learning_source 回查。历史图片若未作为图像附送，则本轮不可见。]"
 )
+# Request estimates are token-scale units; summary and document producers budget
+# UTF-8 bytes. 2.5 bytes per unit matches the estimator's visible-ASCII density
+# (about 2.6 bytes per unit) and under-fills CJK text (about 3.7), so a converted
+# budget is always re-checked with the estimator before it counts against the request.
+BYTES_PER_UNIT = 2.5
+
+
+def byte_budget(units: int) -> int:
+    """Convert request-estimate room into the UTF-8 byte budget a producer expects."""
+    return max(0, int(units * BYTES_PER_UNIT))
 
 
 def make_content(text: str, images: list[str] | None):
@@ -130,7 +140,8 @@ def build_context(
         from .document_context import render_document_context
 
         mandatory_cost = count(protected_system, [last])
-        document_budget = min(5000, max(0, (assembly_budget - mandatory_cost) // 3))
+        # render_document_context budgets bytes; a third of the remaining room, capped.
+        document_budget = min(5000, byte_budget(max(0, (assembly_budget - mandatory_cost) // 3)))
         document_note = render_document_context(documents, question, document_budget)
         if document_note:
             document_note = "\n" + document_note
@@ -181,31 +192,37 @@ def build_context(
     directory_budget = min(1200, available // 10)
     for node, _ in sources:
         line = f"node={node.id}：{node.title}"
-        if text_tokens("\n".join(directory + [line])) <= directory_budget:
+        if estimate_text_tokens("\n".join(directory + [line])) <= directory_budget:
             directory.append(line)
     base += "\n当前路径来源（部分目录）：\n" + "\n".join(directory)
     memory_lines = []
     memory_limit = min(3500, available // 6)
     # Keep each sourced memory intact, including multiline qualifications.
     for line in re.split(r"(?m)(?=^- \[(?:记忆|偏好) \d+(?:；来源节点 \d+)?\] )", memory_note):
-        if text_tokens("\n".join(memory_lines + [line])) <= memory_limit:
+        if estimate_text_tokens("\n".join(memory_lines + [line])) <= memory_limit:
             memory_lines.append(line)
     if memory_lines:
         base += "\n历史记忆（可能省略条目）：\n" + "\n".join(memory_lines)
     messages = _wire(recent) + [last]
     summary_room = max(0, assembly_budget - count(base, messages) - 256)
+    # Summary producers (summarize_history, summarize_sources) budget UTF-8 bytes.
+    summary_bytes = byte_budget(summary_room)
     summary_query = question + "\n" + (current.seed_text or "")
     summary = None
     if summary_resolver and old_sources and summary_room >= 512:
         try:
-            summary = summary_resolver(old_sources, summary_query, summary_room)
+            summary = summary_resolver(old_sources, summary_query, summary_bytes)
         except Exception:
             # A failed optional summary must not fail a valid conversation.
             summary = None
-        if summary and text_tokens(summary) > summary_room:
+        if summary and estimate_text_tokens(summary) > summary_room:
             summary = None
     if not summary:
-        summary = summarize_sources(old_sources, summary_query, summary_room)
+        summary = summarize_sources(old_sources, summary_query, summary_bytes)
+        while summary and estimate_text_tokens(summary) > summary_room:
+            # Dense non-ASCII text can outgrow the converted byte budget; shrink it.
+            summary_bytes //= 2
+            summary = summarize_sources(old_sources, summary_query, summary_bytes)
     if summary:
         base += "\n较早学习记录（仅供参考，不代表已核实事实或用户已经掌握）：\n" + summary
     if count(base, messages) > assembly_budget:

@@ -162,7 +162,7 @@ def test_empty_profile_overrides_legacy_preferences_and_survives_clear(setup):
 
 def test_manual_profile_is_atomic_during_context_compaction(setup):
     client, engine = setup
-    content = "偏好保留前提和条件。\n" * 110 + "结尾：不要删除否定条件。"
+    content = "偏好保留前提和条件。\n" * 400 + "结尾：不要删除否定条件。"
     assert save(client, content).status_code == 200
     with Session(engine) as session:
         note = retrieve_memory(session, 1, [1]).text

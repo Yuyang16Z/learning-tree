@@ -122,16 +122,18 @@ def _long_summary_history(engine):
         cfg.context_window = 20000
         session.add(cfg)
         message = session.get(Message, 2)
-        message.content = "Historical background to a synthetic learning question. " * 100
+        # Each message stays below the summary block limit; the count makes the
+        # token-scale estimate exceed the 20,000 window so compaction summarizes.
+        message.content = "Historical background to a synthetic learning question. " * 200
         session.add(message)
-        for index in range(3):
+        for index in range(9):
             session.add(Message(node_id=1, role="user", content=f"Earlier learning goal {index}?"))
             session.add(
                 Message(
                     node_id=1,
                     role="assistant",
                     content=(
-                        f"Background explanation {index}; only under the stated condition. " * 90
+                        f"Background explanation {index}; only under the stated condition. " * 180
                     ),
                 )
             )
@@ -404,12 +406,12 @@ def test_long_history_uses_reader_and_rejects_sibling_and_foreign_sources(api, m
 def test_mandatory_overflow_saves_question_but_starts_no_model_or_mcp(api, overflow):
     client, engine, calls = api
     secret = "SYNTHETIC_PRIVATE_OVERFLOW"
-    question = secret * 500 if overflow == "question" else "请解释本次选文。"
+    question = secret * 2000 if overflow == "question" else "请解释本次选文。"
     if overflow == "quote":
         with Session(engine) as session:
             current = session.get(Node, 2)
             current.kind = "branch"
-            current.seed_text = secret * 500
+            current.seed_text = secret * 2000
             session.add(current)
             session.commit()
     events = ask(client, question, tools=["mcp_server_88"])
@@ -477,7 +479,7 @@ def test_large_recalled_memory_is_budgeted_with_history_and_source_tool_schema(a
     client, engine, calls = api
     memory = "以下是历史记忆：\n" + "\n".join(
         f"- [记忆 {index}；来源节点 1] 第 {index} 条合成条件只能在明确授权后使用。"
-        for index in range(200)
+        for index in range(600)
     )
     monkeypatch.setattr(nodes, "fetch_memory_note", lambda *args, **kwargs: memory)
     events = ask(client)
@@ -591,7 +593,7 @@ def test_compacted_history_can_complete_a_real_source_read_tool_round(api, monke
     client, engine, calls = api
     source = "".join(
         f"只有第{index}个条件得到明确确认，才允许执行对应的第{index}项操作。"
-        for index in range(300)
+        for index in range(400)
     )
     with Session(engine) as session:
         message = session.get(Message, 2)
@@ -649,7 +651,8 @@ def catalog_definitions():
             "type": "function",
             "function": {
                 "name": f"mcp_88_auxiliary_{index}",
-                "description": f"Auxiliary operation {index}. " + "Detailed schema guidance. " * 32,
+                "description": f"Auxiliary operation {index}. "
+                + "Detailed schema guidance. " * 128,
                 "parameters": {
                     "type": "object",
                     "properties": {"value": {"type": "string"}},
@@ -877,7 +880,7 @@ def test_bounded_tool_rounds_synthesize_without_replaying_actions(
     catalog = ToolCatalog(definitions, budget=policy.input_budget // 3)
     messages = [{"role": "user", "content": "只执行一次，再总结结果。"}]
     original = copy.deepcopy(messages)
-    full_result = "EVIDENCE_START " + "synthetic body " * 4000 + " EVIDENCE_END"
+    full_result = "EVIDENCE_START " + "synthetic body " * 16000 + " EVIDENCE_END"
     requests, executed = [], []
 
     def execute(tool, args):
