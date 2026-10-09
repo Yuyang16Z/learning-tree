@@ -8,9 +8,9 @@ from pathlib import PurePosixPath
 from typing import Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import delete, func
+from sqlalchemy import delete, func, or_
 from sqlmodel import Session, select
 
 from ..context_compaction import forget_tree
@@ -34,6 +34,7 @@ from ..models import (
     PreferenceSupplement,
 )
 from ..schemas import NodeOut, TreeIn, TreeOut, TreePatch
+from ..search_index import excerpt, search_text
 from ..tree_identity import record_node_id, record_tree_id
 from .nodes import _CANCELLED_REQUESTS, _REQUEST_LOCK, discard_node_work, node_metadata
 
@@ -355,6 +356,63 @@ def export_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
     if len(json.dumps(backup, ensure_ascii=False).encode()) > 25 * 1024 * 1024:
         raise HTTPException(413, "备份含附件后超过 25 MB，请分成较小的主题")
     return backup
+
+
+@router.get("/{tree_id}/search")
+def search_tree(
+    tree_id: int,
+    q: str = Query(min_length=1, max_length=300),
+    limit: int = Query(default=20, ge=1, le=50),
+    session: Session = Depends(get_session),
+) -> dict:
+    """Title and quote matches first, then completed answers, notes and facts by text.
+
+    The query count is constant: one node query plus one index query (or the LIKE
+    fallback), whatever the topic size. Archived topics stay searchable."""
+    if not session.get(KnowledgeTree, tree_id):
+        raise HTTPException(404, "知识树不存在")
+    needle = q.strip()
+    if not needle:
+        return {"results": []}
+    results: list[dict] = []
+    titled = session.exec(
+        select(Node.id, Node.title, Node.seed_text)
+        .where(
+            Node.tree_id == tree_id,
+            or_(
+                Node.title.icontains(needle, autoescape=True),
+                Node.seed_text.icontains(needle, autoescape=True),
+            ),
+        )
+        .order_by(Node.id)
+        .limit(limit)
+    ).all()
+    for node_id, title, seed_text in titled:
+        matched = title if needle.casefold() in title.casefold() else seed_text or ""
+        results.append(
+            {
+                "node_id": node_id,
+                "message_id": None,
+                "kind": "title",
+                "snippet": excerpt(matched, needle),
+                "rank": len(results) + 1,
+            }
+        )
+    for hit in search_text(session, needle, tree_id=tree_id, limit=limit):
+        if len(results) >= limit:
+            break
+        if hit.node_id is None:
+            continue
+        results.append(
+            {
+                "node_id": hit.node_id,
+                "message_id": hit.ref_id if hit.kind == "message" else None,
+                "kind": hit.kind,
+                "snippet": hit.snippet,
+                "rank": len(results) + 1,
+            }
+        )
+    return {"results": results}
 
 
 @router.delete("/{tree_id}")

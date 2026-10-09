@@ -18,8 +18,9 @@ import app.service as service
 from app import learning_summaries
 from app.context_budget import ContextPolicy, estimate_request_tokens
 from app.context_sources import SOURCE_TOOL_NAME
-from app.models import ContextSummary, KnowledgeTree, Message, ModelConfig, Node
+from app.models import ContextSummary, KnowledgeTree, Message, ModelConfig, Node, RetrievalSettings
 from app.routers import nodes, trees
+from app.search_index import HISTORY_TOOL_NAME
 from app.tool_catalog import SEARCH_TOOL_NAME, tool_definition_cost
 
 
@@ -994,3 +995,114 @@ def test_memory_sources_are_announced_once_persisted_and_kept_out_of_exports(api
     follow_up = events[-1]["node_id"]
     assert follow_up != 2
     assert client.get(f"/nodes/{follow_up}/thread").json()["nodes"][-1]["sources"] is None
+
+
+def _synthetic_tool(name="synthetic_tool", padding=0):
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": "Synthetic selected tool " + "x" * padding,
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+
+
+def test_history_search_joins_tool_rounds_and_reads_only_the_path_by_default(api, monkeypatch):
+    client, engine, calls = api
+    readbacks = []
+    monkeypatch.setattr(
+        nodes, "assemble_tools", lambda session, requested: ([_synthetic_tool()], {})
+    )
+
+    def agent(spec, system, messages, tools, execute, **kwargs):
+        names = [item["function"]["name"] for item in tools]
+        assert HISTORY_TOOL_NAME in names and SOURCE_TOOL_NAME in names
+        readbacks.append(execute(HISTORY_TOOL_NAME, {"query": "明确许可"}))
+        readbacks.append(execute(HISTORY_TOOL_NAME, {"query": "SYNTHETIC"}))
+        readbacks.append(execute(HISTORY_TOOL_NAME, {"query": "SYNTHETIC", "scope": "tree"}))
+        readbacks.append(execute(HISTORY_TOOL_NAME, {"query": "SYNTHETIC", "scope": "all"}))
+        yield {"type": "delta", "text": "已查过学习记录。"}
+
+    monkeypatch.setattr(nodes, "run_agent", agent)
+    events = ask(client, tools=["mcp_server_88"])
+    assert events[-1]["done"], events
+    on_path, missing, siblings, everything = (json.loads(raw) for raw in readbacks)
+    assert on_path["ok"] and [(r["kind"], r["message_id"]) for r in on_path["results"]] == [
+        ("message", 2)
+    ]
+    assert missing["ok"] and missing["results"] == []
+    assert siblings["error"] == everything["error"] == "scope_not_enabled"
+    assert "SECRET" not in "".join(readbacks)
+
+
+def test_widened_recall_offers_history_search_without_other_tools(api, monkeypatch):
+    client, engine, calls = api
+    with Session(engine) as session:
+        session.add(RetrievalSettings(include_siblings=True))
+        session.commit()
+    readbacks = []
+
+    def agent(spec, system, messages, tools, execute, **kwargs):
+        assert [item["function"]["name"] for item in tools] == [HISTORY_TOOL_NAME]
+        readbacks.append(
+            json.loads(execute(HISTORY_TOOL_NAME, {"query": "SYNTHETIC", "scope": "tree"}))
+        )
+        readbacks.append(
+            json.loads(execute(HISTORY_TOOL_NAME, {"query": "SYNTHETIC", "scope": "all"}))
+        )
+        yield {"type": "delta", "text": "查到了兄弟分支。"}
+
+    monkeypatch.setattr(nodes, "run_agent", agent)
+    events = ask(client)
+    assert events[-1]["done"], events
+    assert not calls["stream"] and calls["discover"] == [[]]
+    assert [(r["node_id"], r["node_title"]) for r in readbacks[0]["results"]] == [(3, "兄弟分支")]
+    assert readbacks[1]["error"] == "scope_not_enabled"
+
+
+def test_compaction_without_tools_offers_both_readers(api, monkeypatch):
+    client, engine, calls = api
+    make_history_long(engine)
+    seen = []
+
+    def agent(spec, system, messages, tools, execute, **kwargs):
+        seen.append([item["function"]["name"] for item in tools])
+        yield {"type": "delta", "text": "已按原文检查。"}
+
+    monkeypatch.setattr(nodes, "run_agent", agent)
+    events = ask(client)
+    assert events[-1]["done"], events
+    assert seen == [[SOURCE_TOOL_NAME, HISTORY_TOOL_NAME]]
+
+
+def test_history_search_stays_pinned_in_a_tool_catalog(api, monkeypatch):
+    client, engine, calls = api
+    selected = [_synthetic_tool(f"mcp_88_tool_{index}", padding=600) for index in range(40)]
+    monkeypatch.setattr(nodes, "assemble_tools", lambda session, requested: (selected, {}))
+
+    def agent(spec, system, messages, tools, execute, **kwargs):
+        names = [item["function"]["name"] for item in tools]
+        assert (
+            SEARCH_TOOL_NAME in names and HISTORY_TOOL_NAME in names and SOURCE_TOOL_NAME in names
+        )
+        assert len(names) < len(selected)
+        assert "tool_catalog" in kwargs
+        yield {"type": "delta", "text": "目录模式下仍可检索记录。"}
+
+    monkeypatch.setattr(nodes, "run_agent", agent)
+    events = ask(client, tools=["mcp_server_88"])
+    assert events[-1]["done"], events
+
+
+def test_demo_mode_never_registers_history_search(api, monkeypatch):
+    client, engine, calls = api
+    with Session(engine) as session:
+        session.add(RetrievalSettings(include_siblings=True, include_other_trees=True))
+        session.add(
+            ModelConfig(id=2, label="Demo", base_url="mock", llm_model="mock", api_key="mock")
+        )
+        session.commit()
+    events = ask(client, config_id=2)
+    assert events[-1]["done"], events
+    assert not calls["agent"] and len(calls["stream"]) == 1 and calls["discover"] == [[]]

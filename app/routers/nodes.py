@@ -35,7 +35,9 @@ from ..models import (
     PreferenceExtraction,
     PreferenceSupplement,
 )
+from ..retrieval import read_retrieval_settings
 from ..schemas import AskIn, BranchIn, ExplainIn, NodePatch, StopIn, TitleIn
+from ..search_index import HISTORY_TOOL_DEF, HISTORY_TOOL_NAME, make_history_search
 from ..service import (
     assemble_tools,
     extract_and_save,
@@ -962,9 +964,17 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             if generation.stop.is_set():
                 return
             memory = ""
+            # Scope settings are snapshotted now; the history tool keeps this view
+            # even if the user changes the setting while the answer runs.
+            scope_snapshot = {"include_siblings": False, "include_other_trees": False}
             # Local inference must not hold _REQUEST_LOCK: stop/retry remain responsive.
             if not is_mock:
                 with Session(engine) as memory_session:
+                    scopes = read_retrieval_settings(memory_session)
+                    scope_snapshot = {
+                        "include_siblings": scopes.include_siblings,
+                        "include_other_trees": scopes.include_other_trees,
+                    }
                     memory = fetch_memory_note(
                         memory_session,
                         tree_id,
@@ -980,6 +990,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 return
             with Session(engine) as tool_session:
                 tool_defs, tool_router = assemble_tools(tool_session, requested_tools)
+            # User-selected tools, before the implicit document reader joins them.
+            tools_requested = bool(tool_defs)
             document_reader = None
             if context_documents and not is_mock:
                 tool_defs = [*tool_defs, DOCUMENT_TOOL_DEF]
@@ -994,14 +1006,24 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 return
             context_stats = {}
             context_defs = tool_defs + ([SOURCE_TOOL_DEF] if tool_defs and not is_mock else [])
+            # The read-only history search joins tool rounds, and is offered on its
+            # own when the user widened memory recall; demo mode never gets it.
+            history_wanted = not is_mock and (
+                tools_requested
+                or scope_snapshot["include_siblings"]
+                or scope_snapshot["include_other_trees"]
+            )
+            if history_wanted:
+                context_defs = [*context_defs, HISTORY_TOOL_DEF]
             tool_catalog = None
             # A checked group grants availability, not an obligation to attach
             # every server's schema to every request. Reserve a stable allowance
             # so later discovery cannot crowd out the current question.
+            reader_names = (SOURCE_TOOL_NAME, DOCUMENT_TOOL_NAME, HISTORY_TOOL_NAME)
             pinned = [
                 definition
                 for definition in context_defs
-                if definition["function"]["name"] in (SOURCE_TOOL_NAME, DOCUMENT_TOOL_NAME)
+                if definition["function"]["name"] in reader_names
             ]
             core_cost = estimate_request_tokens(
                 preflight_stats["protected_system"],
@@ -1035,8 +1057,15 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 documents=context_documents,
                 tool_schema_budget=schema_budget if tool_catalog else 0,
             )
-            if context_stats["compacted"] and not context_defs and not is_mock:
-                context_defs = [SOURCE_TOOL_DEF]
+            # Compaction makes the read-only readers available even without tools.
+            present = {item["function"]["name"] for item in context_defs}
+            missing_readers = [
+                definition
+                for definition in (SOURCE_TOOL_DEF, HISTORY_TOOL_DEF)
+                if definition["function"]["name"] not in present
+            ]
+            if context_stats["compacted"] and missing_readers and not is_mock:
+                context_defs = [*context_defs, *missing_readers]
                 request_system, llm_messages = build_context(
                     ancestors,
                     context_target,
@@ -1049,8 +1078,18 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     protocol=spec.protocol,
                     diagnostics=context_stats,
                     documents=context_documents,
+                    tool_schema_budget=schema_budget if tool_catalog else 0,
                 )
             source_reader = None
+            history_search = None
+            if any(item["function"]["name"] == HISTORY_TOOL_NAME for item in context_defs):
+                history_search = make_history_search(
+                    engine,
+                    tree_id,
+                    memory_source_ids,
+                    scope_snapshot,
+                    max_chars=max(32, min(1200, (policy.tool_reserve - 1024) // 4)),
+                )
             # Tool results can force compaction on later rounds even when the
             # initial history fits. Make read-only history access available then.
             if any(item["function"]["name"] == SOURCE_TOOL_NAME for item in context_defs):
@@ -1123,6 +1162,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                         return source_reader(arguments)
                     if name == DOCUMENT_TOOL_NAME and document_reader is not None:
                         return document_reader(arguments)
+                    if name == HISTORY_TOOL_NAME and history_search is not None:
+                        return history_search(arguments)
                     return execute(name, arguments)
 
                 stream = run_agent(
