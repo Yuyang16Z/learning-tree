@@ -135,7 +135,11 @@ def evaluate() -> dict:
             "other non-ASCII 1.0 units per character, x1.15 safety factor) plus metadata and "
             "fixed image reservations; not provider token counts."
         ),
-        "policy": {**asdict(policy), "input_budget": policy.input_budget},
+        "policy": {
+            **asdict(policy),
+            "input_budget": policy.input_budget,
+            "compaction_budget": policy.compaction_budget,
+        },
         "long_path": long_path,
         "source_update": source_update,
         "current_image": images,

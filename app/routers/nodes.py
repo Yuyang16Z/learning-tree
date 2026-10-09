@@ -1230,6 +1230,17 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 generation.status, generation.error = "interrupted", "生成中断，可重试。"
             try:
                 report_diagnostics()
+                if generation.status == "complete" and not is_mock:
+                    report = generation.diagnostics or {}
+                    if report.get("actual_input_tokens"):
+                        # Calibrate the estimator from real usage only; the recorder
+                        # ignores small requests, and demo answers never learn.
+                        record_usage(
+                            engine,
+                            config_id,
+                            int(report.get("estimated_input_tokens") or 0),
+                            int(report["actual_input_tokens"]),
+                        )
             except Exception:
                 pass
             if stream and hasattr(stream, "close"):
@@ -1270,16 +1281,6 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
         # Memory is derived only from completed answers and is source-scoped when
         # recalled; no extra model invocation for interrupted or demo answers.
         if generation.status == "complete" and not is_mock:
-            report = generation.diagnostics or {}
-            if report.get("actual_input_tokens"):
-                # Calibrate the estimator from real usage only; the recorder ignores
-                # small requests, and demo answers never reach this branch.
-                record_usage(
-                    engine,
-                    config_id,
-                    int(report.get("estimated_input_tokens") or 0),
-                    int(report["actual_input_tokens"]),
-                )
             try:
                 extract_and_save(spec, tree_id, target_id, question_text, "".join(generation.text))
             except Exception:

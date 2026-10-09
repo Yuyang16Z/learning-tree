@@ -125,7 +125,12 @@ def build_context(
         estimate_request_tokens("", [], protocol=protocol)
     )
     schema_reserve = max(0, tool_schema_budget - tool_schema_cost)
-    assembly_budget = policy.input_budget - tool_reserve - schema_reserve
+    # Mandatory input is judged against the hard budget. Compaction starts, and
+    # compacted context is filled, at the policy's compaction share of the room
+    # left after reserves: this equals policy.compaction_budget when nothing is
+    # reserved and never collapses to zero on small windows with tool reserves.
+    hard_budget = policy.input_budget - tool_reserve - schema_reserve
+    assembly_budget = int(hard_budget * policy.compaction_ratio)
     ancestors = [(n, ms) for n, ms in ancestors if n.tree_id == current.tree_id]
     sources = ancestors + [(current, current_messages)]
     units = _units(sources)
@@ -163,14 +168,14 @@ def build_context(
 
     # The current question, selected passage and current note are mandatory.
     base = protected_system + document_note + "\n" + COMPACTION_NOTICE
-    if count(base, [last]) > assembly_budget:
+    if count(base, [last]) > hard_budget:
         raise ContextBudgetExceeded()
     profile, memory_note = split_profile(memory_note)
     # User-edited preferences are not automatically abbreviated into fragments.
     # Preserve them before older turns if possible; mandatory question/source wins.
     if profile and count(base + "\n" + profile, [last]) <= assembly_budget - 256:
         base += "\n" + profile
-    available = assembly_budget - count(base, [last])
+    available = max(0, assembly_budget - count(base, [last]))
     # Keep recent complete turns, reserving room for old conditions and sources.
     recent_limit = int(available * 0.60)
     recent = []
@@ -225,7 +230,7 @@ def build_context(
             summary = summarize_sources(old_sources, summary_query, summary_bytes)
     if summary:
         base += "\n较早学习记录（仅供参考，不代表已核实事实或用户已经掌握）：\n" + summary
-    if count(base, messages) > assembly_budget:
+    if count(base, messages) > hard_budget:
         raise ContextBudgetExceeded()
     if diagnostics is not None:
         diagnostics.update(compacted=True, estimated_input_tokens=count(base, messages))

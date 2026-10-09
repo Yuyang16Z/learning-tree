@@ -14,6 +14,8 @@ import math
 import re
 from dataclasses import dataclass
 
+from .config import settings
+
 IMAGE_TOKEN_RESERVE = 4096
 HISTORY_OMISSION = (
     "\n[部分较早问答因输入预算未附送，不能据此猜测省略内容；"
@@ -45,6 +47,8 @@ class ContextPolicy:
     output_tokens: int = 4096
     # Learned ratio of provider-reported to estimated input tokens for this model.
     calibration: float = 1.0
+    # Share of the input budget at which history is compacted (Settings.context_compaction_ratio).
+    compaction_ratio: float = 0.6
 
     @property
     def raw_input_budget(self) -> int:
@@ -59,6 +63,12 @@ class ContextPolicy:
         return int(raw / self.calibration) if self.calibration > 1 else raw
 
     @property
+    def compaction_budget(self) -> int:
+        # Compaction starts here so tool results and follow-ups keep room below
+        # the hard budget, which fit_request still enforces on every request.
+        return int(self.input_budget * self.compaction_ratio)
+
+    @property
     def tool_reserve(self) -> int:
         return min(4096, self.input_budget // 3)
 
@@ -68,6 +78,7 @@ class ContextPolicy:
             getattr(spec, "context_window", 32768),
             spec.max_tokens,
             getattr(spec, "calibration", 1.0),
+            settings.context_compaction_ratio,
         )
 
 

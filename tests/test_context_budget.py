@@ -109,6 +109,46 @@ def test_policy_reserves_output_and_estimation_headroom():
     policy = ContextPolicy.from_spec(spec)
     assert policy.window_tokens == 8192 and policy.output_tokens == 1024
     assert 0 < policy.input_budget < policy.window_tokens - policy.output_tokens
+    assert policy.compaction_budget == int(policy.input_budget * 0.6) < policy.input_budget
+    assert ContextPolicy(8192, 1024, compaction_ratio=1.0).compaction_budget == policy.input_budget
+    assert ContextPolicy(8192, 1024, compaction_ratio=0.25).compaction_budget == int(
+        policy.input_budget * 0.25
+    )
+
+
+def test_compaction_ratio_comes_from_settings_without_changing_the_hard_budget(monkeypatch):
+    from app.config import settings
+
+    spec = SimpleNamespace(context_window=8192, max_tokens=1024)
+    monkeypatch.setattr(settings, "context_compaction_ratio", 0.5)
+    policy = ContextPolicy.from_spec(spec)
+    assert policy.compaction_ratio == 0.5
+    assert policy.compaction_budget == int(policy.input_budget * 0.5)
+    assert policy.input_budget == ContextPolicy(8192, 1024).input_budget
+
+
+def test_history_between_threshold_and_hard_limit_is_compacted_but_fits_the_request():
+    from app.context import build_context
+
+    ancestors, current = synthetic_path()
+    policy = ContextPolicy(window_tokens=8192, output_tokens=1024)
+    # Between the compaction budget (60%) and the hard budget: compact early so
+    # follow-ups and tool results keep room, while the request itself still fits.
+    ancestors[0][1][1].content = filler("早期背景", int(policy.input_budget * 0.8), char="x")
+    diagnostics = {}
+    system, messages = build_context(
+        ancestors, current, [], "继续解释。", policy=policy, diagnostics=diagnostics
+    )
+    assert diagnostics["raw_estimate"] < policy.input_budget
+    assert diagnostics["compacted"] is True
+    assert diagnostics["estimated_input_tokens"] <= policy.compaction_budget
+    fitted = fit_request(system, messages, policy=policy)
+    assert not fitted.compressed
+    assert fitted.system == system and fitted.messages == messages
+    small = ContextPolicy(window_tokens=8192, output_tokens=1024, compaction_ratio=1.0)
+    lax = {}
+    build_context(ancestors, current, [], "继续解释。", policy=small, diagnostics=lax)
+    assert lax["compacted"] is False, "a ratio of 1.0 restores the hard limit as the threshold"
 
 
 def test_calibration_shrinks_but_never_enlarges_the_input_budget():
@@ -308,7 +348,7 @@ def test_three_tool_rounds_reclaim_optional_system_before_trimming_results(proto
         [], current, [], question, policy=policy, tool_defs=tools, protocol=protocol
     )
     room = (
-        policy.input_budget
+        policy.compaction_budget
         - policy.tool_reserve
         - 32
         - estimate_request_tokens(core, initial_messages, tools, protocol)
@@ -335,7 +375,7 @@ def test_three_tool_rounds_reclaim_optional_system_before_trimming_results(proto
             "type": "function",
             "function": {"name": "lookup", "arguments": '{"q":"a distinct source"}'},
         }
-        assistant = {"role": "assistant", "content": "explanation " * 200, "tool_calls": [call]}
+        assistant = {"role": "assistant", "content": "explanation " * 400, "tool_calls": [call]}
         if protocol == "anthropic":
             assistant["_anthropic_content"] = [
                 {
