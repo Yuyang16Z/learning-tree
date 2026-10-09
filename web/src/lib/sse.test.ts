@@ -59,6 +59,15 @@ describe('stream recovery boundaries', () => {
     expect(result).not.toHaveProperty('context_status');
     expect(result).not.toHaveProperty('summary');
   });
+  it('dispatches memory sources once without merging them into the result', async () => {
+    const sources = [{ memory_id: 7, source_node_id: 1, tree_id: 1, tree_title: '当前树', scope: 'path' }];
+    const events = [{ started: true, node_id: 9 }, { sources }, { sources: 'not a list' }, { delta: '回答' }, { done: true, node_id: 9 }];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(stream(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')))));
+    const received = vi.fn();
+    const result = await api.ask(1, { question: '问题', config_id: 1 }, { onDelta() {}, onSources: received });
+    expect(received.mock.calls).toEqual([[sources]]);
+    expect(result).not.toHaveProperty('sources');
+  });
   it('does not mistake context readiness for terminal success', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(stream('data: {"context_status":"summarizing"}\n\ndata: {"context_status":"ready"}\n\n'))));
     const contextStatus = vi.fn();

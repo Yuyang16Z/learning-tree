@@ -3,6 +3,7 @@ import { api, isStreamLost, type AskHandlers, type AskMeta, type ChangeNotice, t
 import { useI18n } from "./i18n";
 import { localizeError } from "./i18n/workspace";
 import type {
+  AnswerSource,
   McpInput,
   McpServer,
   ModelCfg,
@@ -49,6 +50,7 @@ export default function App() {
   const [live, setLive] = useState("");
   const [liveReasoning, setLiveReasoning] = useState("");
   const [liveSteps, setLiveSteps] = useState<ToolStep[]>([]);
+  const [liveSources, setLiveSources] = useState<AnswerSource[]>([]);
   const [contextStatus, setContextStatus] = useState<ContextStatus | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
@@ -401,7 +403,7 @@ export default function App() {
     requestRef.current = { from: fromId, origin, tree: treeId, requestId };
     streamTargetRef.current = null;
     setPendingQuestion(payload.question); setSendingImages(payload.images ?? []); setSendingDocuments(payload.documents ?? []);
-    setLive(''); setLiveReasoning(''); setLiveSteps([]); setContextStatus(null);
+    setLive(''); setLiveReasoning(''); setLiveSteps([]); setLiveSources([]); setContextStatus(null);
     setStreaming(true); setStreamFromId(origin); setErr(null);
     let succeeded = false;
     let accepted = false;
@@ -425,6 +427,7 @@ export default function App() {
         if (index >= 0) copy[index] = { tool: name, result };
         return copy;
       }),
+      onSources: sources => setLiveSources(sources),
     };
     let unreachable = false;
     try {
@@ -478,7 +481,7 @@ export default function App() {
       }
       abortRef.current = null; requestRef.current = null; streamTargetRef.current = null;
       setStreaming(false); setStreamFromId(null); setLive(''); setLiveReasoning('');
-      setLiveSteps([]); setPendingQuestion(null); setSendingImages([]); setSendingDocuments([]);
+      setLiveSteps([]); setLiveSources([]); setPendingQuestion(null); setSendingImages([]); setSendingDocuments([]);
     }
     return succeeded;
   }
@@ -673,6 +676,8 @@ export default function App() {
         live={live}
         liveReasoning={liveReasoning}
         liveSteps={liveSteps}
+        liveSources={liveSources}
+        onOpenSource={(treeId, nodeId) => void openMemorySource(treeId, nodeId)}
         contextStatus={contextStatus}
         reconnecting={reconnecting}
         pendingQuestion={pendingQuestion}
@@ -704,7 +709,7 @@ export default function App() {
         <LearningMap
           nodes={treeNodes}
           activeId={activeNodeId}
-          onSelect={id => { if (compactLayout) setRightOpen(false); void selectNode(id); }}
+          onSelect={(id, anchor) => { if (compactLayout) setRightOpen(false); void selectNode(id, anchor); }}
           onDelete={onDeleteNode}
           deleteDisabled={streaming}
           onCollapse={() => { setRightOpen(false); saveValue("bl-map-open", false); }}

@@ -28,6 +28,23 @@ export interface TreeNode extends LearningFields {
   seed_text: string | null; has_summary: boolean;
 }
 export interface ToolStep { tool: string; result: string | null }
+/** A memory record an answer was given; ids and titles only, never memory text. */
+export interface AnswerSource {
+  memory_id: number;
+  source_node_id: number | null;
+  tree_id: number | null;
+  tree_title: string;
+  scope: 'path' | 'tree' | 'other';
+}
+/** One topic search result; message hits carry the message id so the map can jump to the passage. */
+export interface SearchHit {
+  node_id: number;
+  message_id: number | null;
+  kind: 'title' | 'message' | 'note' | 'memory';
+  snippet: string;
+  rank: number;
+}
+export interface RetrievalSettings { include_siblings: boolean; include_other_trees: boolean; revision: string }
 export interface DocumentSummary {
   id: string; name: string; media_type: string; size: number; characters: number; warnings: string[];
 }
@@ -37,6 +54,7 @@ export interface DocumentDetail extends DocumentSummary {
 export interface Message {
   id: number; role: 'user' | 'assistant'; content: string; answered_by: string | null;
   images?: string[] | null; reasoning?: string | null; steps?: ToolStep[] | null;
+  sources?: AnswerSource[] | null;
   documents?: DocumentSummary[];
 }
 export interface NodeDetail extends LearningFields {
@@ -47,6 +65,7 @@ export interface ThreadNode extends LearningFields {
   node_id: number; parent_id: number | null; title: string; seed_text: string | null;
   question: string | null; images: string[] | null; answer: string | null;
   reasoning: string | null; steps: ToolStep[] | null; answered_by: string | null;
+  sources?: AnswerSource[] | null;
   question_message_id?: number | null; answer_message_id?: number | null;
   documents?: DocumentSummary[];
   attempts?: { message_id: number; status: string; content: string }[];

@@ -16,6 +16,8 @@
 .lm-results button { display: block; width: 100%; padding: 9px 8px; border: 0; border-radius: 6px; background: transparent; text-align: left; font-size: 12px; }
 .lm-results button > span { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.6; }
 .lm-results button:hover { background: var(--panel); color: var(--text); }
+.lm-result-group { border-top: 1px dashed var(--border); margin-top: 4px; padding-top: 4px; }
+.lm-results .lm-result-snippet { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-top: 2px; color: var(--muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
 .lm-viewport { flex: 1; min-height: 0; overflow: hidden; position: relative; touch-action: none; cursor: grab; overscroll-behavior: contain; background-image: radial-gradient(var(--border-strong) .65px, transparent .65px); background-size: 18px 18px; }
 .lm-viewport.dragging { cursor: grabbing; }
 .lm-viewport.dragging * { cursor: grabbing; }

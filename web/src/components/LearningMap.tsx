@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
-import type { TreeNode } from "../types";
+import type { NavigationAnchor, SearchHit, TreeNode } from "../types";
+import { api } from "../api";
+import { createMapSearcher, localMatches, mergeSearchResults, searchAnchor } from "../lib/mapSearch";
 import { groupAncestorIds, groupTopics, layoutTopics, TOPIC_CARD } from "../lib/topicLayout";
 import { navigateMapView } from "../lib/mapCamera";
 import type { Camera, MapViewAction, ReturnView } from "../lib/mapCamera";
@@ -11,7 +13,8 @@ import { NodeActions } from "./NodeActions";
 interface Props {
   nodes: TreeNode[];
   activeId: number | null;
-  onSelect: (id: number) => void;
+  /** A search hit on an answer passes an anchor so the conversation scrolls to the passage. */
+  onSelect: (id: number, anchor?: Omit<NavigationAnchor, "nodeId" | "nonce">) => void;
   onDelete: (id: number) => void;
   onCollapse: () => void;
   width: number;
@@ -51,6 +54,9 @@ export function LearningMap({ nodes, activeId, onSelect, onDelete, onCollapse, w
   const layout = useMemo(() => layoutTopics(tree, visibleCollapsed, expanded), [tree, visibleCollapsed, expanded]);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [hits, setHits] = useState<SearchHit[]>([]);
+  const searcherRef = useRef(createMapSearcher({ search: (treeId, needle, signal) => api.searchTree(treeId, needle, 30, signal) }));
+  const treeId = nodes[0]?.tree_id ?? null;
   const [camera, setCamera] = useState<Camera>({ x: 0, y: 0, zoom: 1 });
   const [returnView, setReturnView] = useState<ReturnView | null>(null);
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
@@ -80,7 +86,17 @@ export function LearningMap({ nodes, activeId, onSelect, onDelete, onCollapse, w
     setQuery("");
     setSearchOpen(false);
     setReturnView(null);
+    // Results from the previous topic must never show under this one.
+    searcherRef.current.cancel();
+    setHits([]);
   }, [identity]);
+
+  useEffect(() => {
+    const searcher = searcherRef.current;
+    if (!query.trim() || treeId === null) { searcher.cancel(); setHits([]); return; }
+    searcher.run(treeId, query, setHits);
+    return () => searcher.cancel();
+  }, [query, treeId, identity]);
 
   useLayoutEffect(() => {
     const element = canvasRef.current;
@@ -208,18 +224,22 @@ export function LearningMap({ nodes, activeId, onSelect, onDelete, onCollapse, w
     pointers.current.delete(event.pointerId);
     if (!pointers.current.size) setDragging(false);
   };
-  const selectResult = (node: TreeNode) => {
+  const selectResult = (node: TreeNode, anchor?: Omit<NavigationAnchor, "nodeId" | "nonce">) => {
     const groupId = tree.nodeToGroup.get(node.id);
     if (groupId != null) setExpanded((old) => new Set(old).add(groupId));
     setQuery("");
     setSearchOpen(false);
-    onSelect(node.id);
-    if (node.id === activeId) requestAnimationFrame(focusSelected);
+    onSelect(node.id, anchor);
+    if (node.id === activeId && !anchor) requestAnimationFrame(focusSelected);
   };
-  const results = useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase();
-    return needle ? nodes.filter((node) => `${node.title}\n${node.seed_text ?? ""}`.toLocaleLowerCase().includes(needle)) : [];
-  }, [nodes, query]);
+  const selectHit = (hit: SearchHit) => {
+    const node = nodes.find((item) => item.id === hit.node_id);
+    if (node) selectResult(node, searchAnchor(hit));
+  };
+  const results = useMemo(() => localMatches(nodes, query), [nodes, query]);
+  const merged = useMemo(() => mergeSearchResults(results, hits, nodes), [results, hits, nodes]);
+  const resultCount = merged.local.length + merged.remote.length;
+  const hitKind: Record<SearchHit["kind"], string> = { title: t("标题", "Title"), message: t("回答", "Answer"), note: t("笔记", "Note"), memory: t("记忆", "Memory") };
   const activeGroupId = activeId == null ? undefined : tree.nodeToGroup.get(activeId);
   const nodeStyle = (x: number, y: number, height: number): CSSProperties => ({ left: x, top: y, width: TOPIC_CARD.width, height });
 
@@ -239,7 +259,7 @@ export function LearningMap({ nodes, activeId, onSelect, onDelete, onCollapse, w
       </div>
       {searchOpen && <div className="lm-search">
         <div className="lm-search-field"><Icon name="search" /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") { setSearchOpen(false); setQuery(""); } }} placeholder={t("找一个问题", "Find a question")} aria-label={t("搜索问题或引用", "Search questions or quotes")} />{query && <button type="button" className="lm-icon" aria-label={t("清空搜索", "Clear search")} onClick={() => setQuery("")}><Icon name="close" /></button>}</div>
-        {query.trim() && <div className="lm-results" aria-label={t("搜索结果", "Search results")}><span className="lm-result-count" role="status">{results.length ? t("{count} 个结果", "{count} results", { count: results.length }) : t("没有找到相关问题", "No matching questions")}</span>{results.slice(0, 30).map((node) => <button type="button" key={node.id} onClick={() => selectResult(node)}><span>{node.title || node.seed_text || t("新问题", "New question")}</span></button>)}</div>}
+        {query.trim() && <div className="lm-results" aria-label={t("搜索结果", "Search results")}><span className="lm-result-count" role="status">{resultCount ? t("{count} 个结果", "{count} results", { count: resultCount }) : t("没有找到相关问题", "No matching questions")}</span>{merged.local.map((node) => <button type="button" key={node.id} onClick={() => selectResult(node)}><span>{node.title || node.seed_text || t("新问题", "New question")}</span></button>)}{merged.remote.length > 0 && <div className="lm-result-group" role="group" aria-label={t("记录中的匹配", "Matches in history")}>{merged.remote.map((hit) => { const node = nodes.find((item) => item.id === hit.node_id); return <button type="button" key={`${hit.kind}:${hit.node_id}:${hit.message_id ?? ""}`} onClick={() => selectHit(hit)}><span>{node?.title || node?.seed_text || t("新问题", "New question")}</span><small className="lm-result-snippet">{hitKind[hit.kind]} · {hit.snippet}</small></button>; })}</div>}</div>}
       </div>}
       <div className={`lm-viewport${dragging ? " dragging" : ""}`} ref={canvasRef} tabIndex={0} role="region" aria-label={t("学习树画布，方向键平移，加减键缩放，Home 键总览，Escape 键返回原视图", "Learning tree canvas. Arrow keys pan; plus and minus zoom; Home shows the overview; Escape restores the previous view.")} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={stopPointer} onPointerCancel={stopPointer} onLostPointerCapture={stopPointer} onKeyDown={(event) => {
         if (event.target !== event.currentTarget) return;

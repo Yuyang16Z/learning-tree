@@ -122,6 +122,7 @@ const diagnostics: [string, string][] = [
   ["该 MCP 正忙，请稍后再试", "This MCP server is busy. Try again later."],
   ["MCP 等待超时；执行结果未确认，请检查状态后再重试。", "Waiting for MCP timed out; its outcome is unknown. Check its status before retrying."],
   ["网络请求失败，请检查连接后重试。", "Network request failed. Check the connection and try again."],
+  ["检索范围设置已在其他窗口更新，请重新载入。", "Retrieval scope settings changed in another window. Reload before saving."],
 ];
 const managedNames: Record<string, [string, string]> = {
   "web-research": ["联网搜索", "Web search"],
