@@ -9,6 +9,9 @@ import re
 from .context_budget import ContextBudgetExceeded, estimate_request_tokens
 
 SEARCH_TOOL_NAME = "search_available_tools"
+# Preloaded before any search: the built-in web tools and the managed web-research
+# MCP's equivalents, whose names carry the mcp_{server_id}_ prefix.
+_PRELOADED = re.compile(r"(?:mcp_\d+_)?(web_search|fetch|read_webpage)")
 SEARCH_TOOL_DEF = {
     "type": "function",
     "function": {
@@ -92,7 +95,7 @@ class ToolCatalog:
         if self._cost([]) > self.budget:
             raise ContextBudgetExceeded()
         self._active: list[str] = []
-        initial = [name for name in ("web_search", "fetch") if name in self._registry]
+        initial = [name for name in self._registry if _PRELOADED.fullmatch(name)]
         if isinstance(query, str) and query.strip():
             initial.extend(self._matches(query.strip()[:300])[:3])
         for name in dict.fromkeys(initial):
