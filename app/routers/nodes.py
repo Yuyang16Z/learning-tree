@@ -1169,6 +1169,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     guarded_execute,
                     protected_system=context_stats["protected_system"],
                     diagnostics=usage,
+                    cache_prefix=context_stats.get("stable_system"),
                     **({"tool_catalog": tool_catalog, "max_rounds": 6} if tool_catalog else {}),
                     **({"deep": True} if body.deep_think else {}),
                 )
@@ -1181,6 +1182,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                         llm_messages,
                         deep=body.deep_think,
                         diagnostics=usage,
+                        cache_prefix=context_stats.get("stable_system"),
                     )
                 )
             model_started = time.monotonic()

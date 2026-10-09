@@ -82,20 +82,38 @@ def _wire(units):
     ]
 
 
-def _full_system(ancestors, current, memory_note):
-    lines = [BASE_SYSTEM, f"当前节点：{current.title[:120]}（node={current.id}）"]
-    if memory_note:
-        lines.append(memory_note)
+def _path_lines(ancestors) -> list[str]:
+    lines = []
     for node, messages in ancestors:
         lines.append(f"学习路径：{node.title[:120]}（node={node.id}）")
         if not messages and node.summary:
             lines.append(f"历史导入摘要（无原文可核对）：{node.summary}")
         if node.learning_note:
             lines.append(f"用户在「{node.title}」留下的理解笔记：{node.learning_note}")
+    return lines
+
+
+def stable_prefix(ancestors) -> str:
+    """The head of the system prompt shared by every turn under the same path."""
+    return "\n".join([BASE_SYSTEM, *_path_lines(ancestors)])
+
+
+def _full_system(ancestors, current, memory_note, document_note=""):
+    # Stable-first order: fixed rules and the ancestor path change least often,
+    # then the current node, note and quote, and the per-turn material last.
+    lines = [
+        BASE_SYSTEM,
+        *_path_lines(ancestors),
+        f"当前节点：{current.title[:120]}（node={current.id}）",
+    ]
     if current.learning_note:
         lines.append(f"当前用户理解笔记（未经验证）：{current.learning_note}")
     if current.seed_text:
         lines.append(f"当前追问引用的原文：\n<学习引用>{current.seed_text}</学习引用>")
+    if document_note:
+        lines.append(document_note)
+    if memory_note:
+        lines.append(memory_note)
     return "\n".join(lines)
 
 
@@ -148,18 +166,18 @@ def build_context(
         # render_document_context budgets bytes; a third of the remaining room, capped.
         document_budget = min(5000, byte_budget(max(0, (assembly_budget - mandatory_cost) // 3)))
         document_note = render_document_context(documents, question, document_budget)
-        if document_note:
-            document_note = "\n" + document_note
-    system = _full_system(ancestors, current, memory_note) + document_note
+    system = _full_system(ancestors, current, memory_note, document_note)
     messages = _wire(units) + [last]
 
     if diagnostics is not None:
-        # This core contains the current quote/note. It is internal request
-        # assembly state, not a public or loggable diagnostics payload.
+        # This core and the stable prefix contain prompt text (the current quote,
+        # note and path). They are internal request assembly state, not a public
+        # or loggable diagnostics payload.
         diagnostics.update(
             compacted=False,
             raw_estimate=count(system, messages),
             protected_system=protected_system,
+            stable_system=stable_prefix(ancestors),
         )
     if count(system, messages) <= assembly_budget:
         if diagnostics is not None:
@@ -167,9 +185,12 @@ def build_context(
         return system, messages
 
     # The current question, selected passage and current note are mandatory.
-    base = protected_system + document_note + "\n" + COMPACTION_NOTICE
+    base = _full_system([], current, "", document_note) + "\n" + COMPACTION_NOTICE
     if count(base, [last]) > hard_budget:
         raise ContextBudgetExceeded()
+    if diagnostics is not None:
+        # The ancestor path is replaced by excerpts here; only the fixed rules stay.
+        diagnostics["stable_system"] = BASE_SYSTEM
     profile, memory_note = split_profile(memory_note)
     # User-edited preferences are not automatically abbreviated into fragments.
     # Preserve them before older turns if possible; mandatory question/source wins.

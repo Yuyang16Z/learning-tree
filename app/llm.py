@@ -14,7 +14,7 @@ without an API key.
 import inspect
 import json
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from openai import OpenAI
@@ -40,6 +40,9 @@ class LLMSpec:
     context_window: int = 32768
     # Learned ratio of provider-reported to locally estimated input tokens (1.0 = unknown).
     calibration: float = 1.0
+    # Per-request stable head of the system prompt that native caching may mark;
+    # prompt text, so it is kept out of reprs and set only on request copies.
+    cache_prefix: str | None = field(default=None, repr=False, compare=False)
 
 
 # Base URLs whose provider answered HTTP 400 to stream_options; remembered per process.
@@ -158,10 +161,12 @@ def stream_chat(
     deep: bool = False,
     *,
     diagnostics: dict | None = None,
+    cache_prefix: str | None = None,
 ) -> Iterator[tuple[str, str]]:
     """Yield (kind, text) chunks, where kind is "reasoning" or "text".
 
     diagnostics, when given, receives the estimate and reported usage of the request.
+    cache_prefix is the stable head of `system` that a native cache may mark.
     """
     if _is_mock(spec):
         if deep:
@@ -176,7 +181,8 @@ def stream_chat(
     )
     system, messages = prepared.system, prepared.messages
     if spec.protocol == "anthropic":
-        usage = yield from anthropic_provider.stream_chat(spec, system, messages, deep)
+        turn_spec = replace(spec, cache_prefix=cache_prefix) if cache_prefix else spec
+        usage = yield from anthropic_provider.stream_chat(turn_spec, system, messages, deep)
         _record_round(diagnostics, prepared.estimated_input_tokens, usage)
         return
 
@@ -350,6 +356,7 @@ def run_agent(
     tool_catalog: ToolCatalog | None = None,
     protected_system: str | None = None,
     diagnostics: dict | None = None,
+    cache_prefix: str | None = None,
 ) -> Iterator[dict]:
     """Yield events: {"type":"tool_start"|"tool_end"|"reasoning"|"delta", ...}.
 
@@ -361,6 +368,7 @@ def run_agent(
     tool_defs: OpenAI-compatible definitions for both built-in and MCP tools.
     execute(name, args): caller-provided router for direct built-in calls or MCP forwarding.
     diagnostics, when given, collects per-round estimates, usage and the tool-round count.
+    cache_prefix is the stable head of `system` that a native cache may mark.
     """
     if _is_mock(spec):
         # A demo must never launch a real process or invoke a selected external tool.
@@ -371,6 +379,8 @@ def run_agent(
     # copies, including newly returned tool output before every model call.
     convo: list[dict] = list(messages)
     policy = ContextPolicy.from_spec(spec)
+    # The prefix travels on a request copy so adapters and doubles keep their signatures.
+    turn_spec = replace(spec, cache_prefix=cache_prefix) if cache_prefix else spec
 
     for round_index in range(max_rounds + 1):
         final = round_index == max_rounds
@@ -395,9 +405,9 @@ def run_agent(
         )
         request = [{"role": "system", "content": prepared.system}, *prepared.messages]
         turn = (
-            _chat_once(spec, request, current_tools, deep=True)
+            _chat_once(turn_spec, request, current_tools, deep=True)
             if deep
-            else _chat_once(spec, request, current_tools)
+            else _chat_once(turn_spec, request, current_tools)
         )
         streamed = inspect.isgenerator(turn)
         r = (yield from _relay_turn(turn, deep)) if streamed else turn

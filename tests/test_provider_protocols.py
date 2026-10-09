@@ -307,6 +307,111 @@ def test_deep_tool_loop_keeps_thinking_budget_signatures_and_private_blocks(
     assert all(transport.is_closed for transport in transports)
 
 
+CACHE_PREFIX = "固定规则。" + "x" * 1100
+CACHE_TAIL = "\n当前节点：当前问题（node=9）"
+
+
+def test_cache_prefix_becomes_a_cached_system_block_with_a_top_level_marker(monkeypatch):
+    monkeypatch.setattr(adapter, "_CACHE_CONTROL_UNSUPPORTED", set())
+    _, bodies, _ = mock_anthropic(monkeypatch, [sse(), sse([TOOL_USE], stop="tool_use"), sse()])
+    history = [{"role": "user", "content": "问题"}]
+    diagnostics = {}
+    assert list(
+        llm.stream_chat(
+            SPEC,
+            CACHE_PREFIX + CACHE_TAIL,
+            history,
+            diagnostics=diagnostics,
+            cache_prefix=CACHE_PREFIX,
+        )
+    ) == [("text", "你好")]
+    assert bodies[0]["system"] == [
+        {"type": "text", "text": CACHE_PREFIX, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": CACHE_TAIL},
+    ]
+    assert bodies[0]["cache_control"] == {"type": "ephemeral"}
+    assert diagnostics["rounds"][0]["input_tokens"] == 10
+    events = list(
+        llm.run_agent(
+            SPEC,
+            CACHE_PREFIX + CACHE_TAIL,
+            history,
+            TOOLS,
+            lambda *args: "资料",
+            cache_prefix=CACHE_PREFIX,
+        )
+    )
+    assert events[-1] == {"type": "delta", "text": "你好"}
+    for body in bodies[1:]:
+        assert body["system"][0] == {
+            "type": "text",
+            "text": CACHE_PREFIX,
+            "cache_control": {"type": "ephemeral"},
+        }
+        assert body["system"][1]["text"].startswith(CACHE_TAIL)
+        assert body["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in json.dumps(bodies[1]["messages"]), "stored blocks are untouched"
+
+
+TOOL_USE = {"type": "tool_use", "id": "toolu_a", "name": "mcp_1_lookup", "input": {"q": "A"}}
+
+
+@pytest.mark.parametrize(
+    "prefix,system",
+    [
+        ("短前缀", "短前缀\n其余系统提示"),  # below the cacheable minimum
+        (CACHE_PREFIX, "另一段开头" + CACHE_PREFIX),  # fit_request replaced the system
+        (None, CACHE_PREFIX + CACHE_TAIL),  # no prefix supplied
+    ],
+)
+def test_system_stays_a_plain_string_without_a_usable_cache_prefix(monkeypatch, prefix, system):
+    monkeypatch.setattr(adapter, "_CACHE_CONTROL_UNSUPPORTED", set())
+    _, bodies, _ = mock_anthropic(monkeypatch, [sse()])
+    list(llm.stream_chat(SPEC, system, [{"role": "user", "content": "问题"}], cache_prefix=prefix))
+    assert bodies[0]["system"] == system and "cache_control" not in bodies[0]
+
+
+@pytest.mark.parametrize("path", ["stream", "agent"])
+def test_cache_control_rejection_retries_plain_once_and_is_remembered(monkeypatch, path):
+    monkeypatch.setattr(adapter, "_CACHE_CONTROL_UNSUPPORTED", set())
+    rejection = httpx.Response(
+        400,
+        json={
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "cache_control is not supported by this proxy; unit-test-key",
+            },
+        },
+    )
+    _, bodies, transports = mock_anthropic(monkeypatch, [rejection, sse(), sse()])
+    history = [{"role": "user", "content": "问题"}]
+
+    def run():
+        if path == "stream":
+            return list(
+                llm.stream_chat(SPEC, CACHE_PREFIX + CACHE_TAIL, history, cache_prefix=CACHE_PREFIX)
+            )
+        return list(
+            llm.run_agent(
+                SPEC,
+                CACHE_PREFIX + CACHE_TAIL,
+                history,
+                TOOLS,
+                lambda *a: "",
+                cache_prefix=CACHE_PREFIX,
+            )
+        )
+
+    assert run()[-1] in (("text", "你好"), {"type": "delta", "text": "你好"})
+    assert isinstance(bodies[0]["system"], list) and bodies[0]["cache_control"]
+    assert bodies[1]["system"] == CACHE_PREFIX + CACHE_TAIL and "cache_control" not in bodies[1]
+    assert run()[-1] in (("text", "你好"), {"type": "delta", "text": "你好"})
+    assert len(bodies) == 3 and bodies[2]["system"] == CACHE_PREFIX + CACHE_TAIL
+    assert adapter._CACHE_CONTROL_UNSUPPORTED == {SPEC.base_url}
+    assert all(transport.is_closed for transport in transports)
+
+
 def test_anthropic_usage_sums_cache_tokens_into_input_and_reports_cached_reads(monkeypatch):
     cached = {"cache_creation_input_tokens": 3, "cache_read_input_tokens": 7}
     _, _, _ = mock_anthropic(monkeypatch, [sse(usage=cached), sse(), sse()])

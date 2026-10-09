@@ -116,6 +116,24 @@ def ask(client, question="继续解释条件。", **kwargs):
     ]
 
 
+def test_answer_requests_carry_the_stable_prompt_prefix_for_provider_caching(api, monkeypatch):
+    from app.context import BASE_SYSTEM
+
+    client, _, _ = api
+    received = []
+
+    def stream(spec, system, messages, **kwargs):
+        received.append((system, kwargs.get("cache_prefix")))
+        yield "text", "合成回答。"
+
+    monkeypatch.setattr(nodes, "stream_chat", stream)
+    assert ask(client)[-1]["status"] == "complete"
+    ((system, prefix),) = received
+    assert prefix == BASE_SYSTEM + "\n学习路径：祖先（node=1）"
+    assert system.startswith(prefix)
+    assert "SYNTHETIC_SIBLING_SECRET" not in prefix and "继续解释条件" not in prefix
+
+
 def _long_summary_history(engine):
     with Session(engine) as session:
         cfg = session.get(ModelConfig, 1)

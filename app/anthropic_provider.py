@@ -38,6 +38,37 @@ def client(spec) -> Anthropic:
     )
 
 
+# Base URLs whose provider answered HTTP 400 to cache_control; remembered per process.
+_CACHE_CONTROL_UNSUPPORTED: set[str] = set()
+# Shorter prefixes are below the provider's cacheable minimum and would only cost a write.
+CACHE_PREFIX_MIN_CHARS = 1024
+
+
+def _cache_rejected(exc: Exception) -> bool:
+    # Inspected only; provider error text is never logged or returned to a client.
+    return getattr(exc, "status_code", None) == 400 and "cache_control" in str(exc)
+
+
+def _without_cache(kwargs: dict) -> dict:
+    plain = {key: value for key, value in kwargs.items() if key != "cache_control"}
+    if isinstance(plain.get("system"), list):
+        plain["system"] = "".join(block["text"] for block in plain["system"])
+    return plain
+
+
+def _open_stream(api, spec, kwargs: dict):
+    """Enter a message stream; a proxy that rejects cache markers gets one plain retry."""
+    manager = api.messages.stream(**kwargs)
+    try:
+        return manager, manager.__enter__()
+    except Exception as exc:
+        if "cache_control" not in kwargs or not _cache_rejected(exc):
+            raise
+        _CACHE_CONTROL_UNSUPPORTED.add(spec.base_url)
+        manager = api.messages.stream(**_without_cache(kwargs))
+        return manager, manager.__enter__()
+
+
 def _image(url: str) -> dict:
     if url.startswith("data:"):
         match = re.fullmatch(r"data:(image/(?:jpeg|png|gif|webp));base64,(.+)", url, re.S)
@@ -122,7 +153,23 @@ def messages(conversation: list[dict]) -> tuple[str, list[dict]]:
 def _kwargs(spec, conversation: list[dict], tools: list[dict] | None = None) -> dict:
     system, converted = messages(conversation)
     kwargs = {"model": spec.llm_model, "max_tokens": spec.max_tokens, "messages": converted}
-    if system:
+    prefix = getattr(spec, "cache_prefix", None)
+    if (
+        system
+        and prefix
+        and len(prefix) >= CACHE_PREFIX_MIN_CHARS
+        and system.startswith(prefix)
+        and spec.base_url not in _CACHE_CONTROL_UNSUPPORTED
+    ):
+        # Block 1 is the stable head (rules and path) with an explicit breakpoint;
+        # the top-level marker lets the provider also cache the growing turn tail.
+        remainder = system[len(prefix) :]
+        kwargs["system"] = [
+            {"type": "text", "text": prefix, "cache_control": {"type": "ephemeral"}},
+            *([{"type": "text", "text": remainder}] if remainder else []),
+        ]
+        kwargs["cache_control"] = {"type": "ephemeral"}
+    elif system:
         kwargs["system"] = system
     if tools:
         kwargs["tools"] = [
@@ -195,7 +242,14 @@ def stream_chat(
     stopped, reason = False, None
     parts: dict | None = None
     with client(spec) as api:
-        with api.messages.create(**kwargs, stream=True) as stream:
+        try:
+            stream = api.messages.create(**kwargs, stream=True)
+        except Exception as exc:
+            if "cache_control" not in kwargs or not _cache_rejected(exc):
+                raise
+            _CACHE_CONTROL_UNSUPPORTED.add(spec.base_url)
+            stream = api.messages.create(**_without_cache(kwargs), stream=True)
+        with stream:
             for event in stream:
                 if event.type == "message_start":
                     parts = _usage_parts(event.message.usage)
@@ -236,7 +290,8 @@ def chat_once(spec, conversation: list[dict], tools: list[dict], deep: bool = Fa
         kwargs["thinking"] = _thinking(spec)
     stopped = False
     with client(spec) as api:
-        with api.messages.stream(**kwargs) as stream:
+        manager, stream = _open_stream(api, spec, kwargs)
+        try:
             for event in stream:
                 # One helper event family only; raw deltas would double the text.
                 if event.type == "text":
@@ -248,6 +303,8 @@ def chat_once(spec, conversation: list[dict], tools: list[dict], deep: bool = Fa
             if not stopped:
                 raise RuntimeError("模型连接在回答完成前断开，可以重试。")
             response = stream.get_final_message()
+        finally:
+            manager.__exit__(None, None, None)
     _check_stop(response.stop_reason, tools=bool(tools))
     calls = [
         {"id": block.id, "name": block.name, "args": block.input}
