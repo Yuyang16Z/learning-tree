@@ -52,7 +52,7 @@ TOOLS = [
 ]
 
 
-def sse(blocks=None, stop="end_turn", *, terminal=True):
+def sse(blocks=None, stop="end_turn", *, terminal=True, usage=None):
     blocks = blocks or [{"type": "text", "text": "你好"}]
     events = [
         {
@@ -65,7 +65,7 @@ def sse(blocks=None, stop="end_turn", *, terminal=True):
                 "content": [],
                 "stop_reason": None,
                 "stop_sequence": None,
-                "usage": {"input_tokens": 10, "output_tokens": 1},
+                "usage": {"input_tokens": 10, "output_tokens": 1, **(usage or {})},
             },
         }
     ]
@@ -307,6 +307,54 @@ def test_deep_tool_loop_keeps_thinking_budget_signatures_and_private_blocks(
     assert all(transport.is_closed for transport in transports)
 
 
+def test_anthropic_usage_sums_cache_tokens_into_input_and_reports_cached_reads(monkeypatch):
+    cached = {"cache_creation_input_tokens": 3, "cache_read_input_tokens": 7}
+    _, _, _ = mock_anthropic(monkeypatch, [sse(usage=cached), sse(), sse()])
+    diagnostics = {}
+    assert list(
+        llm.stream_chat(
+            SPEC, "系统", [{"role": "user", "content": "问题"}], diagnostics=diagnostics
+        )
+    ) == [("text", "你好")]
+    (round_one,) = diagnostics["rounds"]
+    # Total input = uncached + cache creation + cache read; output comes from message_delta.
+    assert round_one["input_tokens"] == 20 and round_one["cached_input_tokens"] == 7
+    assert round_one["output_tokens"] == 12
+    assert round_one["estimated_input_tokens"] == estimate_request_tokens(
+        "系统", [{"role": "user", "content": "问题"}], protocol="anthropic"
+    )
+    plain = {}
+    list(llm.stream_chat(SPEC, "系统", [{"role": "user", "content": "问题"}], diagnostics=plain))
+    assert (
+        plain["rounds"][0]["input_tokens"] == 10 and plain["rounds"][0]["cached_input_tokens"] == 0
+    )
+    assert llm.complete(SPEC, "系统", [{"role": "user", "content": "问题"}], diagnostics=plain)
+    assert len(plain["rounds"]) == 2 and plain["rounds"][1]["output_tokens"] == 12
+
+
+def test_anthropic_tool_loop_records_every_round_and_counts_tool_rounds(monkeypatch):
+    first = [{"type": "tool_use", "id": "toolu_a", "name": "mcp_1_lookup", "input": {"q": "A"}}]
+    _, _, _ = mock_anthropic(monkeypatch, [sse(first, stop="tool_use"), sse()])
+    diagnostics = {}
+    events = list(
+        llm.run_agent(
+            SPEC,
+            "系统",
+            [{"role": "user", "content": "查资料"}],
+            TOOLS,
+            lambda *args: "资料",
+            diagnostics=diagnostics,
+        )
+    )
+    assert events[-1] == {"type": "delta", "text": "你好"}
+    assert diagnostics["tool_rounds"] == 1 and len(diagnostics["rounds"]) == 2
+    assert all(r["input_tokens"] == 10 and r["output_tokens"] == 12 for r in diagnostics["rounds"])
+    assert (
+        diagnostics["rounds"][1]["estimated_input_tokens"]
+        > (diagnostics["rounds"][0]["estimated_input_tokens"])
+    )
+
+
 def test_default_tool_loop_keeps_three_argument_adapters_compatible(monkeypatch):
     called = []
 
@@ -493,6 +541,129 @@ def test_openai_wire_compatibility_and_default_protocol(monkeypatch):
     assert "max_tokens" not in bodies[0] and "max_completion_tokens" not in bodies[0]
 
 
+def openai_client(handler):
+    return lambda spec: OpenAI(
+        base_url=spec.base_url,
+        api_key=spec.api_key,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        max_retries=0,
+    )
+
+
+def openai_stream(chunks, usage=None):
+    frames = [
+        {
+            "id": "chat_test",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "custom-model",
+            "choices": [{"index": 0, "finish_reason": finish, "delta": delta}],
+        }
+        for delta, finish in chunks
+    ]
+    if usage is not None:
+        # The usage chunk carries an empty choices list before the terminal frame.
+        frames.append(
+            {
+                "id": "chat_test",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "custom-model",
+                "choices": [],
+                "usage": usage,
+            }
+        )
+    content = "".join("data: " + json.dumps(frame) + "\n\n" for frame in frames)
+    return httpx.Response(
+        200, headers={"content-type": "text/event-stream"}, content=content + "data: [DONE]\n\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "usage,cached",
+    [
+        (
+            {
+                "prompt_tokens": 120,
+                "completion_tokens": 7,
+                "prompt_tokens_details": {"cached_tokens": 64},
+            },
+            64,
+        ),
+        (
+            {
+                "prompt_tokens": 120,
+                "completion_tokens": 7,
+                "prompt_cache_hit_tokens": 48,
+                "prompt_cache_miss_tokens": 72,
+            },
+            48,
+        ),
+        ({"prompt_tokens": 120, "completion_tokens": 7}, 0),
+    ],
+)
+def test_openai_stream_requests_and_reads_the_usage_chunk(monkeypatch, usage, cached):
+    monkeypatch.setattr(llm, "_STREAM_OPTIONS_UNSUPPORTED", set())
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return openai_stream([({"role": "assistant", "content": "答"}, None), ({}, "stop")], usage)
+
+    monkeypatch.setattr(llm, "_client", openai_client(handler))
+    spec = LLMSpec("兼容", "https://provider.test/v1", "custom-model", "synthetic-key")
+    diagnostics = {}
+    assert list(
+        llm.stream_chat(
+            spec, "系统", [{"role": "user", "content": "问题"}], diagnostics=diagnostics
+        )
+    ) == [("text", "答")]
+    assert bodies[0]["stream_options"] == {"include_usage": True}
+    (round_one,) = diagnostics["rounds"]
+    assert round_one["input_tokens"] == 120 and round_one["output_tokens"] == 7
+    assert round_one["cached_input_tokens"] == cached
+    assert round_one["estimated_input_tokens"] == estimate_request_tokens(
+        "系统", [{"role": "user", "content": "问题"}]
+    )
+
+
+def test_openai_stream_options_rejection_falls_back_once_per_base_url(monkeypatch):
+    monkeypatch.setattr(llm, "_STREAM_OPTIONS_UNSUPPORTED", set())
+    bodies = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        bodies.append(body)
+        if "stream_options" in body:
+            return httpx.Response(
+                400,
+                json={"error": {"message": "Unknown parameter: stream_options", "type": "invalid"}},
+            )
+        return openai_stream([({"role": "assistant", "content": "答"}, None), ({}, "stop")])
+
+    monkeypatch.setattr(llm, "_client", openai_client(handler))
+    spec = LLMSpec("兼容", "https://gateway.test/v1", "custom-model", "synthetic-key")
+    diagnostics = {}
+    assert list(
+        llm.stream_chat(
+            spec, "系统", [{"role": "user", "content": "问题"}], diagnostics=diagnostics
+        )
+    ) == [("text", "答")]
+    assert ["stream_options" in body for body in bodies] == [True, False]
+    assert diagnostics["rounds"][0]["input_tokens"] is None
+    list(llm.stream_chat(spec, "系统", [{"role": "user", "content": "再问"}]))
+    assert len(bodies) == 3 and "stream_options" not in bodies[2]
+    assert "gateway.test" in "".join(llm._STREAM_OPTIONS_UNSUPPORTED)
+
+    def other_errors(request):
+        return httpx.Response(400, json={"error": {"message": "model not found"}})
+
+    monkeypatch.setattr(llm, "_client", openai_client(other_errors))
+    with pytest.raises(Exception):
+        list(llm.stream_chat(replace(spec, base_url="https://other.test/v1"), "系统", []))
+    assert "other.test" not in "".join(llm._STREAM_OPTIONS_UNSUPPORTED)
+
+
 def test_openai_stream_and_tool_loop_keep_existing_wire_format(monkeypatch):
     bodies = []
 
@@ -553,6 +724,7 @@ def test_openai_stream_and_tool_loop_keep_existing_wire_format(monkeypatch):
                         "message": message,
                     }
                 ],
+                "usage": {"prompt_tokens": 30 if has_result else 20, "completion_tokens": 5},
             },
         )
 
@@ -570,12 +742,20 @@ def test_openai_stream_and_tool_loop_keep_existing_wire_format(monkeypatch):
     assert list(llm.stream_chat(spec, "系统", [{"role": "user", "content": "问题"}])) == [
         ("text", "原流式")
     ]
+    diagnostics = {}
     events = list(
         llm.run_agent(
-            spec, "系统", [{"role": "user", "content": "问题"}], TOOLS, lambda *args: "查到资料"
+            spec,
+            "系统",
+            [{"role": "user", "content": "问题"}],
+            TOOLS,
+            lambda *args: "查到资料",
+            diagnostics=diagnostics,
         )
     )
     assert events[-1] == {"type": "delta", "text": "工具答案"}
+    assert [r["input_tokens"] for r in diagnostics["rounds"]] == [20, 30]
+    assert diagnostics["tool_rounds"] == 1
     assert bodies[-1]["messages"][-1] == {
         "role": "tool",
         "tool_call_id": "call_one",

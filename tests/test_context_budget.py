@@ -111,6 +111,22 @@ def test_policy_reserves_output_and_estimation_headroom():
     assert 0 < policy.input_budget < policy.window_tokens - policy.output_tokens
 
 
+def test_calibration_shrinks_but_never_enlarges_the_input_budget():
+    raw = ContextPolicy(8192, 1024).input_budget
+    assert ContextPolicy(8192, 1024, calibration=2.0).input_budget == raw // 2
+    assert ContextPolicy(8192, 1024, calibration=0.5).input_budget == raw
+    spec = SimpleNamespace(context_window=8192, max_tokens=1024, calibration=1.6)
+    assert ContextPolicy.from_spec(spec).input_budget == int(raw / 1.6)
+    assert (
+        ContextPolicy.from_spec(SimpleNamespace(context_window=8192, max_tokens=1024)).input_budget
+        == raw
+    )
+    # The request estimate itself stays pure; only the policy applies the ratio.
+    assert estimate_request_tokens(
+        "x", [{"role": "user", "content": "y"}]
+    ) == estimate_request_tokens("x", [{"role": "user", "content": "y"}])
+
+
 def test_short_request_is_preserved_as_a_separate_copy():
     messages = [{"role": "user", "content": "解释参数校验。"}]
     original = copy.deepcopy(messages)

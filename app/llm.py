@@ -37,6 +37,12 @@ class LLMSpec:
     protocol: Literal["openai", "anthropic"] = "openai"
     max_tokens: int = 4096
     context_window: int = 32768
+    # Learned ratio of provider-reported to locally estimated input tokens (1.0 = unknown).
+    calibration: float = 1.0
+
+
+# Base URLs whose provider answered HTTP 400 to stream_options; remembered per process.
+_STREAM_OPTIONS_UNSUPPORTED: set[str] = set()
 
 
 def _is_mock(spec: LLMSpec) -> bool:
@@ -45,6 +51,66 @@ def _is_mock(spec: LLMSpec) -> bool:
 
 def _client(spec: LLMSpec) -> OpenAI:
     return OpenAI(base_url=spec.base_url, api_key=spec.api_key, timeout=45.0, max_retries=0)
+
+
+def _rejects_stream_options(exc: Exception) -> bool:
+    # Inspected only; provider error text is never logged or returned to a client.
+    return getattr(exc, "status_code", None) == 400 and "stream_options" in str(exc)
+
+
+def _stream_completion(spec: LLMSpec, api: OpenAI, **kwargs):
+    """Start a streamed completion, asking for the usage chunk when the provider allows."""
+    if spec.base_url not in _STREAM_OPTIONS_UNSUPPORTED:
+        try:
+            return api.chat.completions.create(
+                **kwargs, stream=True, stream_options={"include_usage": True}
+            )
+        except Exception as exc:  # noqa: BLE001
+            if not _rejects_stream_options(exc):
+                raise
+            _STREAM_OPTIONS_UNSUPPORTED.add(spec.base_url)
+    return api.chat.completions.create(**kwargs, stream=True)
+
+
+def _openai_usage(usage) -> dict | None:
+    if usage is None:
+        return None
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached = getattr(details, "cached_tokens", None) if details is not None else None
+    if cached is None:
+        # DeepSeek reports prefix-cache hits through an untyped extra field.
+        cached = getattr(usage, "prompt_cache_hit_tokens", None)
+    return {
+        "input_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+        "cached_input_tokens": int(cached or 0),
+        "output_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+    }
+
+
+def _record_round(diagnostics: dict | None, estimated: int, usage: dict | None) -> None:
+    """Append one provider request to the caller's diagnostics side-channel."""
+    if diagnostics is None:
+        return
+    diagnostics.setdefault("rounds", []).append(
+        {
+            "estimated_input_tokens": estimated,
+            "input_tokens": usage["input_tokens"] if usage else None,
+            "cached_input_tokens": usage["cached_input_tokens"] if usage else None,
+            "output_tokens": usage["output_tokens"] if usage else None,
+        }
+    )
+
+
+def _collect_text(stream) -> tuple[str, dict | None]:
+    """Drain a (kind, text) generator, returning its text and its returned usage."""
+    parts = []
+    while True:
+        try:
+            kind, value = next(stream)
+        except StopIteration as stop:
+            return "".join(parts), stop.value
+        if kind == "text":
+            parts.append(value)
 
 
 def _chunks(s: str, n: int = 4) -> Iterator[str]:
@@ -85,9 +151,17 @@ def _mock_args(tool: dict, q: str) -> dict:
 
 # ---------- Standard / deep-thinking responses: streaming ----------
 def stream_chat(
-    spec: LLMSpec, system: str, messages: list[dict], deep: bool = False
+    spec: LLMSpec,
+    system: str,
+    messages: list[dict],
+    deep: bool = False,
+    *,
+    diagnostics: dict | None = None,
 ) -> Iterator[tuple[str, str]]:
-    """Yield (kind, text) chunks, where kind is "reasoning" or "text"."""
+    """Yield (kind, text) chunks, where kind is "reasoning" or "text".
+
+    diagnostics, when given, receives the estimate and reported usage of the request.
+    """
     if _is_mock(spec):
         if deep:
             for ch in _chunks("（mock 思考）先拆解问题 → 定位关键概念 → 组织答案……"):
@@ -101,17 +175,23 @@ def stream_chat(
     )
     system, messages = prepared.system, prepared.messages
     if spec.protocol == "anthropic":
-        yield from anthropic_provider.stream_chat(spec, system, messages, deep)
+        usage = yield from anthropic_provider.stream_chat(spec, system, messages, deep)
+        _record_round(diagnostics, prepared.estimated_input_tokens, usage)
         return
 
-    stream = _client(spec).chat.completions.create(
+    stream = _stream_completion(
+        spec,
+        _client(spec),
         model=spec.llm_model,
         messages=[{"role": "system", "content": system}, *messages],
-        stream=True,
     )
     finished = False
+    usage = None
     try:
         for chunk in stream:
+            if getattr(chunk, "usage", None) is not None:
+                # The usage chunk arrives with an empty choices list before [DONE].
+                usage = _openai_usage(chunk.usage)
             if not chunk.choices:
                 continue
             choice = chunk.choices[0]
@@ -129,6 +209,7 @@ def stream_chat(
             raise RuntimeError("模型连接在回答完成前断开，可以重试。")
     finally:
         stream.close()
+    _record_round(diagnostics, prepared.estimated_input_tokens, usage)
 
 
 # ---------- Tool calling: turn-based agent loop ----------
@@ -182,6 +263,7 @@ def _chat_once(spec: LLMSpec, convo: list[dict], tools: list[dict], deep: bool =
         "content": msg.content,
         "tool_calls": tcs,
         "reasoning": getattr(msg, "reasoning_content", None) or "",
+        "usage": _openai_usage(getattr(resp, "usage", None)),
     }
 
 
@@ -196,11 +278,13 @@ def run_agent(
     *,
     tool_catalog: ToolCatalog | None = None,
     protected_system: str | None = None,
+    diagnostics: dict | None = None,
 ) -> Iterator[dict]:
     """Yield events: {"type":"tool_start"|"tool_end"|"reasoning"|"delta", ...}.
 
     tool_defs: OpenAI-compatible definitions for both built-in and MCP tools.
     execute(name, args): caller-provided router for direct built-in calls or MCP forwarding.
+    diagnostics, when given, collects per-round estimates, usage and the tool-round count.
     """
     if _is_mock(spec):
         # A demo must never launch a real process or invoke a selected external tool.
@@ -239,11 +323,14 @@ def run_agent(
             if deep
             else _chat_once(spec, request, current_tools)
         )
+        _record_round(diagnostics, prepared.estimated_input_tokens, r.get("usage"))
         if deep and r.get("reasoning"):
             yield {"type": "reasoning", "text": r["reasoning"]}
         if r["tool_calls"]:
             if final:
                 raise RuntimeError("模型在工具调用结束后没有生成最终回答，请重试。")
+            if diagnostics is not None:
+                diagnostics["tool_rounds"] = diagnostics.get("tool_rounds", 0) + 1
             available = {tool["function"]["name"] for tool in current_tools}
             convo.append(
                 {
@@ -290,7 +377,9 @@ def run_agent(
 
 
 # ---------- Non-streaming responses: summarization ----------
-def complete(spec: LLMSpec, system: str, messages: list[dict]) -> str:
+def complete(
+    spec: LLMSpec, system: str, messages: list[dict], *, diagnostics: dict | None = None
+) -> str:
     if _is_mock(spec):
         return "（mock 摘要）本节点讲清了这个概念的关键点，可作为下层分支的背景。"
     prepared = fit_request(
@@ -298,7 +387,9 @@ def complete(spec: LLMSpec, system: str, messages: list[dict]) -> str:
     )
     system, messages = prepared.system, prepared.messages
     if spec.protocol == "anthropic":
-        return anthropic_provider.complete(spec, system, messages)
+        text, usage = _collect_text(anthropic_provider.stream_chat(spec, system, messages))
+        _record_round(diagnostics, prepared.estimated_input_tokens, usage)
+        return text
     resp = _client(spec).chat.completions.create(
         model=spec.llm_model,
         messages=[{"role": "system", "content": system}, *messages],
@@ -306,6 +397,9 @@ def complete(spec: LLMSpec, system: str, messages: list[dict]) -> str:
     )
     if resp.choices[0].finish_reason != "stop":
         raise RuntimeError("模型回答未完整结束，可以重试。")
+    _record_round(
+        diagnostics, prepared.estimated_input_tokens, _openai_usage(getattr(resp, "usage", None))
+    )
     return resp.choices[0].message.content or ""
 
 

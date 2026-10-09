@@ -27,6 +27,20 @@ class ModelConfig(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now)
 
 
+class ModelCalibration(SQLModel, table=True):
+    """Learned ratio between provider-reported and locally estimated input tokens.
+
+    Side data outside the change feed: it is updated after answers, so it must not
+    make every open window reload the model list or be reset by editing a model."""
+
+    config_id: int = Field(primary_key=True)
+    samples: int = 0
+    ratio: float = 1.0
+    estimated_total: int = 0
+    actual_total: int = 0
+    updated_at: datetime = Field(default_factory=_now)
+
+
 class Memory(SQLModel, table=True):
     """Long-term memory: global user preferences/habits or topic-specific facts.
 
@@ -166,6 +180,8 @@ class Message(SQLModel, table=True):
     reasoning: str | None = None
     # Tool steps: [{"tool":..,"args":..,"result":..}] for collapsible frontend display.
     steps: list | None = Field(default=None, sa_column=Column(JSON))
+    # Per-answer numbers only (token estimates, usage, timings); never prompt text.
+    diagnostics: dict | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=_now)
 
 

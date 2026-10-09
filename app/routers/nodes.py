@@ -14,6 +14,7 @@ from sqlalchemy import delete
 from sqlalchemy.orm import defer
 from sqlmodel import Session, select
 
+from ..calibration import record_usage
 from ..context import BASE_SYSTEM, build_context, context_messages, make_content
 from ..context_budget import ContextBudgetExceeded, ContextPolicy, estimate_request_tokens
 from ..context_sources import SOURCE_TOOL_DEF, SOURCE_TOOL_NAME, make_source_reader
@@ -73,6 +74,8 @@ class Generation:
     status: str = "pending"
     error: str | None = None
     message_id: int | None = None
+    # Numbers only (estimates, usage, timings); filled once the answer ends.
+    diagnostics: dict | None = None
     # Viewers waiting for new events, as (event loop, asyncio.Event) pairs. The producer
     # thread wakes them instead of each viewer polling the log on a timer.
     waiters: set = field(default_factory=set)
@@ -285,6 +288,7 @@ def _qa_rows(node: Node, messages: list[Message], session: Session) -> list[dict
                 "answer": answer.content if answer else None,
                 "reasoning": answer.reasoning if answer else None,
                 "steps": answer.steps if answer else None,
+                "diagnostics": answer.diagnostics if answer else None,
                 "answered_by": answer.answered_by if answer else None,
                 "attempts": [
                     {"message_id": m.id, "status": m.status, "content": m.content}
@@ -588,7 +592,7 @@ def explain(node_id: int, body: ExplainIn, session: Session = Depends(get_sessio
         if body.locale == "en"
         else f"请解释这段引用：{body.text}"
     )
-    spec = to_spec(cfg)
+    spec = to_spec(cfg, session)
     try:
         system, messages = build_context(
             ancestors,
@@ -642,6 +646,7 @@ def _persist(target_id: int, generation: Generation, label: str) -> None:
         message.content = "".join(generation.text)
         message.reasoning = "".join(generation.reasoning) or None
         message.steps = list(generation.steps) or None
+        message.diagnostics = generation.diagnostics or None
         message.status = generation.status
         node.status, node.error = generation.status, generation.error
         session.add(message)
@@ -763,7 +768,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
         cfg = resolve_config(session, body.config_id)
         if not cfg:
             raise HTTPException(400, "请先在设置中添加模型")
-        spec = to_spec(cfg)
+        spec = to_spec(cfg, session)
+        config_id = cfg.id
         previous_messages = get_messages(session, node_id)
         if node.status == "pending" or (
             node_id in _GENERATIONS and not _GENERATIONS[node_id].stop.is_set()
@@ -870,6 +876,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     document_ids=previous.document_ids,
                     reasoning=previous.reasoning,
                     steps=previous.steps,
+                    diagnostics=previous.diagnostics,
                 )
                 session.add(copied)
                 copied_history.append(copied)
@@ -935,6 +942,48 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
         stream = None
         title_queued = False
         last_checkpoint = time.monotonic()
+        started_at = time.monotonic()
+        model_started: float | None = None
+        timings = {"retrieval": 0.0, "tools": 0.0, "summary": 0.0}
+        # Provider rounds (estimates, reported usage) collected by stream_chat/run_agent.
+        usage: dict = {}
+        context_stats: dict = {}
+
+        def report_diagnostics() -> None:
+            """Numbers only: never the protected/stable system text held in context_stats."""
+            if model_started is None:
+                return
+            now = time.monotonic()
+            rounds = usage.get("rounds") or []
+
+            def total(key: str) -> int | None:
+                values = [r.get(key) for r in rounds if r.get(key) is not None]
+                return int(sum(values)) if values else None
+
+            def ms(seconds: float) -> int:
+                return int(round(max(0.0, seconds) * 1000))
+
+            report = {
+                "estimated_input_tokens": total("estimated_input_tokens")
+                or int(context_stats.get("estimated_input_tokens") or 0),
+                "actual_input_tokens": total("input_tokens"),
+                "cached_input_tokens": total("cached_input_tokens"),
+                "output_tokens": total("output_tokens"),
+                "compacted": bool(context_stats.get("compacted")),
+                "tool_rounds": int(usage.get("tool_rounds") or 0),
+                "calibration_ratio": round(float(spec.calibration), 3),
+                "timings_ms": {
+                    "retrieval": ms(timings["retrieval"]),
+                    "tools": ms(timings["tools"]),
+                    "summary": ms(timings["summary"]),
+                    "model": ms(now - model_started - timings["tools"]),
+                    "total": ms(now - started_at),
+                },
+            }
+            with generation.lock:
+                generation.diagnostics = report
+            generation.emit({"diagnostics": report})
+
         try:
             policy = ContextPolicy.from_spec(spec)
             if generation.stop.is_set():
@@ -958,6 +1007,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             memory = ""
             # Local inference must not hold _REQUEST_LOCK: stop/retry remain responsive.
             if not is_mock:
+                retrieval_started = time.monotonic()
                 with Session(engine) as memory_session:
                     memory = fetch_memory_note(
                         memory_session,
@@ -968,6 +1018,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                         # These sources are mandatory even after compaction.
                         existing_text=memory_quote + "\n" + (context_target.learning_note or ""),
                     )
+                timings["retrieval"] = time.monotonic() - retrieval_started
             if generation.stop.is_set():
                 return
             with Session(engine) as tool_session:
@@ -984,7 +1035,6 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 )
             if generation.stop.is_set():
                 return
-            context_stats = {}
             context_defs = tool_defs + ([SOURCE_TOOL_DEF] if tool_defs and not is_mock else [])
             tool_catalog = None
             # A checked group grants availability, not an obligation to attach
@@ -1061,6 +1111,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 # Tool selection and source-reader overhead are now final. Only
                 # this pass may generate a summary; preflight never calls a model.
                 generation.emit({"context_status": "summarizing"})
+                summary_started = time.monotonic()
                 try:
                     request_system, llm_messages = build_context(
                         ancestors,
@@ -1086,6 +1137,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                         ),
                     )
                 finally:
+                    timings["summary"] = time.monotonic() - summary_started
                     generation.emit({"context_status": "ready"})
                 if generation.stop.is_set():
                     return
@@ -1099,11 +1151,15 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 def guarded_execute(name, arguments):
                     if generation.stop.is_set():
                         raise RuntimeError("generation cancelled before tool execution")
-                    if name == SOURCE_TOOL_NAME and source_reader is not None:
-                        return source_reader(arguments)
-                    if name == DOCUMENT_TOOL_NAME and document_reader is not None:
-                        return document_reader(arguments)
-                    return execute(name, arguments)
+                    tool_started = time.monotonic()
+                    try:
+                        if name == SOURCE_TOOL_NAME and source_reader is not None:
+                            return source_reader(arguments)
+                        if name == DOCUMENT_TOOL_NAME and document_reader is not None:
+                            return document_reader(arguments)
+                        return execute(name, arguments)
+                    finally:
+                        timings["tools"] += time.monotonic() - tool_started
 
                 stream = run_agent(
                     spec,
@@ -1112,6 +1168,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     tool_defs,
                     guarded_execute,
                     protected_system=context_stats["protected_system"],
+                    diagnostics=usage,
                     **({"tool_catalog": tool_catalog, "max_rounds": 6} if tool_catalog else {}),
                     **({"deep": True} if body.deep_think else {}),
                 )
@@ -1119,9 +1176,14 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 stream = (
                     {"type": kind, "text": chunk}
                     for kind, chunk in stream_chat(
-                        spec, request_system, llm_messages, deep=body.deep_think
+                        spec,
+                        request_system,
+                        llm_messages,
+                        deep=body.deep_think,
+                        diagnostics=usage,
                     )
                 )
+            model_started = time.monotonic()
             for event in stream:
                 if generation.stop.is_set():
                     break
@@ -1166,6 +1228,10 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
         finally:
             if generation.status == "pending":
                 generation.status, generation.error = "interrupted", "生成中断，可重试。"
+            try:
+                report_diagnostics()
+            except Exception:
+                pass
             if stream and hasattr(stream, "close"):
                 try:
                     stream.close()
@@ -1204,6 +1270,16 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
         # Memory is derived only from completed answers and is source-scoped when
         # recalled; no extra model invocation for interrupted or demo answers.
         if generation.status == "complete" and not is_mock:
+            report = generation.diagnostics or {}
+            if report.get("actual_input_tokens"):
+                # Calibrate the estimator from real usage only; the recorder ignores
+                # small requests, and demo answers never reach this branch.
+                record_usage(
+                    engine,
+                    config_id,
+                    int(report.get("estimated_input_tokens") or 0),
+                    int(report["actual_input_tokens"]),
+                )
             try:
                 extract_and_save(spec, tree_id, target_id, question_text, "".join(generation.text))
             except Exception:

@@ -4,6 +4,7 @@
   "policy": {
     "window_tokens": 32768,
     "output_tokens": 4096,
+    "calibration": 1.0,
     "input_budget": 27034
   },
   "long_path": {

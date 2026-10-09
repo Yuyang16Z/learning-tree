@@ -43,11 +43,20 @@ class ContextBudgetExceeded(ValueError):
 class ContextPolicy:
     window_tokens: int = 32768
     output_tokens: int = 4096
+    # Learned ratio of provider-reported to estimated input tokens for this model.
+    calibration: float = 1.0
+
+    @property
+    def raw_input_budget(self) -> int:
+        # Reserve response space and serialization/estimation headroom.
+        return max(0, self.window_tokens - self.output_tokens - max(512, self.window_tokens // 20))
 
     @property
     def input_budget(self) -> int:
-        # Reserve response space and serialization/estimation headroom.
-        return max(0, self.window_tokens - self.output_tokens - max(512, self.window_tokens // 20))
+        # An estimator that runs low for this model shrinks the budget; one that
+        # runs high never enlarges it, so the headroom stays conservative.
+        raw = self.raw_input_budget
+        return int(raw / self.calibration) if self.calibration > 1 else raw
 
     @property
     def tool_reserve(self) -> int:
@@ -55,7 +64,11 @@ class ContextPolicy:
 
     @classmethod
     def from_spec(cls, spec) -> ContextPolicy:
-        return cls(getattr(spec, "context_window", 32768), spec.max_tokens)
+        return cls(
+            getattr(spec, "context_window", 32768),
+            spec.max_tokens,
+            getattr(spec, "calibration", 1.0),
+        )
 
 
 @dataclass(frozen=True)

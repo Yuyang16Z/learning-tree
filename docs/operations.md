@@ -20,7 +20,7 @@ An occupied port is not forcibly freed. Ctrl+C stops the app. Use one backend pe
 
 | Location | Contains |
 | --- | --- |
-| `branch_learning.db` | Normal chats, model keys, notes, memory, user-managed `PreferenceProfile`, rebuildable `MemoryEmbedding` vectors and tool configuration. |
+| `branch_learning.db` | Normal chats, model keys, notes, memory, user-managed `PreferenceProfile`, rebuildable `MemoryEmbedding` vectors, rebuildable per-model `ModelCalibration` ratios, numeric per-answer diagnostics and tool configuration. |
 | `.runtime/dev.db` | Separate development data and demo configuration. |
 | `.runtime/retrieval/models/` | Pinned public embedding/reranker weights; no chat records. |
 | `.backups/` | Private database copies including credentials. |
@@ -57,7 +57,7 @@ Deleting one memory, clearing memory, or deleting a source branch/tree also remo
 
 In **Settings → Models & API keys → add/edit a model → Advanced**, set **Context window** to the capacity actually supported by that provider and model. The default is 32,768, with a 4,096 answer reserve and additional estimation headroom. These values are stored per model, not in `.env`; existing configurations receive the default window without changing their credentials or chat records.
 
-For OpenAI-compatible models, **Answer reserve** reduces the local input allowance but does not impose a new provider output cap. For native Anthropic, **Max output tokens** also remains the output limit sent to the provider. Local estimates use a character-class token estimator (about 0.7 unit per CJK character, 0.33 per visible ASCII character, 0.1 per whitespace character and 1 per other non-ASCII character, times a 1.15 safety factor) and fixed image reservations, not the provider's exact tokenizer.
+For OpenAI-compatible models, **Answer reserve** reduces the local input allowance but does not impose a new provider output cap. For native Anthropic, **Max output tokens** also remains the output limit sent to the provider. Local estimates use a character-class token estimator (about 0.7 unit per CJK character, 0.33 per visible ASCII character, 0.1 per whitespace character and 1 per other non-ASCII character, times a 1.15 safety factor) and fixed image reservations, not the provider's exact tokenizer. Reported provider usage calibrates the estimator per model after real answers (the rebuildable `ModelCalibration` table, removed with the model); the per-answer diagnostics stored with each message are numbers only and are excluded from tree exports.
 
 Context management requires no optional semantic dependencies or model downloads. Short histories remain complete. Long chat histories keep recent full turns and use cached summaries plus cited original sentences from older sources. Each question may make at most one extra, potentially billable summary call using the selected answer model. Summary failures fall back to local extraction. Source rereading is available when initial context is compressed, or when selected tools may cause later budget pressure. Stored messages remain intact. The local extraction cache clears on restart; the separate `ContextSummary` cache persists in SQLite and is rebuildable. Editing or deleting sources invalidates dependent summaries. Database backups include this cache, but tree JSON exports omit it.
 

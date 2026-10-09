@@ -286,6 +286,7 @@ def test_export_import_roundtrip_remaps_anchors_and_excludes_keys(setup):
     client.patch(f"/nodes/{branch['id']}", json={"learning_note": "我的理解"})
     backup = client.get(f"/trees/{t['id']}/export").json()
     assert "api_key" not in json.dumps(backup) and "request_id" not in json.dumps(backup)
+    assert "diagnostics" not in json.dumps(backup)
     imported = client.post("/trees/import", json=backup)
     assert imported.status_code == 200, imported.text
     new_tree = imported.json()

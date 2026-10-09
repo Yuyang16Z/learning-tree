@@ -5,6 +5,7 @@ from collections.abc import Callable
 from sqlmodel import Session, select
 
 from . import mcp_client
+from .calibration import load_calibration
 from .db import engine
 from .llm import LLMSpec, extract_memories
 from .memory_preferences import begin_memory_write
@@ -19,7 +20,8 @@ def mask_key(key: str) -> str:
     return "••••" + tail
 
 
-def to_spec(cfg: ModelConfig) -> LLMSpec:
+def to_spec(cfg: ModelConfig, session: Session | None = None) -> LLMSpec:
+    """Build the request spec; with a session, apply the model's learned calibration."""
     return LLMSpec(
         label=cfg.label,
         base_url=cfg.base_url,
@@ -28,6 +30,7 @@ def to_spec(cfg: ModelConfig) -> LLMSpec:
         protocol=cfg.protocol,
         max_tokens=cfg.max_tokens,
         context_window=cfg.context_window,
+        calibration=load_calibration(session, cfg.id),
     )
 
 

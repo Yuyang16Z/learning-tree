@@ -335,7 +335,7 @@ def export_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
         ],
         "messages": [
             {
-                **message.model_dump(exclude={"created_at", "document_ids"}),
+                **message.model_dump(exclude={"created_at", "document_ids", "diagnostics"}),
                 **({"document_ids": message.document_ids or []} if documents else {}),
             }
             for message in messages

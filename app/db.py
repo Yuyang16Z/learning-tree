@@ -93,6 +93,7 @@ _ADDED_COLUMNS = {
         "reasoning": "TEXT",
         "steps": "JSON",
         "status": "TEXT NOT NULL DEFAULT 'complete'",
+        "diagnostics": "JSON",
     },
 }
 

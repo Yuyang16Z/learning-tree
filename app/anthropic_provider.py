@@ -146,6 +146,31 @@ def _check_stop(reason: str | None, *, tools: bool = False) -> None:
         raise RuntimeError(f"模型回答未完整结束（{reason or '连接中断'}），可以重试。")
 
 
+def _usage_parts(usage) -> dict:
+    return {
+        "input": getattr(usage, "input_tokens", None),
+        "creation": getattr(usage, "cache_creation_input_tokens", None),
+        "read": getattr(usage, "cache_read_input_tokens", None),
+        "output": getattr(usage, "output_tokens", None),
+    }
+
+
+def _counts(parts: dict) -> dict:
+    # Total input is the sum of uncached, cache-creation and cache-read tokens.
+    read = int(parts.get("read") or 0)
+    creation = int(parts.get("creation") or 0)
+    return {
+        "input_tokens": int(parts.get("input") or 0) + creation + read,
+        "cached_input_tokens": read,
+        "output_tokens": int(parts.get("output") or 0),
+    }
+
+
+def usage_counts(usage) -> dict:
+    """Normalize a final message's usage into input/cached/output token counts."""
+    return _counts(_usage_parts(usage))
+
+
 def _thinking(spec) -> dict:
     # Older Claude generations use fixed budgets. Current models use adaptive
     # thinking. Custom model aliases follow the current protocol default.
@@ -163,14 +188,18 @@ def _thinking(spec) -> dict:
 def stream_chat(
     spec, system: str, history: list[dict], deep: bool = False
 ) -> Iterator[tuple[str, str]]:
+    """Yield (kind, text) chunks; the generator returns the usage counts when reported."""
     kwargs = _kwargs(spec, [{"role": "system", "content": system}, *history])
     if deep:
         kwargs["thinking"] = _thinking(spec)
     stopped, reason = False, None
+    parts: dict | None = None
     with client(spec) as api:
         with api.messages.create(**kwargs, stream=True) as stream:
             for event in stream:
-                if event.type == "content_block_start" and event.content_block.type == "text":
+                if event.type == "message_start":
+                    parts = _usage_parts(event.message.usage)
+                elif event.type == "content_block_start" and event.content_block.type == "text":
                     if event.content_block.text:
                         yield "text", event.content_block.text
                 elif event.type == "content_block_delta":
@@ -180,11 +209,20 @@ def stream_chat(
                         yield "reasoning", event.delta.thinking
                 elif event.type == "message_delta":
                     reason = event.delta.stop_reason or reason
+                    delta_usage = getattr(event, "usage", None)
+                    if delta_usage is not None:
+                        # Delta counts are cumulative; the start event's output count
+                        # is a placeholder, so later values replace earlier ones.
+                        parts = parts or {}
+                        for key, value in _usage_parts(delta_usage).items():
+                            if value is not None:
+                                parts[key] = value
                 elif event.type == "message_stop":
                     stopped = True
             if not stopped:
                 raise RuntimeError("模型连接在回答完成前断开，可以重试。")
             _check_stop(reason)
+    return _counts(parts) if parts else None
 
 
 def chat_once(spec, conversation: list[dict], tools: list[dict], deep: bool = False) -> dict:
@@ -217,6 +255,7 @@ def chat_once(spec, conversation: list[dict], tools: list[dict], deep: bool = Fa
         "_anthropic_content": [
             block.model_dump(mode="json", exclude_none=True) for block in response.content
         ],
+        "usage": usage_counts(response.usage),
     }
 
 

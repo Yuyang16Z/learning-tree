@@ -1,11 +1,12 @@
 """Model configuration: add, list, delete and test connections. API keys are masked in responses."""
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import delete
 from sqlmodel import Session, select
 
 from ..db import get_session
 from ..llm import test_connection
-from ..models import ModelConfig
+from ..models import ModelCalibration, ModelConfig
 from ..schemas import ModelConfigIn, ModelConfigOut, TestOut
 from ..service import mask_key, to_spec
 
@@ -85,6 +86,7 @@ def delete_model(config_id: int, session: Session = Depends(get_session)) -> dic
     cfg = session.get(ModelConfig, config_id)
     if not cfg:
         raise HTTPException(404, "模型不存在")
+    session.execute(delete(ModelCalibration).where(ModelCalibration.config_id == config_id))
     session.delete(cfg)
     session.commit()
     return {"deleted": config_id}
