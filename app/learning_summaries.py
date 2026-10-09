@@ -19,7 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from .context_budget import ContextPolicy, text_tokens
-from .context_compaction import summarize_sources
+from .context_compaction import _terms, summarize_sources
 from .models import ContextSummary, KnowledgeTree, Message, Node
 from .summary_generation import SUMMARY_PROMPT_VERSION, summarize_learning_context
 
@@ -213,20 +213,30 @@ def _render(sources, blocks, summaries, query: str, budget: int) -> str | None:
     chosen = []
     covered = set()
     used = 0
-    # Favor later path context when all cached summaries do not fit together.
-    for block in reversed(blocks):
+    query_terms = _terms(query)
+    ranked = sorted(
+        enumerate(blocks),
+        key=lambda item: (_relevance(item[1], query_terms), item[0]),
+        reverse=True,
+    )
+    # Leave room for original sentences from blocks that have no valid summary.
+    # A cached summary must never crowd all of that evidence out.
+    has_uncached = any(block.key not in summaries for block in blocks)
+    excerpt_reserve = min(budget // 3, 1200) if has_uncached else 0
+    for index, block in ranked:
         content = summaries.get(block.key)
         if not content:
             continue
         text = block.heading + content
         cost = text_tokens(text) + (2 if chosen else 0)
-        if used + cost > budget:
+        if used + cost > budget - excerpt_reserve:
             continue
-        chosen.insert(0, text)
+        chosen.append((index, text))
         covered.update(record["source_id"] for record in block.records)
         used += cost
     if not chosen:
         return None
+    chosen = [text for _, text in sorted(chosen)]
     remaining = []
     for node, messages in sources:
         local_node = Node(**node.model_dump())
@@ -245,6 +255,16 @@ def _render(sources, blocks, summaries, query: str, budget: int) -> str | None:
             chosen.append(heading[2:] + excerpts)
     result = "\n\n".join(chosen)
     return result if text_tokens(result) <= budget else None
+
+
+def _relevance(block: _Block, query_terms: set[str]) -> int:
+    """Rank immutable source blocks locally; the cached summary stays query-independent."""
+    if not query_terms:
+        return 0
+    return max(
+        (len(query_terms & _terms(record["text"])) for record in block.records),
+        default=0,
+    )
 
 
 def summarize_history(
@@ -289,8 +309,16 @@ def summarize_history(
             if row:
                 summaries[block.key] = row.content
     candidate = None
+    query_terms = _terms(query)
+    # Score outside the shared claim lock; only the eligibility/claim is atomic.
+    ranked_missing = sorted(
+        enumerate(blocks),
+        key=lambda item: (-_relevance(item[1], query_terms), item[0]),
+    )
     with _LOCK:
-        for block in blocks:
+        # Spend the one optional model call on the old block most relevant to
+        # this question. Equal-scoring blocks keep chronological cache fill.
+        for _, block in ranked_missing:
             state_key = (namespace, block.key)
             if block.key in summaries or not MIN_INPUT_BYTES <= block.input_bytes <= hard_limit:
                 continue

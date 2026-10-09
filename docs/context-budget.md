@@ -57,6 +57,8 @@ For recognized V4/Flash models on the official DeepSeek endpoint, summary reques
 
 Stable older blocks are cached separately in SQLite's `ContextSummary` table. Keys include source content, tree identity, model identity and summary format version. Later questions can reuse unchanged blocks; every question generates at most one new block, while other material uses cached summaries or local excerpts. The app does not repeatedly summarize a summary as though it were original evidence. Oversized source blocks can remain extractive when a complete summary request would not fit.
 
+Under a limited context budget, the app ranks source blocks by lexical overlap with the current question and selected passage. It spends the one optional summary call on the most relevant eligible uncached block; when cached summaries cannot all fit, it includes the more relevant ones first (recent blocks break ties), then presents the selected summaries in path order. If uncached blocks remain, it reserves part of the allowance for cited original-sentence excerpts. This ranking is a deterministic relevance heuristic, not semantic retrieval or a guarantee that every needed detail is present. The original path remains available through the source reader.
+
 Cache reuse and writes revalidate original sources. Editing a learning note invalidates dependent summaries; revising a message creates a separate version whose changed sources have different keys. Deleting a subtree or tree removes its dependent summaries, and a late provider response cannot recreate them. These derived summaries are **not** long-term learning memories or evidence of mastery. They are included in private database backups, excluded from tree JSON exports, and can be rebuilt from originals.
 
 The extractor selects complete original sentences using rule-based categories: corrections, applicable conditions, unresolved questions, learning goals, definitions, user understanding and historical explanations. Selection also considers overlap with the current question and the available budget. Each excerpt includes its role, source node, section, message ID when applicable, and character range.
@@ -101,7 +103,7 @@ See [local operation and backups](operations.md), [architecture](architecture.md
 
 在模型「高级设置」填写实际上下文窗口与回答预留，默认分别为 **32,768 / 4,096**。系统另外保留估算余量，逐轮检查系统提示、问题、引用、图片、历史和工具信息。UTF-8 字节数与固定图片开销只是本地估算，不是服务商的精确 token 计数，也不能保证所有请求必定被服务商接受。OpenAI 兼容接口的回答预留不等于输出上限；Anthropic 仍使用其最大输出参数。
 
-短对话保持完整；长对话优先保留当前问题、引用、笔记和能容纳的近期完整问答，较早内容由当前选择的模型按需生成摘要，每次提问最多新增一次摘要调用，可能增加费用和短暂等待。摘要记录学习目标、已讲内容、未解决疑问、纠正与条件，不能把「已讲过」当成「已掌握」。结果按来源分块缓存，后续复用；其他旧内容保留本地原句摘录。摘要失败、超时、引用无效或过长时，继续用本地摘录，不阻断正常回答。演示模式和短对话不调用摘要；划词解释仍使用本地摘录。
+短对话保持完整；长对话优先保留当前问题、引用、笔记和能容纳的近期完整问答，较早内容由当前选择的模型按需生成摘要，每次提问最多新增一次摘要调用，可能增加费用和短暂等待。摘要记录学习目标、已讲内容、未解决疑问、纠正与条件，不能把「已讲过」当成「已掌握」。结果按来源分块缓存，后续复用；空间不足时按本轮问题的词项相关性选择待生成和已缓存的来源块，同分优先较近的来源，并为未摘要来源预留原句摘录空间。其他旧内容保留本地原句摘录。摘要失败、超时、引用无效或过长时，继续用本地摘录，不阻断正常回答。这是本地相关性启发式，不能保证找全细节；演示模式和短对话不调用摘要，划词解释仍使用本地摘录。
 
 摘要只用于当前学习路径，不混入兄弟分支，不写入长期记忆，也不改写聊天原文。编辑笔记后相关摘要失效；修改问题生成的新版本独立处理；删除节点或整棵树会同步删除依赖它们的摘要，尚未返回的摘要不能把已删除内容写回来。摘要可能遗漏或误解细节，不能宣称无损压缩；需要精确信息时仍应回读原文。
 

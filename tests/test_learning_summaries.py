@@ -7,6 +7,7 @@ import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app import learning_summaries as summaries
+from app.context_budget import text_tokens
 from app.llm import LLMSpec
 from app.models import ContextSummary, KnowledgeTree, Memory, Message, Node
 
@@ -119,6 +120,45 @@ def test_cached_prefix_survives_added_path_and_process_local_state_reset(workspa
     assert len(calls) == 2
     assert all("node=2," in item["source_id"] for item in calls[-1][1])
     assert len(records(engine)) == 2
+
+
+def test_one_new_summary_targets_relevant_older_block(workspace):
+    engine, sources, spec, calls = workspace
+    result = summaries.summarize_history(engine, spec, sources(1, 2), "Question 2", 4000)
+    assert result and len(calls) == 1
+    assert all(item["source_id"].startswith("node=2,") for item in calls[0][1])
+    assert "node=1" in result, "Unsummarized path sources remain available as excerpts"
+
+
+def test_cached_selection_prefers_relevant_older_source_and_keeps_path_order(workspace):
+    _, sources, spec, _ = workspace
+    path = sources(1, 2)
+    blocks = summaries._blocks(path, "model", 24000)
+    assert len(blocks) == 2
+    cached = {
+        block.key: f"Source {block.node.id} [{block.records[0]['source_id']}]" for block in blocks
+    }
+    one_cost = max(text_tokens(block.heading + cached[block.key]) for block in blocks)
+    budget = one_cost + 2
+    result = summaries._render(path, blocks, cached, "Question 1", budget)
+    assert result and "模型摘要（node=1" in result
+    assert "模型摘要（node=2" not in result
+    latest = summaries._render(path, blocks, cached, "unrelated", budget)
+    assert latest and "模型摘要（node=2" in latest
+    both = summaries._render(path, blocks, cached, "Question 2", budget * 2)
+    assert both and both.index("模型摘要（node=1") < both.index("模型摘要（node=2")
+
+
+def test_unsummarized_source_gets_reserved_excerpt_space(workspace):
+    _, sources, _, _ = workspace
+    path = sources(1, 2)
+    blocks = summaries._blocks(path, "model", 24000)
+    cached = {blocks[0].key: "Cached context " * 20 + "[node=1,message=11]"}
+    summary_cost = text_tokens(blocks[0].heading + cached[blocks[0].key])
+    budget = summary_cost + 600
+    result = summaries._render(path, blocks, cached, "Question 2", budget)
+    assert result and "模型摘要（node=1" in result
+    assert "原文摘录" in result and "node=2" in result
 
 
 def test_cache_survives_new_engine_and_does_not_recall_provider(workspace, monkeypatch):
