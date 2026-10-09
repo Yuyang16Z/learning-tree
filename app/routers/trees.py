@@ -335,7 +335,8 @@ def export_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
         ],
         "messages": [
             {
-                **message.model_dump(exclude={"created_at", "document_ids"}),
+                # Memory provenance is local state over this database's ids.
+                **message.model_dump(exclude={"created_at", "document_ids", "sources"}),
                 **({"document_ids": message.document_ids or []} if documents else {}),
             }
             for message in messages

@@ -91,6 +91,8 @@ class RetrievalResult:
     preference_profile: str = ""
     supplements: list[PreferenceHit] = field(default_factory=list)
     facts: list[MemoryHit] = field(default_factory=list)
+    # Provenance of the rendered facts for the UI: ids and titles only, never content.
+    sources: list[dict] = field(default_factory=list)
     mode: str = "lexical"
     reranked: bool = False
 
@@ -627,6 +629,19 @@ def retrieve_memory(
     others = [item for item in wider_hits if item.scope == "other"]
     # Facts are listed in rendered order: path, then siblings, then other topics.
     result.facts = path_hits + siblings + others
+    if result.facts:
+        current = session.get(KnowledgeTree, tree_id) if tree_id is not None else None
+        current_title = _title(current.title) if current else ""
+        result.sources = [
+            {
+                "memory_id": item.memory_id,
+                "source_node_id": item.source_node_id,
+                "tree_id": item.tree_id if item.scope == "other" else tree_id,
+                "tree_title": item.tree_title if item.scope == "other" else current_title,
+                "scope": item.scope,
+            }
+            for item in result.facts
+        ]
     sections = []
     if result.preference_profile:
         # The full bounded profile travels as one unit; context.py reserves room

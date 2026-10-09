@@ -94,6 +94,7 @@ _ADDED_COLUMNS = {
         "reasoning": "TEXT",
         "steps": "JSON",
         "status": "TEXT NOT NULL DEFAULT 'complete'",
+        "sources": "JSON",
     },
     "memory": {
         "fact_type": "TEXT NOT NULL DEFAULT 'conclusion'",

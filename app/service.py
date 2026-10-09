@@ -116,6 +116,20 @@ def make_executor(router: dict) -> Callable[[str, dict], str]:
     return execute
 
 
+class MemoryNote(str):
+    """The rendered memory note; `.sources` lists the records it rendered (ids, no text).
+
+    A plain str everywhere the note is concatenated or budgeted; callers that want
+    provenance read `getattr(note, "sources", [])`."""
+
+    sources: list[dict]
+
+    def __new__(cls, text: str = "", sources: list[dict] | None = None):
+        note = super().__new__(cls, text)
+        note.sources = list(sources or [])
+        return note
+
+
 def fetch_memory_note(
     session: Session,
     tree_id: int | None,
@@ -123,7 +137,7 @@ def fetch_memory_note(
     query: str = "",
     quoted_text: str = "",
     existing_text: str = "",
-) -> str:
+) -> MemoryNote:
     """Choose relevant memories within the allowed source path, independently of preferences.
 
     Sibling branches and other topics only join in after the user enabled them in
@@ -135,9 +149,10 @@ def fetch_memory_note(
         include_siblings=scopes.include_siblings,
         include_other_trees=scopes.include_other_trees,
     )
-    return retrieve_memory(
+    result = retrieve_memory(
         session, tree_id, source_node_ids, query, quoted_text, existing_text, config=config
-    ).text
+    )
+    return MemoryNote(result.text, result.sources)
 
 
 def _path_node_ids(session: Session, node: Node) -> list[int]:

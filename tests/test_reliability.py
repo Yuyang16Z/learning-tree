@@ -224,6 +224,13 @@ def test_memory_does_not_cross_sibling_paths(setup):
         note = service.fetch_memory_note(session, t["id"], [root])
         assert "（同主题其他分支「" in note and "兄弟分支结论" in note
         assert "兄弟机密" not in note and "来源不明" not in note
+        # The note stays a str for prompt assembly and carries provenance for the UI.
+        assert isinstance(note, str) and isinstance(note + "", str)
+        assert [(item["source_node_id"], item["scope"]) for item in note.sources] == [
+            (root, "path"),
+            (sibling["id"], "tree"),
+        ]
+        assert all(item["tree_id"] == t["id"] for item in note.sources)
 
 
 def test_recent_ancestor_keeps_full_tail_and_images():
@@ -301,6 +308,7 @@ def test_export_import_roundtrip_remaps_anchors_and_excludes_keys(setup):
     client.patch(f"/nodes/{branch['id']}", json={"learning_note": "我的理解"})
     backup = client.get(f"/trees/{t['id']}/export").json()
     assert "api_key" not in json.dumps(backup) and "request_id" not in json.dumps(backup)
+    assert '"sources"' not in json.dumps(backup), "memory provenance is local, not portable"
     imported = client.post("/trees/import", json=backup)
     assert imported.status_code == 200, imported.text
     new_tree = imported.json()
@@ -435,4 +443,5 @@ def test_additive_migration_on_legacy_schema_does_not_rewrite_messages(tmp_path,
         assert session.get(Node, 2).parent_id == 1
         assert [m.id for m in service.get_messages(session, 1)] == [1, 2, 3, 4]
         assert session.get(Node, 1).source_message_id is None
+        assert session.get(Message, 2).sources is None
     engine.dispose()

@@ -980,3 +980,36 @@ def test_relative_vector_gate_admits_near_top_candidates_but_not_a_weak_set(sess
     assert ids(
         retrieve_memory(session, 1, [1], query="schema", config=strict, backend=backend)
     ) == {best.id}
+
+
+def test_rendered_facts_carry_sources_with_ids_and_titles_only(session):
+    path = remember(session, "当前路径：schema 校验先于工具执行。")
+    other = remember(session, "另一棵树：schema 校验要考虑版本兼容。", tree_id=2, source_node_id=4)
+    empty = retrieve_memory(session, 1, [1], query="量子纠缠", backend=Backend())
+    assert empty.sources == [] and empty.facts == []
+    result = retrieve_memory(
+        session,
+        1,
+        [1],
+        query="schema 校验",
+        config=RetrievalConfig(include_other_trees=True),
+        backend=Backend([path.content, other.content]),
+    )
+    assert result.sources == [
+        {
+            "memory_id": path.id,
+            "source_node_id": 1,
+            "tree_id": 1,
+            "tree_title": "学习",
+            "scope": "path",
+        },
+        {
+            "memory_id": other.id,
+            "source_node_id": 4,
+            "tree_id": 2,
+            "tree_title": "另一棵树",
+            "scope": "other",
+        },
+    ]
+    assert [item["memory_id"] for item in result.sources] == [hit.memory_id for hit in result.facts]
+    assert "schema" not in str(result.sources), "sources never carry memory text"

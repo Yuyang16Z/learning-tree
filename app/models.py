@@ -188,6 +188,9 @@ class Message(SQLModel, table=True):
     reasoning: str | None = None
     # Tool steps: [{"tool":..,"args":..,"result":..}] for collapsible frontend display.
     steps: list | None = Field(default=None, sa_column=Column(JSON))
+    # Memory records the answer was given: [{memory_id, source_node_id, tree_id,
+    # tree_title, scope}]. Local provenance only; excluded from exports.
+    sources: list | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=_now)
 
 

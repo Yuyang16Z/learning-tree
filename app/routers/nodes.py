@@ -70,6 +70,8 @@ class Generation:
     text: list[str] = field(default_factory=list)
     reasoning: list[str] = field(default_factory=list)
     steps: list[dict] = field(default_factory=list)
+    # Memory records given to the model for this answer (ids and titles only).
+    sources: list[dict] = field(default_factory=list)
     status: str = "pending"
     error: str | None = None
     message_id: int | None = None
@@ -110,6 +112,7 @@ def discard_node_work(node_ids) -> None:
                 generation.text.clear()
                 generation.reasoning.clear()
                 generation.steps.clear()
+                generation.sources.clear()
                 generation.log.clear()
             generation.wake()
 
@@ -285,6 +288,7 @@ def _qa_rows(node: Node, messages: list[Message], session: Session) -> list[dict
                 "answer": answer.content if answer else None,
                 "reasoning": answer.reasoning if answer else None,
                 "steps": answer.steps if answer else None,
+                "sources": answer.sources if answer else None,
                 "answered_by": answer.answered_by if answer else None,
                 "attempts": [
                     {"message_id": m.id, "status": m.status, "content": m.content}
@@ -642,6 +646,7 @@ def _persist(target_id: int, generation: Generation, label: str) -> None:
         message.content = "".join(generation.text)
         message.reasoning = "".join(generation.reasoning) or None
         message.steps = list(generation.steps) or None
+        message.sources = list(generation.sources) or None
         message.status = generation.status
         node.status, node.error = generation.status, generation.error
         session.add(message)
@@ -870,6 +875,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     document_ids=previous.document_ids,
                     reasoning=previous.reasoning,
                     steps=previous.steps,
+                    sources=previous.sources,
                 )
                 session.add(copied)
                 copied_history.append(copied)
@@ -968,6 +974,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                         # These sources are mandatory even after compaction.
                         existing_text=memory_quote + "\n" + (context_target.learning_note or ""),
                     )
+            # Test doubles return plain strings; provenance is optional.
+            memory_sources = list(getattr(memory, "sources", None) or [])
             if generation.stop.is_set():
                 return
             with Session(engine) as tool_session:
@@ -1089,6 +1097,18 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     generation.emit({"context_status": "ready"})
                 if generation.stop.is_set():
                     return
+            # Report only the memory records that survived context assembly, so the
+            # "referenced" line under the answer never claims an omitted record.
+            kept_sources = [
+                source
+                for source in memory_sources
+                if f"- [记忆 {source['memory_id']}；" in request_system
+                or f"- [记忆 {source['memory_id']}]" in request_system
+            ]
+            if kept_sources:
+                with generation.lock:
+                    generation.sources = kept_sources
+                generation.emit({"sources": kept_sources})
             if title_needed:
                 _queue_branch_title(target_id, spec)
                 title_queued = True
