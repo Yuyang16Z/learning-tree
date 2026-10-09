@@ -225,14 +225,26 @@ def stream_chat(
     return _counts(parts) if parts else None
 
 
-def chat_once(spec, conversation: list[dict], tools: list[dict], deep: bool = False) -> dict:
+def chat_once(spec, conversation: list[dict], tools: list[dict], deep: bool = False):
+    """Stream one tool-capable turn: yield (kind, text) chunks, then return the result dict.
+
+    Tool calls are only final once the message is complete and its stop reason
+    was accepted, so the caller sees them in the returned dict, never mid-stream.
+    """
     kwargs = _kwargs(spec, conversation, tools)
     if deep:
         kwargs["thinking"] = _thinking(spec)
+    stopped = False
     with client(spec) as api:
-        # Streaming internally avoids SDK limits on long non-streaming requests.
         with api.messages.stream(**kwargs) as stream:
-            stopped = any(event.type == "message_stop" for event in stream)
+            for event in stream:
+                # One helper event family only; raw deltas would double the text.
+                if event.type == "text":
+                    yield "text", event.text
+                elif event.type == "thinking":
+                    yield "reasoning", event.thinking
+                elif event.type == "message_stop":
+                    stopped = True
             if not stopped:
                 raise RuntimeError("模型连接在回答完成前断开，可以重试。")
             response = stream.get_final_message()

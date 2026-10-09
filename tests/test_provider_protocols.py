@@ -398,13 +398,18 @@ def test_parallel_tool_results_and_signed_blocks_are_preserved(monkeypatch):
         llm.run_agent(SPEC, "系统", [{"role": "user", "content": "查资料"}], TOOLS, execute)
     )
     assert executed == [("mcp_1_lookup", {"q": "A"}), ("mcp_1_lookup", {"q": "B"})]
+    # Narration streams before the calls run; a paragraph break separates it from
+    # the next round, whose text arrives as it streams instead of re-chunked.
     assert [event["type"] for event in events] == [
+        "delta",
         "tool_start",
         "tool_end",
         "tool_start",
         "tool_end",
         "delta",
+        "delta",
     ]
+    assert events[0]["text"] == "先查两个来源" and events[-2]["text"] == "\n\n"
     assert events[-1]["text"] == "你好"
     assert bodies[0]["tools"] == [
         {
@@ -550,6 +555,35 @@ def openai_client(handler):
     )
 
 
+def tool_call_fragments(calls):
+    """Split each (index, id, name, arguments) call into id/name and argument fragments."""
+    opening = [
+        {
+            "index": index,
+            "id": call_id,
+            "type": "function",
+            "function": {"name": name, "arguments": ""},
+        }
+        for index, call_id, name, _ in calls
+    ]
+    halves = [
+        [
+            {"index": index, "function": {"arguments": arguments[: len(arguments) // 2]}}
+            for index, _, _, arguments in calls
+        ],
+        [
+            {"index": index, "function": {"arguments": arguments[len(arguments) // 2 :]}}
+            for index, _, _, arguments in calls
+        ],
+    ]
+    return [
+        ({"role": "assistant", "content": None, "tool_calls": opening}, None),
+        ({"tool_calls": halves[0]}, None),
+        ({"tool_calls": halves[1]}, None),
+        ({}, "tool_calls"),
+    ]
+
+
 def openai_stream(chunks, usage=None):
     frames = [
         {
@@ -665,67 +699,24 @@ def test_openai_stream_options_rejection_falls_back_once_per_base_url(monkeypatc
 
 
 def test_openai_stream_and_tool_loop_keep_existing_wire_format(monkeypatch):
+    monkeypatch.setattr(llm, "_STREAM_OPTIONS_UNSUPPORTED", set())
     bodies = []
 
     def handler(request):
         body = json.loads(request.content)
         bodies.append(body)
-        if body.get("stream"):
-            chunks = [
-                {
-                    "id": "chat_test",
-                    "object": "chat.completion.chunk",
-                    "created": 1,
-                    "model": "custom-model",
-                    "choices": [
-                        {
-                            "index": 0,
-                            "finish_reason": None,
-                            "delta": {"role": "assistant", "content": "原流式"},
-                        }
-                    ],
-                },
-                {
-                    "id": "chat_test",
-                    "object": "chat.completion.chunk",
-                    "created": 1,
-                    "model": "custom-model",
-                    "choices": [{"index": 0, "finish_reason": "stop", "delta": {}}],
-                },
-            ]
-            content = (
-                "".join("data: " + json.dumps(chunk) + "\n\n" for chunk in chunks)
-                + "data: [DONE]\n\n"
-            )
-            return httpx.Response(
-                200, headers={"content-type": "text/event-stream"}, content=content
-            )
+        assert body["stream"] is True and body["stream_options"] == {"include_usage": True}
+        if not body.get("tools"):
+            return openai_stream([({"role": "assistant", "content": "原流式"}, None), ({}, "stop")])
         has_result = any(message["role"] == "tool" for message in body["messages"])
-        message = {"role": "assistant", "content": "工具答案" if has_result else None}
-        if not has_result:
-            message["tool_calls"] = [
-                {
-                    "id": "call_one",
-                    "type": "function",
-                    "function": {"name": "mcp_1_lookup", "arguments": '{"q":"A"}'},
-                }
-            ]
-        return httpx.Response(
-            200,
-            json={
-                "id": "chat_test",
-                "object": "chat.completion",
-                "created": 1,
-                "model": "custom-model",
-                "choices": [
-                    {
-                        "index": 0,
-                        "finish_reason": "stop" if has_result else "tool_calls",
-                        "message": message,
-                    }
-                ],
-                "usage": {"prompt_tokens": 30 if has_result else 20, "completion_tokens": 5},
-            },
+        if has_result:
+            return openai_stream(
+                [({"role": "assistant", "content": "工具答案"}, None), ({}, "stop")],
+                {"prompt_tokens": 30, "completion_tokens": 5},
+            )
+        return openai_stream(
+            tool_call_fragments([(0, "call_one", "mcp_1_lookup", '{"q":"A"}')]),
+            {"prompt_tokens": 20, "completion_tokens": 5},
         )
 
     monkeypatch.setattr(
@@ -754,8 +745,16 @@ def test_openai_stream_and_tool_loop_keep_existing_wire_format(monkeypatch):
         )
     )
     assert events[-1] == {"type": "delta", "text": "工具答案"}
+    assert [event["type"] for event in events] == ["tool_start", "tool_end", "delta"]
     assert [r["input_tokens"] for r in diagnostics["rounds"]] == [20, 30]
     assert diagnostics["tool_rounds"] == 1
+    assert bodies[-1]["messages"][-2]["tool_calls"] == [
+        {
+            "id": "call_one",
+            "type": "function",
+            "function": {"name": "mcp_1_lookup", "arguments": '{"q": "A"}'},
+        }
+    ]
     assert bodies[-1]["messages"][-1] == {
         "role": "tool",
         "tool_call_id": "call_one",
@@ -793,43 +792,23 @@ def test_non_tool_requests_budget_history_before_provider_conversion(monkeypatch
 
 
 def test_openai_budget_is_applied_after_each_large_tool_result(monkeypatch):
+    monkeypatch.setattr(llm, "_STREAM_OPTIONS_UNSUPPORTED", set())
     bodies = []
 
     def handler(request):
         body = json.loads(request.content)
         bodies.append(body)
         round_number = len(bodies)
-        message = {"role": "assistant", "content": "有依据的答案"}
         if round_number < 3:
-            message = {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": f"call_{round_number}",
-                        "type": "function",
-                        "function": {
-                            "name": "mcp_1_lookup",
-                            "arguments": json.dumps({"q": f"来源{round_number}"}),
-                        },
-                    }
-                ],
-            }
-        return httpx.Response(
-            200,
-            json={
-                "id": "chat_budget",
-                "object": "chat.completion",
-                "created": 1,
-                "model": "custom-model",
-                "choices": [
-                    {
-                        "index": 0,
-                        "finish_reason": "tool_calls" if round_number < 3 else "stop",
-                        "message": message,
-                    }
-                ],
-            },
+            call = (
+                0,
+                f"call_{round_number}",
+                "mcp_1_lookup",
+                json.dumps({"q": f"来源{round_number}"}),
+            )
+            return openai_stream(tool_call_fragments([call]))
+        return openai_stream(
+            [({"role": "assistant", "content": "有依据的答案"}, None), ({}, "stop")]
         )
 
     monkeypatch.setattr(
@@ -909,6 +888,213 @@ def test_openai_budget_is_applied_after_each_large_tool_result(monkeypatch):
         for message in body["messages"]
         if message["role"] == "tool"
     )
+
+
+def test_openai_streamed_tool_arguments_are_assembled_by_index(monkeypatch):
+    monkeypatch.setattr(llm, "_STREAM_OPTIONS_UNSUPPORTED", set())
+    bodies = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        bodies.append(body)
+        if any(message["role"] == "tool" for message in body["messages"]):
+            # The final answer arrives in two pieces and must reach the caller unchanged.
+            return openai_stream(
+                [
+                    ({"role": "assistant", "content": "根据两份资料，"}, None),
+                    ({"content": "结论成立。"}, None),
+                    ({}, "stop"),
+                ]
+            )
+        # Two parallel calls whose argument fragments interleave across chunks.
+        return openai_stream(
+            [
+                ({"role": "assistant", "content": "先查"}, None),
+                (
+                    {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_a",
+                                "type": "function",
+                                "function": {"name": "mcp_1_lookup", "arguments": ""},
+                            }
+                        ]
+                    },
+                    None,
+                ),
+                (
+                    {
+                        "tool_calls": [
+                            {"index": 0, "function": {"arguments": '{"q":"'}},
+                            {
+                                "index": 1,
+                                "id": "call_b",
+                                "type": "function",
+                                "function": {"name": "mcp_1_lookup", "arguments": '{"q":"B"'},
+                            },
+                        ]
+                    },
+                    None,
+                ),
+                (
+                    {
+                        "tool_calls": [
+                            {"index": 0, "function": {"arguments": 'A"}'}},
+                            {"index": 1, "function": {"arguments": "}"}},
+                        ]
+                    },
+                    None,
+                ),
+                ({}, "tool_calls"),
+            ],
+            {"prompt_tokens": 40, "completion_tokens": 9},
+        )
+
+    monkeypatch.setattr(llm, "_client", openai_client(handler))
+    spec = LLMSpec("兼容", "https://provider.test/v1", "custom-model", "synthetic-key")
+    executed = []
+
+    def execute(name, args):
+        executed.append((name, args))
+        return f"资料-{args['q']}"
+
+    diagnostics = {}
+    events = list(
+        llm.run_agent(
+            spec,
+            "系统",
+            [{"role": "user", "content": "查两份资料"}],
+            TOOLS,
+            execute,
+            diagnostics=diagnostics,
+        )
+    )
+    assert executed == [("mcp_1_lookup", {"q": "A"}), ("mcp_1_lookup", {"q": "B"})]
+    assert [event["type"] for event in events] == [
+        "delta",
+        "tool_start",
+        "tool_end",
+        "tool_start",
+        "tool_end",
+        "delta",
+        "delta",
+        "delta",
+    ]
+    assert [event["text"] for event in events if event["type"] == "delta"] == [
+        "先查",
+        "\n\n",
+        "根据两份资料，",
+        "结论成立。",
+    ]
+    assert [event["name"] for event in events if event["type"] == "tool_start"] == [
+        "mcp_1_lookup"
+    ] * 2
+    assistant = bodies[1]["messages"][-3]
+    assert assistant["content"] == "先查"
+    assert [
+        (call["id"], json.loads(call["function"]["arguments"])) for call in assistant["tool_calls"]
+    ] == [
+        ("call_a", {"q": "A"}),
+        ("call_b", {"q": "B"}),
+    ]
+    assert [m["tool_call_id"] for m in bodies[1]["messages"] if m["role"] == "tool"] == [
+        "call_a",
+        "call_b",
+    ]
+    assert diagnostics["rounds"][0]["input_tokens"] == 40 and diagnostics["tool_rounds"] == 1
+
+
+def test_openai_malformed_or_truncated_tool_arguments_never_execute(monkeypatch):
+    monkeypatch.setattr(llm, "_STREAM_OPTIONS_UNSUPPORTED", set())
+    responses = [
+        openai_stream(
+            [
+                (
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_a",
+                                "type": "function",
+                                "function": {"name": "mcp_1_lookup", "arguments": '{"q":'},
+                            }
+                        ],
+                    },
+                    None,
+                ),
+                ({}, "tool_calls"),
+            ]
+        ),
+        openai_stream(
+            [
+                (
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_a",
+                                "type": "function",
+                                "function": {"name": "mcp_1_lookup", "arguments": '{"q":"A"}'},
+                            }
+                        ],
+                    },
+                    None,
+                ),
+                ({}, "length"),
+            ]
+        ),
+    ]
+    monkeypatch.setattr(llm, "_client", openai_client(lambda request: responses.pop(0)))
+    spec = LLMSpec("兼容", "https://provider.test/v1", "custom-model", "synthetic-key")
+    for _ in range(2):
+        with pytest.raises(RuntimeError):
+            list(
+                llm.run_agent(
+                    spec,
+                    "系统",
+                    [{"role": "user", "content": "查"}],
+                    TOOLS,
+                    lambda *args: pytest.fail("an incomplete call must not execute"),
+                )
+            )
+    assert not responses
+
+
+def test_anthropic_narration_streams_before_tool_start_and_final_text_is_not_rechunked(monkeypatch):
+    first = [
+        {"type": "text", "text": "我先查一下来源。"},
+        {"type": "tool_use", "id": "toolu_a", "name": "mcp_1_lookup", "input": {"q": "A"}},
+    ]
+    final_text = "这是一个很长的最终回答，必须作为整段送达，而不是被切成四个字符的片段。"
+    _, bodies, _ = mock_anthropic(
+        monkeypatch, [sse(first, stop="tool_use"), sse([{"type": "text", "text": final_text}])]
+    )
+    started = []
+
+    def execute(name, args):
+        started.append(len([event for event in seen if event["type"] == "tool_start"]))
+        return "资料"
+
+    seen = []
+    for event in llm.run_agent(SPEC, "系统", [{"role": "user", "content": "查"}], TOOLS, execute):
+        seen.append(event)
+    assert [event["type"] for event in seen] == [
+        "delta",
+        "tool_start",
+        "tool_end",
+        "delta",
+        "delta",
+    ]
+    assert seen[0]["text"] == "我先查一下来源。", "narration is relayed before the call starts"
+    assert started == [1], "the call ran after tool_start, once the message was complete"
+    assert seen[-1]["text"] == final_text and len(final_text) > 4
+    assert bodies[1]["messages"][-2]["content"] == first
+    assert bodies[1]["messages"][-1]["content"][0]["tool_use_id"] == "toolu_a"
 
 
 def test_anthropic_budget_preserves_signed_blocks_images_and_tool_ids(monkeypatch):

@@ -11,6 +11,7 @@ Mock mode (api_key/base_url=mock) simulates these capabilities for end-to-end cu
 without an API key.
 """
 
+import inspect
 import json
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -213,8 +214,97 @@ def stream_chat(
 
 
 # ---------- Tool calling: turn-based agent loop ----------
-def _chat_once(spec: LLMSpec, convo: list[dict], tools: list[dict], deep: bool = False) -> dict:
-    """Make one non-streaming call, returning text, tool calls and optional visible reasoning."""
+def _openai_turn(spec: LLMSpec, convo: list[dict], tools: list[dict]):
+    """Stream one tool-capable turn: yield (kind, text) chunks, then return the result dict.
+
+    Tool-call fragments are grouped by index and their argument pieces concatenated;
+    the JSON is parsed only after the stream ends, so partial calls never execute.
+    """
+    stream = _stream_completion(
+        spec,
+        _client(spec),
+        model=spec.llm_model,
+        messages=convo,
+        **({"tools": tools} if tools else {}),
+    )
+    finish, usage = None, None
+    text: list[str] = []
+    reasoning: list[str] = []
+    calls: dict[int, dict] = {}
+    try:
+        for chunk in stream:
+            if getattr(chunk, "usage", None) is not None:
+                usage = _openai_usage(chunk.usage)
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            if choice.finish_reason:
+                finish = choice.finish_reason
+            delta = choice.delta
+            if delta is None:
+                continue
+            piece = getattr(delta, "reasoning_content", None)
+            if piece:
+                reasoning.append(piece)
+                yield ("reasoning", piece)
+            if delta.content:
+                text.append(delta.content)
+                yield ("text", delta.content)
+            for fragment in delta.tool_calls or []:
+                index = fragment.index if fragment.index is not None else len(calls)
+                slot = calls.setdefault(index, {"id": None, "name": None, "arguments": ""})
+                if fragment.id:
+                    slot["id"] = fragment.id
+                function = fragment.function
+                if function is not None:
+                    if function.name:
+                        slot["name"] = function.name
+                    if function.arguments:
+                        slot["arguments"] += function.arguments
+    finally:
+        stream.close()
+    if finish not in ("stop", "tool_calls"):
+        raise RuntimeError("模型回答未完整结束，可以重试。")
+    tool_calls = []
+    for index in sorted(calls):
+        slot = calls[index]
+        try:
+            args = json.loads(slot["arguments"] or "{}")
+        except ValueError as error:
+            raise RuntimeError("模型没有返回完整的工具参数，可以重试。") from error
+        tool_calls.append(
+            {"id": slot["id"] or f"call_{index}", "name": slot["name"] or "", "args": args}
+        )
+    return {
+        "content": "".join(text) or None,
+        "tool_calls": tool_calls,
+        "reasoning": "".join(reasoning),
+        "usage": usage,
+    }
+
+
+def _relay_turn(turn, deep: bool):
+    """Relay a streaming turn's chunks as run_agent events; return its result dict."""
+    try:
+        while True:
+            try:
+                kind, text = next(turn)
+            except StopIteration as stop:
+                return stop.value
+            if not text:
+                continue
+            if kind == "reasoning":
+                if deep:
+                    yield {"type": "reasoning", "text": text}
+            else:
+                yield {"type": "delta", "text": text}
+    finally:
+        turn.close()
+
+
+def _chat_once(spec: LLMSpec, convo: list[dict], tools: list[dict], deep: bool = False):
+    """One model turn: a result dict (mock, legacy adapters) or a generator that streams
+    (kind, text) chunks and returns the dict with text, tool calls and visible reasoning."""
     if _is_mock(spec):
         has_tool_result = any(m.get("role") == "tool" for m in convo)
         if tools and not has_tool_result:
@@ -245,26 +335,7 @@ def _chat_once(spec: LLMSpec, convo: list[dict], tools: list[dict], deep: bool =
         if deep:
             return anthropic_provider.chat_once(spec, convo, tools, deep=True)
         return anthropic_provider.chat_once(spec, convo, tools)
-
-    resp = _client(spec).chat.completions.create(
-        model=spec.llm_model,
-        messages=convo,
-        **({"tools": tools} if tools else {}),
-        stream=False,
-    )
-    if resp.choices[0].finish_reason not in ("stop", "tool_calls"):
-        raise RuntimeError("模型回答未完整结束，可以重试。")
-    msg = resp.choices[0].message
-    tcs = [
-        {"id": tc.id, "name": tc.function.name, "args": json.loads(tc.function.arguments or "{}")}
-        for tc in (msg.tool_calls or [])
-    ]
-    return {
-        "content": msg.content,
-        "tool_calls": tcs,
-        "reasoning": getattr(msg, "reasoning_content", None) or "",
-        "usage": _openai_usage(getattr(resp, "usage", None)),
-    }
+    return _openai_turn(spec, convo, tools)
 
 
 def run_agent(
@@ -281,6 +352,11 @@ def run_agent(
     diagnostics: dict | None = None,
 ) -> Iterator[dict]:
     """Yield events: {"type":"tool_start"|"tool_end"|"reasoning"|"delta", ...}.
+
+    Streaming turns relay their text and reasoning as they arrive; tool_start is
+    emitted only once the message is complete and its stop checks passed, and a
+    streamed final answer is not re-chunked. Dict-returning turns keep the legacy
+    whole-string reasoning and 4-character delta chunking.
 
     tool_defs: OpenAI-compatible definitions for both built-in and MCP tools.
     execute(name, args): caller-provided router for direct built-in calls or MCP forwarding.
@@ -318,13 +394,17 @@ def run_agent(
             ),
         )
         request = [{"role": "system", "content": prepared.system}, *prepared.messages]
-        r = (
+        turn = (
             _chat_once(spec, request, current_tools, deep=True)
             if deep
             else _chat_once(spec, request, current_tools)
         )
+        streamed = inspect.isgenerator(turn)
+        r = (yield from _relay_turn(turn, deep)) if streamed else turn
+        if r is None:
+            raise RuntimeError("模型连接在回答完成前断开，可以重试。")
         _record_round(diagnostics, prepared.estimated_input_tokens, r.get("usage"))
-        if deep and r.get("reasoning"):
+        if not streamed and deep and r.get("reasoning"):
             yield {"type": "reasoning", "text": r["reasoning"]}
         if r["tool_calls"]:
             if final:
@@ -370,9 +450,14 @@ def run_agent(
                     result = execute(tc["name"], tc["args"])
                 yield {"type": "tool_end", "name": tc["name"], "result": result}
                 convo.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+            if streamed and r.get("content"):
+                # Narration streamed before these calls; keep it a paragraph apart
+                # from the text of the next round.
+                yield {"type": "delta", "text": "\n\n"}
         else:
-            for ch in _chunks(r["content"] or ""):
-                yield {"type": "delta", "text": ch}
+            if not streamed:
+                for ch in _chunks(r["content"] or ""):
+                    yield {"type": "delta", "text": ch}
             return
 
 
