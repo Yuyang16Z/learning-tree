@@ -13,6 +13,7 @@ LearningTree uses React + TypeScript and FastAPI + SQLite/SQLModel. Normal start
 | `app/context.py` | Budget-aware active-path assembly and scoped source rereading. |
 | `app/context_budget.py` | Local request-size estimates and protocol-preserving fitting before provider calls. |
 | `app/calibration.py` | Per-model estimator calibration learned from reported provider usage. |
+| `app/model_catalog.py` | Approximate context windows for well-known model families when a provider lists none. |
 | `app/context_compaction.py` | Cited, complete-sentence extraction and a bounded process-local cache. |
 | `app/learning_summaries.py`, `app/summary_generation.py` | Source-validated persistent summary blocks, bounded provider requests and local fallback. |
 | `app/tool_catalog.py` | Turn-scoped discovery and exact tool-schema loading within the context allowance. |
