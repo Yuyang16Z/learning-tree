@@ -378,6 +378,8 @@ def delete_node(node_id: int, session: Session = Depends(get_session)) -> dict:
         for memory in session.exec(select(Memory).where(Memory.source_node_id.in_(ids))).all():
             session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory.id))
             session.delete(memory)
+        # The full-text search_index rows of these messages, memories and notes are
+        # removed by the SQLite triggers in app/search_index.py as the rows go.
         # References outside the deleted subtree must not point to nonexistent nodes.
         for node in session.exec(
             select(Node).where(Node.source_node_id.in_(ids) | Node.revision_of.in_(ids))

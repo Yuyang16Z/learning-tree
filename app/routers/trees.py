@@ -450,7 +450,9 @@ def delete_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
             session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory.id))
             session.delete(memory)
         # One statement removes parents and children together; SQLite checks the
-        # self-referencing parent key at the end of the statement.
+        # self-referencing parent key at the end of the statement. The triggers in
+        # app/search_index.py drop the full-text rows of every deleted record;
+        # RetrievalSettings is a global user setting and is deliberately kept.
         session.execute(delete(Node).where(Node.tree_id == tree_id))
         session.execute(delete(DocumentAttachment).where(DocumentAttachment.tree_id == tree_id))
         session.delete(tree)

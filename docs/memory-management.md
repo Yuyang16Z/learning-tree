@@ -82,7 +82,73 @@ Editing a fact preserves its topic and source node, invalidates its cached
 embedding, and makes the next eligible retrieval use the revised content.
 Deleting a fact also removes its vector cache. Neither action rewrites or deletes
 the original conversation. Relevance retrieval still uses valid sources on the
-current learning path: Settings search does not make sibling branches eligible.
+current learning path unless you widen it below: Settings search itself does not
+make sibling branches eligible.
+
+### Structured facts
+
+Each extracted fact carries a type shown as a small tag: definition, condition,
+correction (a misconception the answer corrected), open question, learner state
+(what you are working on or asked for this time) or conclusion. The extractor
+also receives up to twenty recent facts from the current learning path so it can
+mark a new fact as correcting an earlier one instead of restating it. The earlier
+fact is then tagged **Superseded**: it stays stored and listed until you delete
+it, but it no longer reaches answers, the search index or the model's history
+search. Only facts that were never edited by hand can be superseded, and only
+by a fact from the same learning path. Facts extracted by older versions read as
+conclusions. Interpretation of types and corrections depends on the configured
+model; the tags are hints, not verified classifications.
+
+## Retrieval scope
+
+Below the retrieval status, **Settings → Memory** offers two switches:
+
+- **Other branches of this topic** adds facts from sibling branches of the
+  current learning tree.
+- **Other learning topics** adds facts from other, non-archived learning trees.
+
+The current learning path is always searched and cannot be turned off. Widened
+facts are ranked together with path facts, but they are rendered after them in
+their own sections, each line labelled with the branch or topic it came from,
+and they share a smaller budget (four entries, 1,200 characters) than the path
+(eight entries, 2,400 characters). They therefore never displace a path fact.
+Each widened hit is rechecked against current records for its own scope before
+it enters the prompt: a sibling whose answer failed, or a topic that was
+archived meanwhile, drops out. Both switches are off by default; changing them
+is saved with a revision token, and a conflicting save from another window
+reloads the latest settings instead of overwriting them.
+
+The same switches govern the answer model's read-only `search_learning_history`
+tool. It searches completed answers, notes and current facts of the current path
+by default; the `tree` and `all` scopes are refused unless the matching switch
+was on when the answer started. The tool never writes, never embeds and is not
+offered in demo mode.
+
+### Referenced memories
+
+Under each answer, a compact **Referenced** line lists the memories that were
+actually part of the prompt, as memory ids with their source node, labelled when
+they came from another branch or topic. Entries open the source node, switching
+topic when needed. Records that compaction dropped from the prompt are not
+listed. The list is stored with the answer and shown again later; it refers to
+this database's ids, so learning-tree exports leave it out.
+
+## Topic search
+
+The learning map's search box filters titles and quoted passages instantly and,
+after a short pause, also asks the server for full-text matches in completed
+answers, learning notes and current facts of the open topic. Those appear as a
+second group with a verbatim snippet; choosing an answer hit opens the node and
+highlights the matching passage. Pending or interrupted answers and superseded
+facts are never listed. Results are capped at thirty, and a search is dropped
+when you switch topics before it returns.
+
+Search uses a SQLite FTS5 trigram index (`search_index`) maintained by database
+triggers, so it follows every edit, completion, supersession and deletion
+immediately. Start-up creates the index when it is missing and rebuilds it when
+its row count disagrees with the stored records; it is derived data that a
+restored backup rebuilds on first start. Queries shorter than three characters,
+or a SQLite build without FTS5, use a case-insensitive LIKE scan instead.
 
 The source conversation can still appear in ordinary chat context after its
 derived fact is deleted. Later extraction from a new completed answer may produce
@@ -111,3 +177,33 @@ Addition endpoints are `GET/PUT /memories/preferences/learning`,
 `PATCH/DELETE /memories/preferences/supplements/{id}`. Edits and deletes use
 revision tokens. Clear-all removes additions and invalidates in-flight writes,
 while retaining the content-free input ledger to prevent replay.
+
+`GET/PUT /memories/retrieval/settings` reads and saves the two scope switches
+(`include_siblings`, `include_other_trees`) with a revision token; the row is
+only created on the first save and is kept when topics are deleted.
+`GET /trees/{id}/search?q=&limit=` returns `{results: [{node_id, message_id,
+kind, snippet, rank}]}` with `kind` one of `title`, `message`, `note` or
+`memory`. `Memory` rows gained `fact_type`, `terms`, `superseded_by` and
+`updated_at`; `Message` rows gained `sources`. All additions are additive and
+idempotent; database backups include them, learning-tree exports exclude
+`sources`.
+
+## 中文说明
+
+- **检索范围**：「设置 → 记忆」新增两个开关：「同主题的其他分支」和「其他学习主题」。
+  当前学习路径始终参与检索，不能关闭。扩大范围后的记忆与路径记忆一起排序，但单独分节渲染、
+  每条标注来源分支或主题，并使用更小的预算（4 条、1,200 字符，路径为 8 条、2,400 字符），
+  因此不会挤掉路径记忆；进入提示前会按各自范围重新核对来源是否仍然有效。两个开关默认关闭，
+  保存带版本号，别处同时修改会重新载入最新设置而不是覆盖。
+- **结构化事实**：提炼出的事实带类型标签（定义、适用条件、纠正误解、待解决疑问、学习状态、
+  结论）。新事实可以标记为修正某条当前路径上的旧事实，旧事实显示「已更新」并保留可删，
+  但不再进入回答、搜索索引和模型的历史检索；用户手动编辑过的事实不会被自动替代。
+- **参考了哪些记忆**：每条回答下方列出实际进入提示的记忆编号及来源节点，来自其他分支或
+  主题的会标注；点击可跳到来源节点。被压缩掉的记忆不会列出。该列表随回答保存，但不随
+  学习树导出。
+- **主题内全文搜索**：学习树搜索框除了即时匹配标题和引用，还会向服务端查询已完成回答、
+  学习笔记和当前事实中的原文片段，作为第二组结果展示；选择回答结果会跳转并高亮对应段落。
+  索引由 SQLite FTS5（三元组分词）和触发器维护，启动时缺失或计数不符会自动重建；短于
+  3 个字符的查询或不支持 FTS5 的 SQLite 使用 LIKE 扫描。
+- 模型可用的只读工具 `search_learning_history` 受同一组开关约束：默认只查当前路径，
+  `tree`/`all` 范围需在回答开始时已经启用；它不写入数据库，演示模式不会提供。
