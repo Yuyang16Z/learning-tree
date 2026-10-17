@@ -1,4 +1,4 @@
-import type { TreeNode, Understanding } from "../types";
+import type { ThreadNode, TreeNode, Understanding } from "../types";
 
 /** The learner's own marks, in the order the controls show them. */
 export const UNDERSTANDING_LEVELS: readonly Understanding[] = ["open", "partial", "clear"];
@@ -17,6 +17,22 @@ export function isUnderstanding(value: unknown): value is Understanding {
 /** Choosing the active mark again clears it; any other choice replaces it. */
 export function toggleUnderstanding(current: Understanding | null | undefined, chosen: Understanding): Understanding | null {
   return current === chosen ? null : chosen;
+}
+
+/**
+ * The conversation offers one mark, for the open question: its last thread row (a legacy
+ * node holds several turns), once that row shows an answer. Earlier questions on the path
+ * are marked by opening them. While the question is being answered, here or elsewhere,
+ * the control stays visible but `answering` disables it.
+ */
+export function markTarget(thread: readonly ThreadNode[], activeNodeId: number | null, retryingNodeId: number | null = null): { row: ThreadNode; answering: boolean } | null {
+  if (activeNodeId == null) return null;
+  for (let index = thread.length - 1; index >= 0; index--) {
+    const row = thread[index];
+    if (row.node_id !== activeNodeId) continue;
+    return row.answer?.trim() ? { row, answering: row.status === "pending" || retryingNodeId === activeNodeId } : null;
+  }
+  return null;
 }
 
 type Marked = { understanding?: Understanding | null };

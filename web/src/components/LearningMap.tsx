@@ -248,7 +248,7 @@ export function LearningMap({ nodes, activeId, onSelect, onDelete, onCollapse, w
   const unresolvedSummary = unresolved.total === 1 ? t("1 个问题标记为「还没懂」", "1 question marked “Not yet”")
     : unresolved.total > unresolved.items.length ? t("{count} 个问题标记为「还没懂」，显示最近 {shown} 个", "{count} questions marked “Not yet”; showing the latest {shown}", { count: unresolved.total, shown: unresolved.items.length })
     : unresolved.total ? t("{count} 个问题标记为「还没懂」", "{count} questions marked “Not yet”", { count: unresolved.total })
-    : t("还没有标记为「还没懂」的问题；可在回答下方的「理解」中标记。", "No questions are marked “Not yet”. Mark one with Understanding under an answer.");
+    : t("还没有标记为「还没懂」的问题；打开一个问题，在对话顶部的「理解」中标记。", "No questions are marked “Not yet”. Open a question and mark it with Understanding at the top of the conversation.");
   const closeUnresolved = () => {
     setUnresolvedOpen(false);
     unresolvedToggleRef.current?.focus();

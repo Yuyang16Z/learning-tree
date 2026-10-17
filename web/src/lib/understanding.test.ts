@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ThreadNode, TreeNode } from "../types";
-import { cardUnderstanding, isUnderstanding, restoreUnderstanding, toggleUnderstanding, UNDERSTANDING_LEVELS, UNDERSTANDING_TEXT, UNRESOLVED_CAP, unresolvedNodes, withUnderstanding } from "./understanding";
+import { cardUnderstanding, isUnderstanding, markTarget, restoreUnderstanding, toggleUnderstanding, UNDERSTANDING_LEVELS, UNDERSTANDING_TEXT, UNRESOLVED_CAP, unresolvedNodes, withUnderstanding } from "./understanding";
 
 function node(id: number, extra: Partial<TreeNode> = {}): TreeNode {
   return { id, parent_id: id === 1 ? null : id - 1, tree_id: 1, title: `问题 ${id}`, seed_text: null, has_summary: false, ...extra };
@@ -24,6 +24,29 @@ describe("understanding marks", () => {
     expect(toggleUnderstanding(undefined, "clear")).toBe("clear");
     expect(toggleUnderstanding("open", "partial")).toBe("partial");
     expect(toggleUnderstanding("partial", "partial")).toBeNull();
+  });
+
+  it("offers one mark, for the open question's last row once it shows an answer", () => {
+    const thread = [row(1), row(2), row(3, { question: "first turn", answer: "old" }), row(3, { question: "second turn", answer: "latest" })];
+    expect(markTarget(thread, 3)).toEqual({ row: thread[3], answering: false });
+    // Earlier questions on the path are marked by opening them.
+    expect(markTarget(thread, 1)).toEqual({ row: thread[0], answering: false });
+    expect(markTarget(thread, null)).toBeNull();
+    expect(markTarget(thread, 9)).toBeNull(); // A thread still loading for another node.
+    expect(markTarget([], 1)).toBeNull();
+  });
+
+  it("offers no mark before the open question shows an answer", () => {
+    for (const answer of [null, "", "  \n"]) expect(markTarget([row(1), row(2, { answer })], 2)).toBeNull();
+    // A legacy node whose latest turn has no answer yet is not marked through an older turn.
+    expect(markTarget([row(2, { answer: "earlier" }), row(2, { question: "again", answer: null })], 2)).toBeNull();
+  });
+
+  it("keeps the mark visible but disabled while the open question is being answered", () => {
+    expect(markTarget([row(1, { status: "pending", answer: "partial" })], 1)?.answering).toBe(true);
+    expect(markTarget([row(1, { status: "error" })], 1, 1)?.answering).toBe(true); // Retrying here.
+    expect(markTarget([row(1, { status: "error" })], 1, 2)?.answering).toBe(false);
+    expect(markTarget([row(1, { status: "interrupted" })], 1)?.answering).toBe(false);
   });
 
   it("updates only the targeted rows and keeps the array when nothing changes", () => {

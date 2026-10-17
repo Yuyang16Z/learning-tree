@@ -317,9 +317,12 @@ async function poll(callback, label) {
     }, { treeId: recap.id, nodeId: recapFollow.id });
     await page.reload();
     await page.getByRole('heading', { name: 'Return recap UI check', exact: true, level: 1 }).waitFor();
-    const followMarks = page.locator(`[data-turn-node="${recapFollow.id}"]`).getByRole('radiogroup', { name: 'Understanding', exact: true });
+    // One mark, for the open question, in the source bar area; none under the path's answers.
+    const followMarks = page.locator('.chat-source-bar').getByRole('radiogroup', { name: 'Understanding', exact: true });
     await followMarks.waitFor();
-    assert.equal(await page.getByRole('radiogroup', { name: 'Understanding', exact: true }).count(), 3, 'Each answered node on the path offers one mark');
+    assert.equal(await page.getByRole('radiogroup', { name: 'Understanding', exact: true }).count(), 1, 'Only the open question offers a mark');
+    assert.equal(await page.locator('[data-turn-node] [role="radiogroup"]').count(), 0, 'Answers on the path carry no marks of their own');
+    assert.equal(await page.locator('[data-turn-node]').count(), 3, 'The whole path is shown');
     const markSaved = page.waitForResponse(response => response.request().method() === 'PATCH' && new URL(response.url()).pathname === `/api/nodes/${recapFollow.id}`);
     await followMarks.getByRole('radio', { name: 'Not yet', exact: true }).click();
     assert.equal((await markSaved).status(), 200);
@@ -329,7 +332,7 @@ async function poll(callback, label) {
     assert.equal(await followMarks.getByRole('radio', { name: 'Not yet', exact: true }).getAttribute('aria-checked'), 'true', 'The mark survives a reload');
     assert.equal(await followMarks.getByRole('radio', { name: 'Roughly', exact: true }).getAttribute('aria-checked'), 'false');
     assert.equal((await api(`/nodes/${recapBranch.id}`)).learning_note, recapNote);
-    checks.push('An understanding mark on the last answer of a node saves only the mark and survives reload');
+    checks.push('The open question offers one understanding mark in the source bar, which saves only the mark and survives reload');
 
     const map = page.getByRole('complementary', { name: 'LearningTree', exact: true });
     const mapCard = node => map.locator(`.lm-card[aria-label=${JSON.stringify(node.title)}]`);
@@ -343,6 +346,19 @@ async function poll(callback, label) {
     assert.equal(await unresolvedToggle.locator('.lm-badge').innerText(), '1');
     await mapCard(recapRoot).locator('.lm-topic').click();
     await poll(async () => await activeRecapNode() === recapRoot.id, 'the root question is open');
+    // The main line has no source bar; its question's mark sits in a bar of its own there.
+    const rootMarks = page.locator('.chat-mark-bar').getByRole('radiogroup', { name: 'Understanding', exact: true });
+    await rootMarks.waitFor();
+    assert.equal(await page.locator('.chat-source-bar').count(), 0);
+    assert.equal(await page.getByRole('radiogroup', { name: 'Understanding', exact: true }).count(), 1);
+    const rootSaved = page.waitForResponse(response => response.request().method() === 'PATCH' && new URL(response.url()).pathname === `/api/nodes/${recapRoot.id}`);
+    await rootMarks.getByRole('radio', { name: 'Can explain', exact: true }).click();
+    assert.equal((await rootSaved).status(), 200);
+    assert.deepEqual(patches.at(-1), { pathname: `/api/nodes/${recapRoot.id}`, body: { understanding: 'clear' } });
+    await poll(async () => /\bu-clear\b/.test(await mapCard(recapRoot).getAttribute('class') ?? ''), 'the root card takes its mark');
+    assert.equal(await rootMarks.getByRole('radio', { name: 'Can explain', exact: true }).getAttribute('aria-checked'), 'true');
+    assert.equal(await unresolvedToggle.locator('.lm-badge').innerText(), '1', 'Only "Not yet" marks are unresolved');
+    checks.push('A main-line question offers its mark in a bar of its own where the source bar would be');
     await unresolvedToggle.click();
     const unresolvedList = map.getByRole('region', { name: 'Not understood', exact: true });
     await unresolvedList.waitFor();
