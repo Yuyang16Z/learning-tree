@@ -25,6 +25,7 @@ describe("localized application diagnostics", () => {
       "文档不存在或不属于当前学习主题，请重新上传。",
       "服务商未提供该模型的上下文长度；以下为内置目录的近似值，请核对后保存。",
       "演示模型没有可检测的上下文窗口。",
+      "检索范围设置已在其他窗口更新，请重新载入。",
     ]) {
       const english = localizeError(original, "en");
       expect(english).not.toBe(original);

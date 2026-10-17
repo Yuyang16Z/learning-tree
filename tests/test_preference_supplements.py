@@ -81,9 +81,12 @@ def test_additive_tables_preserve_legacy_rows_and_profile(tmp_path, monkeypatch)
     monkeypatch.setattr(database, "engine", engine)
     database.init_db()
     database.init_db()
-    assert {"preferencesupplement", "preferencelearningstate", "preferenceextraction"} <= set(
-        inspect(engine).get_table_names()
-    )
+    assert {
+        "preferencesupplement",
+        "preferencelearningstate",
+        "preferenceextraction",
+        "retrievalsettings",
+    } <= set(inspect(engine).get_table_names())
     with Session(engine) as session:
         assert session.get(Memory, 42).content == "旧偏好"
         assert session.get(PreferenceProfile, 1).revision == "manual-revision"

@@ -2,7 +2,7 @@ import { useEffect, useId, useState } from "react";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import { localizeError, mcpDisplayName } from "../i18n/workspace";
-import type { McpServer, MemoryRetrievalStatus, ModelCfg, Tree } from "../types";
+import type { McpServer, MemoryRetrievalStatus, ModelCfg, RetrievalSettings, Tree } from "../types";
 import { MemoryPanel } from "./MemoryPanel";
 import { PhoneAccessPanel } from "./PhoneAccessPanel";
 import { TopicList } from "./TopicList";
@@ -38,6 +38,33 @@ function MemoryRetrievalPanel() {
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   const [pollingPaused, setPollingPaused] = useState(false);
+  const [scopes, setScopes] = useState<RetrievalSettings | null>(null);
+  const [scopesReload, setScopesReload] = useState(0);
+  const [scopeSaving, setScopeSaving] = useState(false);
+  const [scopeError, setScopeError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void api.getRetrievalSettings(controller.signal).then(result => {
+      if (!controller.signal.aborted) setScopes(result);
+    }).catch(error => {
+      if (!controller.signal.aborted) setScopeError(error instanceof Error ? error.message : String(error));
+    });
+    return () => controller.abort();
+  }, [scopesReload]);
+
+  async function updateScopes(change: Partial<RetrievalSettings>) {
+    if (!scopes || scopeSaving) return;
+    setScopeSaving(true);
+    setScopeError("");
+    try {
+      setScopes(await api.saveRetrievalSettings({ ...scopes, ...change }));
+    } catch (error) {
+      const conflict = typeof error === "object" && error !== null && "status" in error && error.status === 409;
+      setScopeError(conflict ? t("检索范围已在别处更新，已重新载入最新设置。", "The retrieval scope changed elsewhere; the latest settings were reloaded.") : error instanceof Error ? error.message : String(error));
+      if (conflict) setScopesReload(value => value + 1);
+    } finally { setScopeSaving(false); }
+  }
 
   useEffect(() => {
     const controller = new AbortController();
@@ -97,7 +124,15 @@ function MemoryRetrievalPanel() {
       <div className="grow">
         <div>{t("记忆检索", "Memory retrieval")}</div>
         <div className="k" role="status" aria-live="polite">{summary}</div>
-        <div className="k">{t("按当前问题查找相关记忆，话题内容仅来自当前学习路径。", "Finds memories relevant to your question, with topic content limited to the current learning path.")}</div>
+        <div className="k">{t("按当前问题查找相关记忆，话题内容默认仅来自当前学习路径；可在下方扩大范围。", "Finds memories relevant to your question; topic content comes from the current learning path unless you widen it below.")}</div>
+        <fieldset className="memory-scopes">
+          <legend>{t("检索范围", "Memory scope")}</legend>
+          <label><input type="checkbox" checked disabled readOnly />{t("当前学习路径（始终）", "Current learning path (always)")}</label>
+          <label><input type="checkbox" checked={scopes?.include_siblings ?? false} disabled={!scopes || scopeSaving} onChange={event => void updateScopes({ include_siblings: event.target.checked })} />{t("同主题的其他分支", "Other branches of this topic")}</label>
+          <label><input type="checkbox" checked={scopes?.include_other_trees ?? false} disabled={!scopes || scopeSaving} onChange={event => void updateScopes({ include_other_trees: event.target.checked })} />{t("其他学习主题（已归档的除外）", "Other learning topics (except archived ones)")}</label>
+          <div className="k">{t("扩大范围后的记忆会单独列出并标注来源，使用比当前路径更小的预算；回答下方会显示参考了哪些记忆。", "Widened memories are listed separately with their origin and use a smaller budget than the path; each answer shows which memories it referenced.")}</div>
+          {scopeError && <div className="test-bad" role="alert">{localizeError(scopeError)}</div>}
+        </fieldset>
         {status?.state === "not_installed" && (
           <div className="k">
             {t("语义检索为可选增强。在项目目录运行以下命令安装，然后重启应用：", "Semantic retrieval is optional. Run this in the project directory, then restart the app:")}

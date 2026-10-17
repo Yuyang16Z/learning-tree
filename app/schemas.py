@@ -186,6 +186,18 @@ class PreferenceLearningIn(BaseModel):
     revision: str = Field(min_length=1, max_length=100)
 
 
+class RetrievalSettingsOut(BaseModel):
+    include_siblings: bool
+    include_other_trees: bool
+    revision: str
+
+
+class RetrievalSettingsIn(BaseModel):
+    include_siblings: bool
+    include_other_trees: bool
+    revision: str = Field(min_length=1, max_length=100)
+
+
 class PreferenceSupplementOut(BaseModel):
     id: int
     content: str
@@ -219,6 +231,8 @@ class FactOut(MemoryOut):
     source_node_id: int | None
     tree_title: str | None
     created_at: datetime
+    fact_type: str = "conclusion"
+    superseded_by: int | None = None
 
 
 class FactTopicOut(BaseModel):

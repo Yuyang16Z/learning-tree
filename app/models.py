@@ -52,6 +52,16 @@ class Memory(SQLModel, table=True):
     tree_id: int | None = Field(default=None, index=True)  # Unset for global preferences.
     source_node_id: int | None = None
     created_at: datetime = Field(default_factory=_now)
+    # Structured facts: definition | condition | misconception | open_question |
+    # learner_state | conclusion. Legacy rows read as conclusions.
+    fact_type: str = Field(
+        default="conclusion", sa_column=Column(String, nullable=False, default="conclusion")
+    )
+    terms: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    # A later fact that corrects this one; superseded facts leave retrieval and the
+    # search index but stay visible in Settings until deleted.
+    superseded_by: int | None = None
+    updated_at: datetime | None = None  # Set by edits and supersession, not creation.
 
 
 class MemoryEmbedding(SQLModel, table=True):
@@ -100,6 +110,18 @@ class PreferenceLearningState(SQLModel, table=True):
 
     id: int = Field(default=1, primary_key=True)
     enabled: bool = True
+    revision: str = Field(default_factory=lambda: uuid4().hex)
+
+
+class RetrievalSettings(SQLModel, table=True):
+    """Singleton: wider memory scopes are opt-in; revisions detect concurrent saves.
+
+    The current learning path is always searched. Siblings and other topics only
+    contribute labelled, separately budgeted facts after the user turns them on."""
+
+    id: int = Field(default=1, primary_key=True)
+    include_siblings: bool = False
+    include_other_trees: bool = False
     revision: str = Field(default_factory=lambda: uuid4().hex)
 
 
@@ -182,6 +204,9 @@ class Message(SQLModel, table=True):
     steps: list | None = Field(default=None, sa_column=Column(JSON))
     # Per-answer numbers only (token estimates, usage, timings); never prompt text.
     diagnostics: dict | None = Field(default=None, sa_column=Column(JSON))
+    # Memory records the answer was given: [{memory_id, source_node_id, tree_id,
+    # tree_title, scope}]. Local provenance only; excluded from exports.
+    sources: list | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=_now)
 
 

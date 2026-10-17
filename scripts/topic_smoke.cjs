@@ -456,6 +456,11 @@ with Session(engine) as session:
     assert session.get(Memory, payload['memory']) is None
     assert not session.exec(select(MemoryEmbedding).where(MemoryEmbedding.memory_id == payload['memory'])).all()
     assert session.get(Memory, payload['survivor']) is not None
+with engine.connect() as connection:
+    if connection.exec_driver_sql("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'search_index'").first():
+        # The full-text index is derived data: triggers drop the deleted topic's rows.
+        assert connection.exec_driver_sql("SELECT COUNT(*) FROM search_index WHERE tree_id = ?", (payload['tree'],)).scalar() == 0
+        assert connection.exec_driver_sql("SELECT COUNT(*) FROM search_index WHERE node_id IN (%s)" % ','.join(str(i) for i in payload['nodes'])).scalar() == 0
 `], {
       cwd: path.resolve(__dirname, '..'), encoding: 'utf8',
       input: JSON.stringify({ tree: topic.id, nodes: originalNodes.map(node => node.id), document: document.id, ...relatedIds }),

@@ -15,11 +15,20 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 import app.db as database
 import app.service as service
+from app.changes import feed
 from app.context import build_context
 from app.context_budget import ContextPolicy, estimate_request_tokens
 from app.llm import LLMSpec
 from app.memory_preferences import PROFILE_HEADING
-from app.models import KnowledgeTree, Memory, MemoryEmbedding, Message, Node, PreferenceProfile
+from app.models import (
+    KnowledgeTree,
+    Memory,
+    MemoryEmbedding,
+    Message,
+    Node,
+    PreferenceProfile,
+    RetrievalSettings,
+)
 from app.retrieval import retrieve_memory
 from app.routers.memory_router import router
 
@@ -77,8 +86,13 @@ def test_additive_profile_table_preserves_existing_memory_ids(tmp_path, monkeypa
     database.init_db()
     database.init_db()
     assert "preferenceprofile" in inspect(engine).get_table_names()
+    columns = {column["name"]: column for column in inspect(engine).get_columns("memory")}
+    assert {"fact_type", "terms", "superseded_by", "updated_at"} <= set(columns)
+    assert not columns["fact_type"]["nullable"]
     with Session(engine) as session:
-        assert session.get(Memory, 104).content == "原有偏好"
+        legacy = session.get(Memory, 104)
+        assert legacy.content == "原有偏好"
+        assert (legacy.fact_type, legacy.terms, legacy.superseded_by) == ("conclusion", None, None)
         assert session.get(PreferenceProfile, 1) is None
     engine.dispose()
 
@@ -294,6 +308,8 @@ def test_facts_search_topics_and_stable_pagination(setup):
     assert found["items"][0]["tree_title"] == "Harness"
     assert found["items"][0]["source_node_id"] == 1
     assert found["items"][0]["created_at"]
+    assert found["items"][0]["fact_type"] == "conclusion"
+    assert found["items"][0]["superseded_by"] is None
     assert client.get("/memories/facts", params={"q": "%_"}).json()["total"] == 1
     assert client.get("/memories/facts", params={"page": 0}).status_code == 422
     assert client.get("/memories/facts", params={"page_size": 101}).status_code == 422
@@ -360,3 +376,98 @@ def test_batch_delete_only_facts_clears_vectors_and_preserves_other_records(setu
         assert session.exec(select(MemoryEmbedding)).all() == []
     assert client.post("/memories/delete", json={"ids": list(range(1001))}).status_code == 422
     assert client.delete(f"/memories/{retained.id}").status_code == 200
+
+
+def test_fact_listing_exposes_structure_and_edits_mark_the_record_updated(setup):
+    client, engine = setup
+    old = add(engine, "旧的定义")
+    with Session(engine) as session:
+        new = Memory(
+            kind="fact",
+            content="修正后的定义",
+            tree_id=1,
+            source_node_id=1,
+            fact_type="misconception",
+            terms=["定义"],
+        )
+        session.add(new)
+        session.flush()
+        stale = session.get(Memory, old.id)
+        stale.superseded_by = new.id
+        session.add(stale)
+        session.commit()
+        new_id = new.id
+    items = {row["id"]: row for row in client.get("/memories/facts").json()["items"]}
+    assert items[new_id]["fact_type"] == "misconception" and items[new_id]["superseded_by"] is None
+    assert items[old.id]["fact_type"] == "conclusion" and items[old.id]["superseded_by"] == new_id
+    patched = client.patch(
+        f"/memories/{new_id}", json={"content": "再次修正", "expected_content": "修正后的定义"}
+    )
+    assert patched.status_code == 200 and patched.json()["fact_type"] == "misconception"
+    with Session(engine) as session:
+        assert session.get(Memory, new_id).updated_at is not None
+        assert session.get(Memory, new_id).terms == ["定义"], "edits keep the structure"
+        result = retrieve_memory(session, 1, [1])
+    assert {hit.memory_id for hit in result.facts} == {new_id}, "superseded facts stay out"
+
+
+def test_retrieval_scope_settings_default_off_without_writes_and_require_revision(setup):
+    client, engine = setup
+    initial = client.get("/memories/retrieval/settings").json()
+    assert initial == {
+        "include_siblings": False,
+        "include_other_trees": False,
+        "revision": "initial",
+    }
+    assert client.get("/memories/retrieval/settings").json() == initial
+    with Session(engine) as session:
+        assert session.get(RetrievalSettings, 1) is None
+    cursor = feed.since("")["cursor"]
+    updated = client.put("/memories/retrieval/settings", json={**initial, "include_siblings": True})
+    assert updated.status_code == 200
+    assert updated.json()["include_siblings"] is True
+    assert updated.json()["include_other_trees"] is False
+    assert updated.json()["revision"] != initial["revision"]
+    assert feed.since(cursor)["memory"], "other windows are told to refresh memory settings"
+    assert client.put("/memories/retrieval/settings", json=initial).status_code == 409
+    missing_revision = {"include_siblings": True, "include_other_trees": True}
+    assert client.put("/memories/retrieval/settings", json=missing_revision).status_code == 422
+    assert client.get("/memories/retrieval/settings").json() == updated.json()
+    assert client.get("/memories/retrieval/status").status_code == 200
+
+
+def test_concurrent_first_scope_saves_have_one_winner(setup):
+    client, engine = setup
+    revision = client.get("/memories/retrieval/settings").json()["revision"]
+    barrier = Barrier(2)
+
+    def update(include_siblings):
+        barrier.wait(timeout=5)
+        body = {"include_siblings": include_siblings, "include_other_trees": False}
+        return client.put("/memories/retrieval/settings", json={**body, "revision": revision})
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = sorted(response.status_code for response in executor.map(update, [True, False]))
+    assert results == [200, 409]
+    with Session(engine) as session:
+        assert len(session.exec(select(RetrievalSettings)).all()) == 1
+
+
+def test_saved_scopes_widen_what_the_chat_memory_note_recalls(setup):
+    client, engine = setup
+    add(engine, "当前路径的 schema 事实")
+    add(engine, "兄弟分支的 schema 事实", source_node_id=2)
+    add(engine, "其他话题的 schema 事实", tree_id=2, source_node_id=3)
+    with Session(engine) as session:
+        note = service.fetch_memory_note(session, 1, [1], query="schema 事实")
+    assert "当前路径的 schema 事实" in note
+    assert "兄弟分支的" not in note and "其他话题的" not in note
+    revision = client.get("/memories/retrieval/settings").json()["revision"]
+    body = {"include_siblings": True, "include_other_trees": True, "revision": revision}
+    assert client.put("/memories/retrieval/settings", json=body).status_code == 200
+    with Session(engine) as session:
+        note = service.fetch_memory_note(session, 1, [1], query="schema 事实")
+    assert "【当前学习路径的相关记忆】" in note
+    assert "（同主题其他分支「兄弟分支」）兄弟分支的 schema 事实" in note
+    assert "（其他主题「MCP」）其他话题的 schema 事实" in note
+    assert note.index("当前路径的 schema 事实") < note.index("兄弟分支的 schema 事实")

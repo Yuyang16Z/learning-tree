@@ -6,6 +6,7 @@ from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel, create_engine, select
 
+from . import search_index  # Registers the metadata hook that indexes test schemas too.
 from .config import settings
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,13 @@ _ADDED_COLUMNS = {
         "steps": "JSON",
         "status": "TEXT NOT NULL DEFAULT 'complete'",
         "diagnostics": "JSON",
+        "sources": "JSON",
+    },
+    "memory": {
+        "fact_type": "TEXT NOT NULL DEFAULT 'conclusion'",
+        "terms": "JSON",
+        "superseded_by": "INTEGER",
+        "updated_at": "DATETIME",
     },
 }
 
@@ -161,6 +169,8 @@ def init_db() -> None:
     _ensure_columns()
     _ensure_indexes()
     _report_foreign_key_violations()
+    # After the additive columns exist: the FTS triggers reference them.
+    search_index.ensure_search_index(engine)
     from .models import Message, Node
     from .title_generation import fallback_title
 

@@ -16,8 +16,10 @@ from ..models import (
     PreferenceLearningState,
     PreferenceProfile,
     PreferenceSupplement,
+    RetrievalSettings,
 )
 from ..preference_supplements import read_learning_state, supplement_out
+from ..retrieval import read_retrieval_settings
 from ..schemas import (
     FactDeleteIn,
     FactOut,
@@ -32,6 +34,8 @@ from ..schemas import (
     PreferenceSupplementOut,
     PreferenceSupplementPageOut,
     PreferenceSupplementPatch,
+    RetrievalSettingsIn,
+    RetrievalSettingsOut,
 )
 
 router = APIRouter(prefix="/memories", tags=["memories"])
@@ -160,6 +164,8 @@ def _fact_out(memory: Memory, title: str | None) -> FactOut:
         source_node_id=memory.source_node_id,
         tree_title=title,
         created_at=memory.created_at,
+        fact_type=memory.fact_type,
+        superseded_by=memory.superseded_by,
     )
 
 
@@ -238,7 +244,7 @@ def edit_fact(memory_id: int, body: FactPatch, session: Session = Depends(get_se
             Memory.kind == "fact",
             Memory.content == body.expected_content,
         )
-        .values(content=content)
+        .values(content=content, updated_at=datetime.now(timezone.utc))
         .execution_options(synchronize_session=False)
     )
     if changed.rowcount != 1:
@@ -298,3 +304,25 @@ def prepare_retrieval() -> dict:
     from ..semantic_models import start_prepare
 
     return start_prepare()
+
+
+@router.get("/retrieval/settings", response_model=RetrievalSettingsOut)
+def get_retrieval_settings(session: Session = Depends(get_session)) -> RetrievalSettingsOut:
+    return read_retrieval_settings(session)
+
+
+@router.put("/retrieval/settings", response_model=RetrievalSettingsOut)
+def save_retrieval_settings(
+    body: RetrievalSettingsIn, session: Session = Depends(get_session)
+) -> RetrievalSettingsOut:
+    begin_memory_write(session)
+    current = read_retrieval_settings(session)
+    if body.revision != current.revision:
+        raise HTTPException(409, "检索范围设置已在其他窗口更新，请重新载入。")
+    settings = session.get(RetrievalSettings, 1) or RetrievalSettings()
+    settings.include_siblings = body.include_siblings
+    settings.include_other_trees = body.include_other_trees
+    settings.revision = uuid4().hex
+    session.add(settings)
+    session.commit()
+    return read_retrieval_settings(session)

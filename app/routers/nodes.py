@@ -36,7 +36,9 @@ from ..models import (
     PreferenceExtraction,
     PreferenceSupplement,
 )
+from ..retrieval import read_retrieval_settings
 from ..schemas import AskIn, BranchIn, ExplainIn, NodePatch, StopIn, TitleIn
+from ..search_index import HISTORY_TOOL_DEF, HISTORY_TOOL_NAME, make_history_search
 from ..service import (
     assemble_tools,
     extract_and_save,
@@ -71,6 +73,8 @@ class Generation:
     text: list[str] = field(default_factory=list)
     reasoning: list[str] = field(default_factory=list)
     steps: list[dict] = field(default_factory=list)
+    # Memory records given to the model for this answer (ids and titles only).
+    sources: list[dict] = field(default_factory=list)
     status: str = "pending"
     error: str | None = None
     message_id: int | None = None
@@ -113,6 +117,7 @@ def discard_node_work(node_ids) -> None:
                 generation.text.clear()
                 generation.reasoning.clear()
                 generation.steps.clear()
+                generation.sources.clear()
                 generation.log.clear()
             generation.wake()
 
@@ -289,6 +294,7 @@ def _qa_rows(node: Node, messages: list[Message], session: Session) -> list[dict
                 "reasoning": answer.reasoning if answer else None,
                 "steps": answer.steps if answer else None,
                 "diagnostics": answer.diagnostics if answer else None,
+                "sources": answer.sources if answer else None,
                 "answered_by": answer.answered_by if answer else None,
                 "attempts": [
                     {"message_id": m.id, "status": m.status, "content": m.content}
@@ -376,6 +382,8 @@ def delete_node(node_id: int, session: Session = Depends(get_session)) -> dict:
         for memory in session.exec(select(Memory).where(Memory.source_node_id.in_(ids))).all():
             session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory.id))
             session.delete(memory)
+        # The full-text search_index rows of these messages, memories and notes are
+        # removed by the SQLite triggers in app/search_index.py as the rows go.
         # References outside the deleted subtree must not point to nonexistent nodes.
         for node in session.exec(
             select(Node).where(Node.source_node_id.in_(ids) | Node.revision_of.in_(ids))
@@ -647,6 +655,7 @@ def _persist(target_id: int, generation: Generation, label: str) -> None:
         message.reasoning = "".join(generation.reasoning) or None
         message.steps = list(generation.steps) or None
         message.diagnostics = generation.diagnostics or None
+        message.sources = list(generation.sources) or None
         message.status = generation.status
         node.status, node.error = generation.status, generation.error
         session.add(message)
@@ -877,6 +886,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     reasoning=previous.reasoning,
                     steps=previous.steps,
                     diagnostics=previous.diagnostics,
+                    sources=previous.sources,
                 )
                 session.add(copied)
                 copied_history.append(copied)
@@ -1005,10 +1015,18 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             if generation.stop.is_set():
                 return
             memory = ""
+            # Scope settings are snapshotted now; the history tool keeps this view
+            # even if the user changes the setting while the answer runs.
+            scope_snapshot = {"include_siblings": False, "include_other_trees": False}
             # Local inference must not hold _REQUEST_LOCK: stop/retry remain responsive.
             if not is_mock:
                 retrieval_started = time.monotonic()
                 with Session(engine) as memory_session:
+                    scopes = read_retrieval_settings(memory_session)
+                    scope_snapshot = {
+                        "include_siblings": scopes.include_siblings,
+                        "include_other_trees": scopes.include_other_trees,
+                    }
                     memory = fetch_memory_note(
                         memory_session,
                         tree_id,
@@ -1019,10 +1037,14 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                         existing_text=memory_quote + "\n" + (context_target.learning_note or ""),
                     )
                 timings["retrieval"] = time.monotonic() - retrieval_started
+            # Test doubles return plain strings; provenance is optional.
+            memory_sources = list(getattr(memory, "sources", None) or [])
             if generation.stop.is_set():
                 return
             with Session(engine) as tool_session:
                 tool_defs, tool_router = assemble_tools(tool_session, requested_tools)
+            # User-selected tools, before the implicit document reader joins them.
+            tools_requested = bool(tool_defs)
             document_reader = None
             if context_documents and not is_mock:
                 tool_defs = [*tool_defs, DOCUMENT_TOOL_DEF]
@@ -1036,14 +1058,24 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             if generation.stop.is_set():
                 return
             context_defs = tool_defs + ([SOURCE_TOOL_DEF] if tool_defs and not is_mock else [])
+            # The read-only history search joins tool rounds, and is offered on its
+            # own when the user widened memory recall; demo mode never gets it.
+            history_wanted = not is_mock and (
+                tools_requested
+                or scope_snapshot["include_siblings"]
+                or scope_snapshot["include_other_trees"]
+            )
+            if history_wanted:
+                context_defs = [*context_defs, HISTORY_TOOL_DEF]
             tool_catalog = None
             # A checked group grants availability, not an obligation to attach
             # every server's schema to every request. Reserve a stable allowance
             # so later discovery cannot crowd out the current question.
+            reader_names = (SOURCE_TOOL_NAME, DOCUMENT_TOOL_NAME, HISTORY_TOOL_NAME)
             pinned = [
                 definition
                 for definition in context_defs
-                if definition["function"]["name"] in (SOURCE_TOOL_NAME, DOCUMENT_TOOL_NAME)
+                if definition["function"]["name"] in reader_names
             ]
             core_cost = estimate_request_tokens(
                 preflight_stats["protected_system"],
@@ -1077,8 +1109,15 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 documents=context_documents,
                 tool_schema_budget=schema_budget if tool_catalog else 0,
             )
-            if context_stats["compacted"] and not context_defs and not is_mock:
-                context_defs = [SOURCE_TOOL_DEF]
+            # Compaction makes the read-only readers available even without tools.
+            present = {item["function"]["name"] for item in context_defs}
+            missing_readers = [
+                definition
+                for definition in (SOURCE_TOOL_DEF, HISTORY_TOOL_DEF)
+                if definition["function"]["name"] not in present
+            ]
+            if context_stats["compacted"] and missing_readers and not is_mock:
+                context_defs = [*context_defs, *missing_readers]
                 request_system, llm_messages = build_context(
                     ancestors,
                     context_target,
@@ -1091,8 +1130,18 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     protocol=spec.protocol,
                     diagnostics=context_stats,
                     documents=context_documents,
+                    tool_schema_budget=schema_budget if tool_catalog else 0,
                 )
             source_reader = None
+            history_search = None
+            if any(item["function"]["name"] == HISTORY_TOOL_NAME for item in context_defs):
+                history_search = make_history_search(
+                    engine,
+                    tree_id,
+                    memory_source_ids,
+                    scope_snapshot,
+                    max_chars=max(32, min(1200, (policy.tool_reserve - 1024) // 4)),
+                )
             # Tool results can force compaction on later rounds even when the
             # initial history fits. Make read-only history access available then.
             if any(item["function"]["name"] == SOURCE_TOOL_NAME for item in context_defs):
@@ -1141,6 +1190,18 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     generation.emit({"context_status": "ready"})
                 if generation.stop.is_set():
                     return
+            # Report only the memory records that survived context assembly, so the
+            # "referenced" line under the answer never claims an omitted record.
+            kept_sources = [
+                source
+                for source in memory_sources
+                if f"- [记忆 {source['memory_id']}；" in request_system
+                or f"- [记忆 {source['memory_id']}]" in request_system
+            ]
+            if kept_sources:
+                with generation.lock:
+                    generation.sources = kept_sources
+                generation.emit({"sources": kept_sources})
             if title_needed:
                 _queue_branch_title(target_id, spec)
                 title_queued = True
@@ -1157,6 +1218,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                             return source_reader(arguments)
                         if name == DOCUMENT_TOOL_NAME and document_reader is not None:
                             return document_reader(arguments)
+                        if name == HISTORY_TOOL_NAME and history_search is not None:
+                            return history_search(arguments)
                         return execute(name, arguments)
                     finally:
                         timings["tools"] += time.monotonic() - tool_started

@@ -3,6 +3,7 @@ import { getLocale, translate } from "./i18n";
 import { localizeError } from "./i18n/workspace";
 import type {
   AnswerDiagnostics,
+  AnswerSource,
   McpInput,
   McpServer,
   Memory,
@@ -19,6 +20,8 @@ import type {
   PhoneAccess,
   ModelInput,
   NodeDetail,
+  RetrievalSettings,
+  SearchHit,
   ThreadNode,
   Tree,
   TreeNode,
@@ -96,6 +99,8 @@ async function relay(res: Response, on: AskHandlers, start: AskMeta, signal?: Ab
       if (obj.tool_start) on.onToolStart?.(obj.tool_start.name, obj.tool_start.args);
       if (obj.tool_end) on.onToolEnd?.(obj.tool_end.name, obj.tool_end.result);
       if (obj.diagnostics && typeof obj.diagnostics === 'object' && !Array.isArray(obj.diagnostics)) on.onDiagnostics?.(obj.diagnostics as AnswerDiagnostics);
+      // Memory provenance is dispatched, never merged into the completion metadata.
+      if (Array.isArray(obj.sources)) on.onSources?.(obj.sources as AnswerSource[]);
       if (obj.error) { failure = obj.error; meta = { ...meta, ...obj }; }
       if (obj.done) { completed = true; meta = { ...meta, ...obj }; }
     });
@@ -131,6 +136,7 @@ export interface AskHandlers {
   onToolEnd?: (name: string, result: string) => void;
   /** Numeric request/usage/timing summary, sent once before the answer ends. */
   onDiagnostics?: (diagnostics: AnswerDiagnostics) => void;
+  onSources?: (sources: AnswerSource[]) => void;
 }
 
 export const api = {
@@ -212,6 +218,10 @@ export const api = {
     fetch(`${API}/memories/retrieval/status`, { signal }).then(j<MemoryRetrievalStatus>),
   prepareMemoryRetrieval: (signal?: AbortSignal) =>
     fetch(`${API}/memories/retrieval/prepare`, { method: "POST", signal }).then(j<MemoryRetrievalStatus>),
+  getRetrievalSettings: (signal?: AbortSignal) =>
+    fetch(`${API}/memories/retrieval/settings`, { signal }).then(j<RetrievalSettings>),
+  saveRetrievalSettings: (body: RetrievalSettings) =>
+    fetch(`${API}/memories/retrieval/settings`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(j<RetrievalSettings>),
   deleteMemory: (id: number) => fetch(`${API}/memories/${id}`, { method: "DELETE" }).then(j<unknown>),
   clearMemories: () => fetch(`${API}/memories`, { method: "DELETE" }).then(j<unknown>),
 
@@ -221,6 +231,8 @@ export const api = {
   createTree: (title: string, root_question?: string) =>
     jsonPost(`${API}/trees`, { title, root_question: root_question ?? null }).then(j<Tree>),
   getTree: (id: number, signal?: AbortSignal) => fetch(`${API}/trees/${id}`, { signal }).then(j<TreeNode[]>),
+  searchTree: (id: number, q: string, limit = 30, signal?: AbortSignal) =>
+    fetch(`${API}/trees/${id}/search?${new URLSearchParams({ q, limit: String(limit) })}`, { signal }).then(j<{ results: SearchHit[] }>).then(r => r.results),
   deleteTree: (id: number) => fetch(`${API}/trees/${id}`, { method: "DELETE" }).then(j<unknown>),
 
   getNode: (id: number) => fetch(`${API}/nodes/${id}`).then(j<NodeDetail>),

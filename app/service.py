@@ -7,7 +7,7 @@ from sqlmodel import Session, select
 from . import mcp_client
 from .calibration import load_calibration
 from .db import engine
-from .llm import LLMSpec, extract_memories
+from .llm import FACT_TYPES, LLMSpec, extract_memories
 from .memory_preferences import begin_memory_write
 from .models import KnowledgeTree, McpServer, Memory, Message, ModelConfig, Node, PreferenceProfile
 from .tools import TOOL_DEFS, execute_tool, mcp_tool_def
@@ -119,6 +119,20 @@ def make_executor(router: dict) -> Callable[[str, dict], str]:
     return execute
 
 
+class MemoryNote(str):
+    """The rendered memory note; `.sources` lists the records it rendered (ids, no text).
+
+    A plain str everywhere the note is concatenated or budgeted; callers that want
+    provenance read `getattr(note, "sources", [])`."""
+
+    sources: list[dict]
+
+    def __new__(cls, text: str = "", sources: list[dict] | None = None):
+        note = super().__new__(cls, text)
+        note.sources = list(sources or [])
+        return note
+
+
 def fetch_memory_note(
     session: Session,
     tree_id: int | None,
@@ -126,13 +140,62 @@ def fetch_memory_note(
     query: str = "",
     quoted_text: str = "",
     existing_text: str = "",
-) -> str:
-    """Choose relevant memories within the allowed source path, independently of preferences."""
-    from .retrieval import retrieve_memory
+) -> MemoryNote:
+    """Choose relevant memories within the allowed source path, independently of preferences.
 
-    return retrieve_memory(
-        session, tree_id, source_node_ids, query, quoted_text, existing_text
-    ).text
+    Sibling branches and other topics only join in after the user enabled them in
+    Settings; those hits stay labelled with their origin in the rendered note."""
+    from .retrieval import RetrievalConfig, read_retrieval_settings, retrieve_memory
+
+    scopes = read_retrieval_settings(session)
+    config = RetrievalConfig(
+        include_siblings=scopes.include_siblings,
+        include_other_trees=scopes.include_other_trees,
+    )
+    result = retrieve_memory(
+        session, tree_id, source_node_ids, query, quoted_text, existing_text, config=config
+    )
+    return MemoryNote(result.text, result.sources)
+
+
+def _path_node_ids(session: Session, node: Node) -> list[int]:
+    """Ancestor ids root-first plus the node itself, without loading messages."""
+    chain, pid, seen = [], node.parent_id, {node.id}
+    while pid is not None and pid not in seen:
+        seen.add(pid)
+        parent = session.get(Node, pid)
+        if parent is None or parent.tree_id != node.tree_id:
+            break
+        chain.append(parent.id)
+        pid = parent.parent_id
+    chain.reverse()
+    return chain + [node.id]
+
+
+def _fact_record(raw) -> dict | None:
+    """Accept legacy string facts and structured object facts; drop anything else."""
+    if isinstance(raw, str):
+        text = raw.strip()
+        return (
+            {"text": text, "type": "conclusion", "terms": None, "supersedes": None}
+            if text
+            else None
+        )
+    if not isinstance(raw, dict) or not isinstance(raw.get("text"), str) or not raw["text"].strip():
+        return None
+    terms = raw.get("terms")
+    supersedes = raw.get("supersedes")
+    kept_terms = (
+        [term.strip() for term in terms if isinstance(term, str) and term.strip()][:8]
+        if isinstance(terms, list)
+        else []
+    )
+    return {
+        "text": raw["text"].strip(),
+        "type": raw.get("type") if raw.get("type") in FACT_TYPES else "conclusion",
+        "terms": kept_terms or None,
+        "supersedes": supersedes if type(supersedes) is int else None,
+    }
 
 
 def extract_and_save(
@@ -196,11 +259,27 @@ def extract_and_save(
         context = extraction_context(snapshot, question)
         profile = snapshot["profile"]
         reset_revision = profile["reset_revision"] if profile else ""
+        # Recent current facts on this path let the extractor mark corrections
+        # instead of restating them; only these ids may later be superseded.
+        existing_facts = [
+            {"id": memory.id, "text": memory.content}
+            for memory in s.exec(
+                select(Memory)
+                .where(
+                    Memory.kind == "fact",
+                    Memory.tree_id == tree_id,
+                    Memory.source_node_id.in_(_path_node_ids(s, source)),
+                    Memory.superseded_by.is_(None),
+                )
+                .order_by(Memory.id.desc())
+                .limit(20)
+            ).all()
+        ]
         s.add(PreferenceExtraction(key=claim_key, node_id=node_id, tree_id=tree_id))
         s.commit()
     # No database lock is held during the model request.
     try:
-        result = extract_memories(spec, question, answer, context)
+        result = extract_memories(spec, question, answer, context, existing_facts)
     except Exception:  # noqa: BLE001
         return
     if not isinstance(result, dict):
@@ -302,9 +381,38 @@ def extract_and_save(
                 select(Memory).where(Memory.kind == "fact", Memory.source_node_id == node_id)
             ).all()
         }
+        path_ids = set(_path_node_ids(s, source))
+        replaceable = {row["id"] for row in existing_facts}
         for fact in facts[:3]:
-            if isinstance(fact, str) and fact.strip() and fact.strip() not in existing:
-                content = fact.strip()
-                s.add(Memory(kind="fact", content=content, tree_id=tree_id, source_node_id=node_id))
-                existing.add(content)
+            record = _fact_record(fact)
+            if record is None or record["text"] in existing:
+                continue
+            memory = Memory(
+                kind="fact",
+                content=record["text"],
+                tree_id=tree_id,
+                source_node_id=node_id,
+                fact_type=record["type"],
+                terms=record["terms"],
+            )
+            s.add(memory)
+            s.flush()
+            existing.add(record["text"])
+            old = (
+                s.get(Memory, record["supersedes"]) if record["supersedes"] in replaceable else None
+            )
+            # Only a current, never user-edited fact on this path can be superseded;
+            # the old row stays stored and visible in Settings.
+            if (
+                old is not None
+                and old.id != memory.id
+                and old.kind == "fact"
+                and old.tree_id == tree_id
+                and old.source_node_id in path_ids
+                and old.superseded_by is None
+                and old.updated_at is None
+            ):
+                old.superseded_by = memory.id
+                old.updated_at = datetime.now(timezone.utc)
+                s.add(old)
         s.commit()

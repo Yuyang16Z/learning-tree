@@ -111,6 +111,27 @@ async function poll(callback) {
     assert.equal(await memoryDialog.getByRole('link', { name: 'Installation and resource requirements', exact: true }).getAttribute('href'), 'https://github.com/Yuyang16Z/learning-tree/blob/main/docs/operations.md');
     assert.equal(prepareCalls, 0, 'A basic install must not request a model download');
     checks.push('Basic installation explains optional retrieval setup without an ineffective model download action');
+    // Wider memory scopes are opt-in toggles saved with a revision; the path stays always on.
+    const scopeSaves = [];
+    const scopeRoute = '**/api/memories/retrieval/settings';
+    await page.route(scopeRoute, async route => {
+      if (route.request().method() !== 'PUT') return route.continue();
+      const body = route.request().postDataJSON();
+      scopeSaves.push(body);
+      await route.fulfill({ json: { ...body, revision: 'saved-revision' } });
+    });
+    const pathScope = retrievalPanel.getByRole('checkbox', { name: 'Current learning path (always)', exact: true });
+    const siblingScope = retrievalPanel.getByRole('checkbox', { name: 'Other branches of this topic', exact: true });
+    const otherScope = retrievalPanel.getByRole('checkbox', { name: 'Other learning topics (except archived ones)', exact: true });
+    await poll(async () => await siblingScope.isEnabled());
+    assert(await pathScope.isChecked() && await pathScope.isDisabled(), 'The current path is always searched');
+    assert(!(await siblingScope.isChecked()) && !(await otherScope.isChecked()), 'Wider scopes start off');
+    await siblingScope.click();
+    await poll(async () => scopeSaves.length === 1);
+    assert.deepEqual(scopeSaves[0], { include_siblings: true, include_other_trees: false, revision: 'initial' });
+    await poll(async () => siblingScope.isChecked());
+    await page.unroute(scopeRoute);
+    checks.push('Memory settings offer opt-in sibling and other-topic recall, saving each change with its revision');
     retrievalFixture = { state: 'degraded', embedding_ready: false, reranker_ready: false };
     await memoryDialog.getByRole('button', { name: 'Refresh status', exact: true }).click();
     await poll(async () => (await retrievalPanel.getAttribute('data-memory-retrieval-state')) === 'degraded');
@@ -173,6 +194,22 @@ async function poll(callback) {
     await page.locator(`[data-answer-node="${tree.root_node_id}"]`).waitFor();
     await poll(async () => (await api(`/nodes/${tree.root_node_id}`)).status === 'complete');
     checks.push('Mock answer persists and Enter clears the submitted draft');
+    // The map search asks the server's full-text index for answer passages and jumps to them.
+    const map = page.getByRole('complementary', { name: 'LearningTree', exact: true });
+    await map.getByRole('button', { name: 'Search nodes', exact: true }).click();
+    const searchBox = map.getByRole('textbox', { name: 'Search questions or quotes', exact: true });
+    await searchBox.fill('兄弟分支没掺进来');
+    const historyGroup = map.getByRole('group', { name: 'Matches in history', exact: true });
+    await historyGroup.waitFor();
+    const historyHit = historyGroup.getByRole('button').first();
+    assert((await historyHit.innerText()).includes('Answer'), 'history hits say what kind of record matched');
+    assert((await historyHit.innerText()).includes('兄弟分支没掺进来'), 'history hits show a verbatim snippet');
+    const rootAnswer = await api(`/nodes/${tree.root_node_id}`);
+    const answerMessage = rootAnswer.messages.find(message => message.role === 'assistant');
+    await historyHit.click();
+    await poll(async () => ((await page.locator(`[data-message-id="${answerMessage.id}"]`).getAttribute('class')) ?? '').includes('chat-source-flash'));
+    assert.equal(await map.getByRole('textbox', { name: 'Search questions or quotes', exact: true }).count(), 0, 'Choosing a hit closes the search');
+    checks.push('Map search lists full-text matches from the server and jumps to the matching answer passage');
     await input.fill(ordinaryDraft);
     const originalAnswer = await page.locator(`[data-answer-node="${tree.root_node_id}"]`).innerText();
     await page.locator('.chat-question').first().hover();

@@ -982,3 +982,9 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--teal); outline-
 @media (pointer: coarse) {
   input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, textarea { font-size: 16px !important; }
 }
+
+/* Settings → Memory: retrieval scope toggles under the status row. */
+.memory-scopes { border: 0; padding: 0; margin: 8px 0 0; display: grid; gap: 6px; font-size: 12px; min-width: 0; }
+.memory-scopes legend { padding: 0; margin-bottom: 2px; color: var(--muted); font-size: 11px; }
+.memory-scopes label { display: flex; align-items: center; gap: 7px; }
+.memory-scopes input { margin: 0; flex: none; }

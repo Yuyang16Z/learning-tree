@@ -39,6 +39,23 @@ export interface AnswerDiagnostics {
   calibration_ratio: number;
   timings_ms: { retrieval: number; tools: number; summary: number; model: number; total: number };
 }
+/** A memory record an answer was given; ids and titles only, never memory text. */
+export interface AnswerSource {
+  memory_id: number;
+  source_node_id: number | null;
+  tree_id: number | null;
+  tree_title: string;
+  scope: 'path' | 'tree' | 'other';
+}
+/** One topic search result; message hits carry the message id so the map can jump to the passage. */
+export interface SearchHit {
+  node_id: number;
+  message_id: number | null;
+  kind: 'title' | 'message' | 'note' | 'memory';
+  snippet: string;
+  rank: number;
+}
+export interface RetrievalSettings { include_siblings: boolean; include_other_trees: boolean; revision: string }
 export interface DocumentSummary {
   id: string; name: string; media_type: string; size: number; characters: number; warnings: string[];
 }
@@ -49,6 +66,7 @@ export interface Message {
   id: number; role: 'user' | 'assistant'; content: string; answered_by: string | null;
   images?: string[] | null; reasoning?: string | null; steps?: ToolStep[] | null;
   diagnostics?: AnswerDiagnostics | null;
+  sources?: AnswerSource[] | null;
   documents?: DocumentSummary[];
 }
 export interface NodeDetail extends LearningFields {
@@ -59,6 +77,7 @@ export interface ThreadNode extends LearningFields {
   node_id: number; parent_id: number | null; title: string; seed_text: string | null;
   question: string | null; images: string[] | null; answer: string | null;
   reasoning: string | null; steps: ToolStep[] | null; answered_by: string | null;
+  sources?: AnswerSource[] | null;
   question_message_id?: number | null; answer_message_id?: number | null;
   documents?: DocumentSummary[];
   attempts?: { message_id: number; status: string; content: string }[];
@@ -102,10 +121,14 @@ export interface PreferenceSupplementsPage {
   page: number;
   page_size: number;
 }
+export type FactType = 'definition' | 'condition' | 'misconception' | 'open_question' | 'learner_state' | 'conclusion';
 export interface MemoryFact extends Memory {
   source_node_id: number | null;
   tree_title: string | null;
   created_at: string;
+  fact_type?: FactType | string;
+  /** Id of the later fact that corrected this one; such facts no longer reach answers. */
+  superseded_by?: number | null;
 }
 export interface MemoryFactsPage {
   items: MemoryFact[];

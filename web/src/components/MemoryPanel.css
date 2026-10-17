@@ -28,6 +28,7 @@
 .memory-fact-preview:focus-visible { outline: 1px solid var(--muted); outline-offset: 4px; border-radius: 2px; }
 .memory-fact-footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 6px; }
 .memory-topic { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 11px; color: var(--muted); }
+.memory-fact-meta { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .memory-text-btn { padding: 2px 0; border: 0; background: none; color: var(--muted); font-size: 12px; line-height: 1.6; white-space: nowrap; }
 .memory-text-btn:hover { color: var(--text); }
 .memory-delete:hover { color: var(--danger); }
