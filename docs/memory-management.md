@@ -155,6 +155,16 @@ derived fact is deleted. Later extraction from a new completed answer may produc
 a similar fact. This is management of built-in memory, separate from any
 configured MCP memory server.
 
+## Evaluating retrieval on your data
+
+To see how the retrieval scopes, thresholds and topic search behave on your own
+records without changing them, run
+`uv run python scripts/evaluate_retrieval.py --database branch_learning.db`. It
+works on a temporary copy, replays each completed question against the facts
+that existed when it was asked, and writes counts, proxy recall scores and
+timings to `artifacts/`; see [offline retrieval evaluation](retrieval-evaluation.md).
+The proxy scores are structural assumptions, not human relevance judgments.
+
 ## Storage and compatibility
 
 The additive `PreferenceProfile` table stores the user-managed singleton and its
@@ -207,3 +217,6 @@ idempotent; database backups include them, learning-tree exports exclude
   3 个字符的查询或不支持 FTS5 的 SQLite 使用 LIKE 扫描。
 - 模型可用的只读工具 `search_learning_history` 受同一组开关约束：默认只查当前路径，
   `tree`/`all` 范围需在回答开始时已经启用；它不写入数据库，演示模式不会提供。
+- **离线评估**：运行 `uv run python scripts/evaluate_retrieval.py --database branch_learning.db`，
+  在临时副本上查看检索范围、阈值和主题搜索在自己数据上的表现，原数据库不会改变；报告写入
+  `artifacts/`，详见[离线检索评估](retrieval-evaluation.md)。其中的代理指标不是人工相关性判断。
