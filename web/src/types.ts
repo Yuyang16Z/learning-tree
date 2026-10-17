@@ -1,6 +1,8 @@
 export interface Tree { id: number; title: string; root_node_id: number; archived: boolean }
 export type NodeStatus = 'idle' | 'pending' | 'complete' | 'error' | 'interrupted';
 export type TitleState = 'legacy' | 'manual' | 'empty' | 'pending' | 'ai' | 'fallback';
+/** The learner's own mark on a node: not yet / roughly / can explain. Absent or null = not marked. */
+export type Understanding = 'open' | 'partial' | 'clear';
 export interface SourceAnchor {
   source_message_id?: number;
   source_start?: number;
@@ -20,6 +22,7 @@ export interface LearningFields {
   source_start?: number | null;
   source_end?: number | null;
   learning_note?: string | null;
+  understanding?: Understanding | null;
   revision_of?: number | null;
   request_id?: string | null;
 }

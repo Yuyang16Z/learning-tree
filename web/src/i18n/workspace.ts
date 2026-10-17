@@ -40,6 +40,7 @@ const diagnostics: [string, string][] = [
   ["回答未完成，可在聊天记录中重试。", "The response is incomplete. You can retry it in the conversation."],
   ["发送失败，草稿已保留。", "Could not send. Your draft has been kept."],
   ["保存失败，理解草稿已保留。", "Could not save. Your reflection draft has been kept."],
+  ["理解标记没有保存，已恢复原来的标记。", "Your understanding mark was not saved; the previous mark is back."],
   ["浏览器存储空间不足，当前草稿尚未保存。可移除附图后重试。", "Browser storage is full. This draft has not been saved. Remove attachments and try again."],
   ["连接测试失败。", "Connection test failed."],
   ["请填写显示名、模型 ID、API 地址和密钥。", "Enter a display name, model ID, API URL, and key."],

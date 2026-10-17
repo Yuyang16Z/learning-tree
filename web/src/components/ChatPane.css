@@ -30,6 +30,13 @@
 .chat-answer-actions button { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); border: 0; background: none; border-radius: 6px; padding: 6px; font-size: 11px; }
 .chat-answer-actions button:hover { color: var(--teal); background: var(--teal-bg); }
 .chat-answer-actions svg { width: 14px; height: 14px; }
+.chat-understanding { display: inline-flex; align-items: center; gap: 1px; margin-left: auto; padding: 2px; border: 1px solid var(--border); border-radius: 8px; }
+.chat-understanding-label { padding: 0 6px 0 5px; color: var(--muted); font-size: 10px; white-space: nowrap; }
+.chat-answer-actions .chat-understanding button { padding: 4px 8px; border-radius: 6px; white-space: nowrap; }
+.chat-answer-actions .chat-understanding button:hover:not(:disabled) { color: var(--text); background: var(--panel-2); }
+.chat-answer-actions .chat-understanding button.is-checked.u-open { color: var(--u-open); background: var(--u-open-bg); }
+.chat-answer-actions .chat-understanding button.is-checked.u-partial { color: var(--u-partial); background: var(--u-partial-bg); }
+.chat-answer-actions .chat-understanding button.is-checked.u-clear { color: var(--u-clear); background: var(--u-clear-bg); }
 .chat-copy-control { position: relative; display: inline-flex; align-items: center; gap: 7px; }
 .chat-copy-control .chat-copy-button { width: 28px; height: 28px; border-radius: 6px; display: inline-flex; justify-content: center; align-items: center; padding: 5px; }
 .chat-copy-control .chat-copy-button.chat-copy-labeled { width: auto; height: 30px; gap: 5px; padding: 6px 9px; border: 0; background: transparent; color: var(--muted); white-space: nowrap; }

@@ -926,6 +926,9 @@ input[type="checkbox"] {
 /* Learning workspace: quiet navigation, generous reading space. */
 :root { --accent: #23674f; --accent-bg: #eaf3ed; --purple: #23674f; --purple-bg: #eaf3ed; }
 [data-theme="dark"] { --accent: #90c7ac; --accent-bg: #19392d; --purple: #90c7ac; --purple-bg: #19392d; }
+/* Understanding marks: open (not yet), partial (roughly), clear (can explain). */
+:root { --u-open: #a8461a; --u-open-bg: #fbece2; --u-partial: #7a5c08; --u-partial-bg: #f7efd6; --u-clear: #0f6e56; --u-clear-bg: #e1f5ee; }
+[data-theme="dark"] { --u-open: #f2a172; --u-open-bg: #3d2618; --u-partial: #e3c565; --u-partial-bg: #362e13; --u-clear: #5dcaa5; --u-clear-bg: #103d31; }
 body { -webkit-font-smoothing: antialiased; }
 button:disabled { cursor: default; }
 button:focus-visible, a:focus-visible { outline: 2px solid var(--teal); outline-offset: 3px; }

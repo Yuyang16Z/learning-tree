@@ -12,7 +12,8 @@ import { hasManagedWebSearch, managedMcpPreset, selectedChatTools } from "../lib
 import { matchesDeletedWorkspace, onWorkspaceDeletion, type WorkspaceDeletion } from "../lib/workspace";
 import { DocumentCards } from "./DocumentCards";
 import { ChatTurnNavigator, turnKey } from "./ChatTurnNavigator";
-import type { AnswerDiagnostics, AnswerSource, DocumentSummary, McpServer, ModelCfg, ThreadNode, ToolStep } from "../types";
+import { toggleUnderstanding, UNDERSTANDING_LEVELS, UNDERSTANDING_TEXT } from "../lib/understanding";
+import type { AnswerDiagnostics, AnswerSource, DocumentSummary, McpServer, ModelCfg, ThreadNode, ToolStep, Understanding } from "../types";
 import "./ChatPane.css";
 
 type Anchor = { source_message_id?: number; source_start?: number; source_end?: number; learning_note?: string };
@@ -51,6 +52,8 @@ interface Props {
   onStop: () => void;
   /** Stop an answer that another window or device is generating. */
   onStopNode?: (nodeId: number) => void;
+  /** Save the learner's mark for a node; rejects (after restoring the old mark) when it fails. */
+  onUnderstandingChange?: (nodeId: number, value: Understanding | null) => Promise<void>;
   onBranch: (seed: string, fromNodeId: number, anchor?: Anchor, onCreated?: (nodeId: number) => void) => Promise<void>;
   onDeleteNode: (id: number) => void;
   onNavigate: (id: number, anchor?: Destination) => Promise<void>;
@@ -148,6 +151,24 @@ function SourcesLine({ sources, activeTreeId, onNavigate, onOpenSource }: { sour
     }}>{label}</button>;
   })}</div>;
 }
+/** The learner's own mark for a node. Arrow keys move focus only; a click or Space saves. */
+function UnderstandingControl({ value, disabled, saving, onChange }: { value: Understanding | null; disabled: boolean; saving: boolean; onChange: (value: Understanding | null) => void }) {
+  const { t } = useI18n();
+  const options = useRef<(HTMLButtonElement | null)[]>([]);
+  const focusable = value ? UNDERSTANDING_LEVELS.indexOf(value) : 0;
+  const move = (event: React.KeyboardEvent, index: number) => {
+    const last = UNDERSTANDING_LEVELS.length - 1;
+    const targets: Record<string, number> = { ArrowRight: index + 1, ArrowDown: index + 1, ArrowLeft: index - 1, ArrowUp: index - 1, Home: 0, End: last };
+    const target = targets[event.key];
+    if (target === undefined) return;
+    event.preventDefault();
+    options.current[(target + last + 1) % (last + 1)]?.focus();
+  };
+  return <div className="chat-understanding" role="radiogroup" aria-label={t("理解", "Understanding")} aria-busy={saving || undefined}>
+    <span className="chat-understanding-label" aria-hidden="true">{t("理解", "Understanding")}</span>
+    {UNDERSTANDING_LEVELS.map((level, index) => <button key={level} ref={element => { options.current[index] = element; }} type="button" role="radio" aria-checked={value === level} tabIndex={index === focusable ? 0 : -1} disabled={disabled} className={`u-${level}${value === level ? " is-checked" : ""}`} title={value === level ? t("再次点击可取消标记", "Click again to clear the mark") : undefined} onKeyDown={event => move(event, index)} onClick={() => onChange(toggleUnderstanding(value, level))}>{t(...UNDERSTANDING_TEXT[level])}</button>)}
+  </div>;
+}
 function ImageStrip({ images }: { images: string[] }) {
   const { t } = useI18n();
   return <div className="chat-images">{images.map((src, i) => <a href={src} target="_blank" rel="noreferrer" key={i}><img src={src} alt={t("附图 {number}", "Attachment {number}", { number: i + 1 })} /></a>)}</div>;
@@ -219,7 +240,7 @@ export function ChatPane(props: Props) {
   const { locale, t } = useI18n();
   const translationRef = useRef(t);
   translationRef.current = t;
-  const { thread, treeTitle, hasNode, loading = false, activeNodeId, activeTreeId, focusedSeed, live, liveReasoning, liveSteps, liveDiagnostics = null, liveSources = [], onOpenSource, contextStatus, reconnecting = false, pendingQuestion, sendingImages, sendingDocuments, streaming, showStream, err, models, activeModelId, onModelChange, onOpenSettings, onAsk, onStop, onStopNode, onBranch, onNavigate, navigationAnchor, rightOpen, onToggleRight, onAddMock, mcpServers, onExport, onNew } = props;
+  const { thread, treeTitle, hasNode, loading = false, activeNodeId, activeTreeId, focusedSeed, live, liveReasoning, liveSteps, liveDiagnostics = null, liveSources = [], onOpenSource, contextStatus, reconnecting = false, pendingQuestion, sendingImages, sendingDocuments, streaming, showStream, err, models, activeModelId, onModelChange, onOpenSettings, onAsk, onStop, onStopNode, onUnderstandingChange, onBranch, onNavigate, navigationAnchor, rightOpen, onToggleRight, onAddMock, mcpServers, onExport, onNew } = props;
   const openSource = (id: number) => void onNavigate(id);
   const nearestBranch = [...thread].reverse().find(node => node.seed_text && (node.source_node_id ?? node.parent_id) != null);
   const noteKey = `bl-note-draft-v2:${activeTreeId}:${nearestBranch?.node_id ?? "none"}`;
@@ -254,6 +275,8 @@ export function ChatPane(props: Props) {
   const [noteSaving, setNoteSaving] = useState(false);
   const [noteError, setNoteError] = useState<string | null>(null);
   const [savedNotes, setSavedNotes] = useState<Record<string, string>>({});
+  const [savingMarks, setSavingMarks] = useState<number[]>([]);
+  const savingMarksRef = useRef(new Set<number>());
   const [, setUploadVersion] = useState(0);
   const activeNoteKeyRef = useRef(noteKey);
   activeNoteKeyRef.current = noteKey;
@@ -635,6 +658,18 @@ export function ChatPane(props: Props) {
       if (activeNoteKeyRef.current === key) setNoteError(error instanceof Error ? error.message : t("保存失败，理解草稿已保留。", "Could not save. Your reflection draft has been kept."));
     } finally { setNoteSaving(false); }
   }
+  async function markUnderstanding(nodeId: number, value: Understanding | null) {
+    if (!onUnderstandingChange || savingMarksRef.current.has(nodeId)) return;
+    const key = draftKey;
+    savingMarksRef.current.add(nodeId);
+    setSavingMarks([...savingMarksRef.current]);
+    try { await onUnderstandingChange(nodeId, value); }
+    catch { if (activeKeyRef.current === key) setLocalError(t("理解标记没有保存，已恢复原来的标记。", "Your understanding mark was not saved; the previous mark is back.")); }
+    finally {
+      savingMarksRef.current.delete(nodeId);
+      setSavingMarks([...savingMarksRef.current]);
+    }
+  }
   async function returnToSource(withNote = false) {
     if (!nearestBranch || branchSource == null) return;
     if (withNote && learningNote) {
@@ -654,6 +689,8 @@ export function ChatPane(props: Props) {
   const attachmentsBusy = draftUploads.length > 0 || pendingImages > 0;
   const visibleThread = thread.filter(node => node.question !== null && !(showStream && (node.node_id === retryingNodeId || (node.status === "pending" && node.node_id === activeNodeId))));
   const focusBusy = !streaming && thread[thread.length - 1]?.node_id === activeNodeId && thread[thread.length - 1]?.status === "pending";
+  // Legacy nodes hold several turns; only a node's last answer carries its understanding mark.
+  const lastRows = new Map(thread.map(row => [row.node_id, row]));
 
   return <main className="center chat-pane">
     <header className="chat-header">
@@ -676,7 +713,7 @@ export function ChatPane(props: Props) {
             {!loading && !visibleThread.length && !showStream && <div className="chat-welcome"><span className="chat-eyebrow">{focusedSeed ? t("从这里展开", "Explore from here") : t("新的起点", "A fresh start")}</span><h2>{focusedSeed ? `「${focusedSeed}」` : treeTitle}</h2><p>{t("想先弄懂什么？", "What would you like to understand first?")}</p></div>}
             {visibleThread.map((node, index) => <section className="chat-turn" data-turn-node={node.node_id} data-turn-key={turnKey(node, index)} key={turnKey(node, index)}>
               <div className="chat-question"><ImageStrip images={node.images ?? []} /><DocumentCards documents={node.documents ?? []} /><div>{node.question}</div><div className="chat-question-actions"><CopyButton text={node.question ?? ""} label={t("复制问题", "Copy question")} /><button onClick={() => editNode(node)} disabled={streaming || attachmentsBusy || node.status === "pending"} title={t("编辑后生成新版本，保留原有问答与分支", "Create a new version while keeping the original conversation and branches")}>{t("编辑", "Edit")}</button></div></div>
-              {node.answer != null && <div className="chat-answer"><div className="chat-answer-label"><span className="chat-answer-dot" />{node.answered_by ?? "AI"}{node.status === "error" || node.status === "interrupted" ? <span>{t("· 未完成", "· Incomplete")}</span> : null}</div><ReasoningBlock text={node.reasoning ?? ""} /><ToolSteps steps={node.steps ?? []} mcpServers={mcpServers} /><div className="chat-markdown" data-answer-node={node.node_id} data-message-id={node.answer_message_id ?? undefined} tabIndex={0}><Markdown text={node.answer} /></div><SourcesLine sources={node.sources ?? []} activeTreeId={activeTreeId} onNavigate={openSource} onOpenSource={onOpenSource} />{node.answer.trim() && <div className="chat-answer-actions"><CopyButton text={node.answer} label={t("复制回答", "Copy answer")} /><button onClick={() => void branchAnswer(node)} disabled={branching || streaming || loading} title={t("从这条回答展开一个新的问题", "Explore a new question from this answer")}><Icon name="tree" />{t("新分支", "New branch")}</button></div>}<DiagnosticsBlock data={node.diagnostics} /></div>}
+              {node.answer != null && <div className="chat-answer"><div className="chat-answer-label"><span className="chat-answer-dot" />{node.answered_by ?? "AI"}{node.status === "error" || node.status === "interrupted" ? <span>{t("· 未完成", "· Incomplete")}</span> : null}</div><ReasoningBlock text={node.reasoning ?? ""} /><ToolSteps steps={node.steps ?? []} mcpServers={mcpServers} /><div className="chat-markdown" data-answer-node={node.node_id} data-message-id={node.answer_message_id ?? undefined} tabIndex={0}><Markdown text={node.answer} /></div><SourcesLine sources={node.sources ?? []} activeTreeId={activeTreeId} onNavigate={openSource} onOpenSource={onOpenSource} />{node.answer.trim() && <div className="chat-answer-actions"><CopyButton text={node.answer} label={t("复制回答", "Copy answer")} /><button onClick={() => void branchAnswer(node)} disabled={branching || streaming || loading} title={t("从这条回答展开一个新的问题", "Explore a new question from this answer")}><Icon name="tree" />{t("新分支", "New branch")}</button>{onUnderstandingChange && lastRows.get(node.node_id) === node && <UnderstandingControl value={node.understanding ?? null} disabled={node.status === "pending" || savingMarks.includes(node.node_id)} saving={savingMarks.includes(node.node_id)} onChange={value => void markUnderstanding(node.node_id, value)} />}</div>}<DiagnosticsBlock data={node.diagnostics} /></div>}
               {node.status === "pending" && <div className="chat-retry chat-remote-answer" role="status"><span className="chat-answer-dot is-loading" /><span>{t("正在回答，完成前会自动更新", "Responding. This updates automatically until it finishes.")}</span>{onStopNode && <button onClick={() => onStopNode(node.node_id)}>{t("停止", "Stop")}</button>}</div>}
               {!!node.attempts?.length && <details className="chat-reasoning chat-prior-attempts"><summary>{t("之前的未完成回答（{count}）", "Previous incomplete responses ({count})", { count: node.attempts.length })}</summary>{node.attempts.map(attempt => <div className="chat-markdown" data-answer-node={node.node_id} data-message-id={attempt.message_id} key={attempt.message_id}><Markdown text={attempt.content || t("未收到内容", "No content received")} /></div>)}</details>}
               {(node.status === "error" || node.status === "interrupted") && <div className="chat-retry"><span>{node.status === "interrupted" ? t("回答已停止", "Response stopped") : t("这次回答未完成", "This response is incomplete")}</span><button onClick={() => void send(node)} disabled={streaming || noModel}>{t("重试", "Retry")}</button>{node.error && <details><summary>{t("详情", "Details")}</summary><p>{localizeError(node.error, locale)}</p></details>}</div>}

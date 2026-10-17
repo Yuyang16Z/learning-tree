@@ -5,6 +5,7 @@ import { api } from "../api";
 import { createMapSearcher, localMatches, mergeSearchResults, searchAnchor } from "../lib/mapSearch";
 import { groupAncestorIds, groupTopics, layoutTopics, TOPIC_CARD } from "../lib/topicLayout";
 import { navigateMapView } from "../lib/mapCamera";
+import { cardUnderstanding, UNDERSTANDING_TEXT } from "../lib/understanding";
 import type { Camera, MapViewAction, ReturnView } from "../lib/mapCamera";
 import "./LearningMap.css";
 import { useI18n } from "../i18n";
@@ -285,8 +286,10 @@ export function LearningMap({ nodes, activeId, onSelect, onDelete, onCollapse, w
             const last = group.nodes[group.nodes.length - 1];
             const failing = group.nodes.some((node) => ["error", "failed", "interrupted"].includes((node as TreeNode & { status?: string }).status ?? ""));
             const continuing = group.nodes.some((node) => ["pending", "streaming"].includes((node as TreeNode & { status?: string }).status ?? ""));
-            return <section key={group.id} className={`lm-card${current ? " current" : ancestors.has(group.id) ? " ancestor" : ""}`} style={nodeStyle(x, y, height)} aria-label={group.title}>
-              <button type="button" className="lm-topic" onClick={() => onSelect(current && activeId != null ? activeId : last.id)} aria-current={current ? "location" : undefined} title={group.title}>
+            const mark = cardUnderstanding(group.nodes);
+            const markText = mark.value ? t("{title} · 理解：{state}", "{title} · Understanding: {state}", { title: group.title, state: t(...UNDERSTANDING_TEXT[mark.value]) }) : group.title;
+            return <section key={group.id} className={`lm-card${current ? " current" : ancestors.has(group.id) ? " ancestor" : ""}${mark.className ? ` ${mark.className}` : ""}`} style={nodeStyle(x, y, height)} aria-label={group.title}>
+              <button type="button" className="lm-topic" onClick={() => onSelect(current && activeId != null ? activeId : last.id)} aria-current={current ? "location" : undefined} title={markText}>
                 <span className="lm-node-mark" aria-hidden="true" />
                 <span className="lm-title">{group.title}</span>
               </button>
