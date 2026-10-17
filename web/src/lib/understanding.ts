@@ -43,10 +43,18 @@ export function restoreUnderstanding<T extends Marked>(items: readonly T[], isTa
 /** The map lists at most this many unresolved questions, like its search results. */
 export const UNRESOLVED_CAP = 30;
 
-/** Questions the learner marked "Not yet" in this topic, newest first; `total` counts them all. */
+/**
+ * Listings report "idle" only for a node without messages. Marks belong to answers, so
+ * one on such a node (set through the API or an imported backup) does not count.
+ */
+function answered(node: TreeNode): boolean {
+  return node.status !== "idle";
+}
+
+/** Answered questions the learner marked "Not yet" in this topic, newest first; `total` counts them all. */
 export function unresolvedNodes(nodes: readonly TreeNode[], cap = UNRESOLVED_CAP): { items: TreeNode[]; total: number } {
   const marked = [...new Map(nodes.map(node => [node.id, node])).values()]
-    .filter(node => node.understanding === "open")
+    .filter(node => node.understanding === "open" && answered(node))
     .sort((a, b) => b.id - a.id);
   return { items: marked.slice(0, Math.max(0, cap)), total: marked.length };
 }
@@ -55,11 +63,12 @@ const RUNNING = new Set(["pending", "streaming"]);
 const FAILED = new Set(["error", "failed", "interrupted"]);
 
 /**
- * A topic card is coloured by the mark on its last node. Pending and failed answers
- * keep their own glyphs, so the colour is left out while one is shown.
+ * A topic card is coloured by the mark on its last node, when that node has an answer.
+ * Pending and failed answers keep their own glyphs, so the colour is left out while one is shown.
  */
 export function cardUnderstanding(nodes: readonly TreeNode[]): { value: Understanding | null; className: string } {
-  const mark = nodes[nodes.length - 1]?.understanding;
+  const last = nodes[nodes.length - 1];
+  const mark = last && answered(last) ? last.understanding : null;
   const value = isUnderstanding(mark) ? mark : null;
   const busy = nodes.some(node => RUNNING.has(node.status ?? "") || FAILED.has(node.status ?? ""));
   return { value, className: value && !busy ? `u-${value}` : "" };

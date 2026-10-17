@@ -229,6 +229,34 @@ def test_mark_comes_from_the_node_being_left_first(setup):
     assert client.get("/nodes/3/return-summary").json()["understanding"] is None
 
 
+def test_marks_on_nodes_without_answers_do_not_count(setup):
+    """Marks belong to answers, as in the map: one the API or an import put on a node
+    without messages is skipped, so an empty branch still leaves nothing to recap."""
+    client, engine = setup
+    seed(engine)
+    with Session(engine) as session:
+        session.add(
+            Node(
+                id=5,
+                tree_id=1,
+                parent_id=3,
+                title="",
+                kind="branch",
+                seed_text="尾递归",
+                source_node_id=3,
+                source_message_id=7,
+            )
+        )
+        session.add(Node(id=6, tree_id=1, parent_id=2, title="空追问"))
+        session.commit()
+    assert client.patch("/nodes/5", json={"understanding": "open"}).status_code == 200
+    assert client.patch("/nodes/6", json={"understanding": "clear"}).status_code == 200
+    body = client.get("/nodes/5/return-summary").json()
+    assert [body["excerpts"], body["note"], body["understanding"]] == [[], None, None]
+    # Walking back from the unanswered follow-up, the branch's own mark is the latest one.
+    assert client.get("/nodes/6/return-summary").json()["understanding"] == "open"
+
+
 def test_nearest_branch_wins_and_empty_branches_have_no_excerpts(setup):
     client, engine = setup
     seed(engine)

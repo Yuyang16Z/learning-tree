@@ -136,12 +136,15 @@ def build_return_summary(session: Session, node: Node) -> dict | None:
     messages: dict[int, list[Message]] = {}
     for message in rows:
         messages.setdefault(message.node_id, []).append(message)
-    # The latest judgement along the way back: the node being left first.
+    # The latest judgement along the way back: the node being left first. Marks belong
+    # to answers; listings call a node without messages "idle" and the map ignores a
+    # mark the API or an import put there, so the recap skips it too.
     understanding = next(
         (
             item.understanding
             for item in reversed(path)
             if item.understanding in UNDERSTANDING_LEVELS
+            and (item.status != "idle" or item.id in messages)
         ),
         None,
     )

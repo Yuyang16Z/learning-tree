@@ -59,6 +59,12 @@ describe("understanding marks", () => {
     expect(cardUnderstanding([node(1, { understanding: "someday" as never })])).toEqual({ value: null, className: "" });
     expect(cardUnderstanding([])).toEqual({ value: null, className: "" });
   });
+
+  it("ignores a mark on an unanswered last node, like the Not understood list", () => {
+    expect(cardUnderstanding([node(1, { understanding: "open", status: "idle" })])).toEqual({ value: null, className: "" });
+    expect(cardUnderstanding([node(1, { understanding: "clear", status: "complete" }), node(2, { understanding: "open", status: "idle" })])).toEqual({ value: null, className: "" });
+    expect(cardUnderstanding([node(1, { status: "idle" }), node(2, { understanding: "partial", status: "complete" })])).toEqual({ value: "partial", className: "u-partial" });
+  });
 });
 
 describe("unresolved questions", () => {
@@ -67,6 +73,14 @@ describe("unresolved questions", () => {
     const { items, total } = unresolvedNodes(nodes);
     expect(items.map(item => item.id)).toEqual([4, 1]);
     expect(total).toBe(2);
+  });
+
+  it("lists only questions with an answer, so a mark on an unanswered node is ignored", () => {
+    // The controls sit on answers, but the API or an imported backup can mark a node
+    // without messages, which listings report as "idle".
+    const nodes = [node(1, { understanding: "open", status: "idle" }), node(2, { understanding: "open", status: "complete" }), node(3, { understanding: "open", status: "error" }), node(4, { understanding: "open", status: "interrupted" }), node(5, { understanding: "open", status: "pending" })];
+    expect(unresolvedNodes(nodes)).toEqual({ items: [nodes[4], nodes[3], nodes[2], nodes[1]], total: 4 });
+    expect(unresolvedNodes([node(1, { understanding: "open", status: "idle" })])).toEqual({ items: [], total: 0 });
   });
 
   it("follows the map's current nodes, including duplicates and an empty topic", () => {
