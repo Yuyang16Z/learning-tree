@@ -1,5 +1,7 @@
+import re
 from datetime import datetime
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -137,18 +139,83 @@ class TestOut(BaseModel):
     detail: str
 
 
+# Header names the transport sets itself; a configured value would break the protocol.
+RESERVED_MCP_HEADERS = frozenset(
+    {
+        "accept",
+        "connection",
+        "content-length",
+        "content-type",
+        "host",
+        "keep-alive",
+        "last-event-id",
+        "mcp-protocol-version",
+        "mcp-session-id",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
+_HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,100}")
+
+
 class McpServerIn(BaseModel):
+    """stdio needs a command; http needs an http(s) URL without credentials.
+
+    Header values may be blank on update: a blank value keeps the stored value of
+    that header. Omitting `headers` keeps every stored header; `{}` clears them."""
+
     label: str
-    command: str
+    transport: Literal["stdio", "http"] = "stdio"
+    command: str = ""
     args: list[str] = []
+    url: str | None = Field(default=None, max_length=2000)
+    headers: dict[str, str] | None = None
+    allow_private: bool = False
     enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_transport(self):
+        if self.transport == "stdio":
+            if not self.command.strip():
+                raise ValueError("A local MCP server needs a launch command")
+            return self
+        parts = urlsplit((self.url or "").strip())
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError("A remote MCP server needs an http(s) URL")
+        if parts.port == 0:  # Reading the port also raises ValueError when out of range.
+            raise ValueError("Invalid port")
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("Put credentials in headers, not in the URL")
+        headers = self.headers or {}
+        if len(headers) > 20:
+            raise ValueError("At most 20 headers")
+        seen: set[str] = set()
+        for name, value in headers.items():
+            lowered = name.lower()
+            if not _HEADER_NAME.fullmatch(name) or lowered in RESERVED_MCP_HEADERS:
+                raise ValueError("Invalid or reserved header name")
+            if lowered in seen:
+                raise ValueError("Duplicate header name")
+            seen.add(lowered)
+            if len(value) > 8000 or any(char in value for char in "\r\n\0"):
+                raise ValueError("Invalid header value")
+        return self
 
 
 class McpServerOut(BaseModel):
+    """Header values never leave the backend; only their names are listed."""
+
     id: int
     label: str
+    transport: Literal["stdio", "http"] = "stdio"
     command: str
     args: list[str]
+    url: str | None = None
+    header_names: list[str] = []
+    allow_private: bool = False
     enabled: bool
 
 

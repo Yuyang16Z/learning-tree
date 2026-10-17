@@ -94,8 +94,17 @@ export interface ModelDiscovery {
   context_window: number | null; max_output_tokens: number | null;
   source: 'provider' | 'catalog' | 'unknown'; note: string;
 }
-export interface McpServer { id: number; label: string; command: string; args: string[]; enabled: boolean }
-export interface McpInput { label: string; command: string; args: string[]; enabled: boolean }
+export type McpTransport = 'stdio' | 'http';
+/** A configured MCP server. Remote (http) servers list their header names only, never values. */
+export interface McpServer {
+  id: number; label: string; command: string; args?: string[]; enabled: boolean;
+  transport?: McpTransport; url?: string | null; header_names?: string[]; allow_private?: boolean;
+}
+/** A blank header value keeps the stored value of that header; omitted headers keep every stored one. */
+export interface McpInput {
+  label: string; command: string; args: string[]; enabled: boolean;
+  transport?: McpTransport; url?: string; headers?: Record<string, string>; allow_private?: boolean;
+}
 export interface Memory { id: number; kind: string; content: string; tree_id: number | null }
 export interface PreferenceProfile { content: string; revision: string; managed: boolean }
 export interface PreferenceLearning { enabled: boolean; revision: string }

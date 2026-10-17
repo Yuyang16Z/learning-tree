@@ -1,9 +1,10 @@
 import type { McpServer } from "../types";
 
-/** Identify managed presets by their launcher, never by an editable display name. */
+/** Identify managed presets by their local launcher, never by an editable display name. */
 export function managedMcpPreset(server: McpServer): string | undefined {
-  const launcher = server.args[0]?.replace(/\\/g, "/");
-  return launcher?.endsWith("/integrations/mcp/launch.py") ? server.args[1] : undefined;
+  if (server.transport === "http") return undefined;
+  const launcher = server.args?.[0]?.replace(/\\/g, "/");
+  return launcher?.endsWith("/integrations/mcp/launch.py") ? server.args?.[1] : undefined;
 }
 
 export function hasManagedWebSearch(servers: readonly McpServer[]): boolean {

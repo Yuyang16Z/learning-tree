@@ -45,6 +45,9 @@ async function poll(callback, label) {
     args: ['/synthetic/learning-tree/integrations/mcp/launch.py', 'web-research'], enabled: false,
   };
   const unrelated = { id: 99102, label: 'Fixture notes', command: '/synthetic/never-launched', args: [], enabled: true };
+  const remoteId = 99103;
+  let remote = null;
+  const remoteBodies = [];
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 960 } });
   const page = await context.newPage();
@@ -60,8 +63,16 @@ async function poll(callback, label) {
     return route.abort();
   });
   await page.route('**/api/mcp', route => {
+    if (route.request().method() === 'POST') {
+      // The route stands in for the backend, which keeps header values and lists names only.
+      const body = route.request().postDataJSON();
+      remoteBodies.push(body);
+      const { headers, ...stored } = body;
+      remote = { ...stored, id: remoteId, header_names: Object.keys(headers ?? {}) };
+      return route.fulfill({ json: remote });
+    }
     assert.equal(route.request().method(), 'GET');
-    return route.fulfill({ json: [combined, unrelated] });
+    return route.fulfill({ json: [combined, unrelated, ...(remote ? [remote] : [])] });
   });
   await page.route(`**/api/mcp/${combinedId}`, route => {
     assert.equal(route.request().method(), 'PUT');
@@ -170,6 +181,43 @@ async function poll(callback, label) {
     assert.equal(await menu.getByRole('checkbox', { name: 'Read webpage', exact: true }).isChecked(), false);
     await ask('Offline check after disabling a selected web preset.', []);
     checks.push('Disabling a selected combined MCP restores unchecked built-in controls without silently re-enabling web access');
+
+    await closeTools();
+    await page.getByRole('button', { name: '⚙ Settings', exact: true }).click();
+    const settingsDialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+    await settingsDialog.getByRole('button', { name: 'MCP tools', exact: true }).click();
+    await settingsDialog.getByRole('button', { name: '＋ Add MCP', exact: true }).click();
+    const add = page.getByRole('dialog', { name: 'Add MCP', exact: true });
+    await add.getByRole('textbox', { name: 'Display name', exact: true }).fill('Fixture remote docs');
+    await add.getByRole('radio', { name: 'Remote HTTP', exact: true }).check();
+    assert.equal(await add.getByRole('textbox', { name: 'Launch command', exact: true }).count(), 0);
+    await add.getByRole('button', { name: 'Add', exact: true }).click();
+    await add.getByRole('alert').filter({ hasText: 'Enter a display name and server URL.' }).waitFor();
+    await add.getByRole('textbox', { name: 'Server URL', exact: true }).fill('https://docs.example/mcp');
+    await add.getByRole('button', { name: '＋ Add header', exact: true }).click();
+    await add.getByRole('textbox', { name: 'Header name', exact: true }).fill('Authorization');
+    await add.getByLabel('Header value', { exact: true }).fill('Bearer fixture-token');
+    await add.getByRole('checkbox', { name: 'Enabled', exact: true }).uncheck();
+    await add.getByRole('button', { name: 'Add', exact: true }).click();
+    await add.waitFor({ state: 'hidden' });
+    assert.deepEqual(remoteBodies, [{
+      label: 'Fixture remote docs', transport: 'http', command: '', args: [], url: 'https://docs.example/mcp',
+      headers: { Authorization: 'Bearer fixture-token' }, allow_private: false, enabled: false,
+    }]);
+    const remoteRow = settingsDialog.getByRole('button', { name: 'Fixture remote docs, disabled, edit configuration', exact: true });
+    assert.equal(await remoteRow.locator('.k').innerText(), 'docs.example');
+    await remoteRow.click();
+    const edit = page.getByRole('dialog', { name: 'MCP configuration', exact: true });
+    assert.equal(await edit.getByRole('radio', { name: 'Remote HTTP', exact: true }).isChecked(), true);
+    assert.equal(await edit.getByRole('textbox', { name: 'Header name', exact: true }).inputValue(), 'Authorization');
+    const storedValue = edit.getByLabel('Header value', { exact: true });
+    assert.equal(await storedValue.inputValue(), '', 'A stored header value is never sent back to the page');
+    assert.equal(await storedValue.getAttribute('placeholder'), 'Leave blank to keep');
+    await edit.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await edit.waitFor({ state: 'hidden' });
+    await settingsDialog.getByRole('button', { name: 'Close', exact: true }).click();
+    await settingsDialog.waitFor({ state: 'hidden' });
+    checks.push('A remote HTTP server is added through the same dialog: its header value is posted once, shown afterwards only as a name, and no connection test runs');
 
     await setCombinedEnabled(true);
     await closeTools();

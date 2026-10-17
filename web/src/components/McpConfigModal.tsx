@@ -1,8 +1,9 @@
 import { useId, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { localizeError } from "../i18n/workspace";
-import type { McpInput, McpServer } from "../types";
+import type { McpInput, McpServer, McpTransport } from "../types";
 import { parseMcpArgs } from "../lib/mcpArgs";
+import { headerPayload, headerRows, headersChanged, remoteUrl, type McpHeaderRow } from "../lib/mcpRemote";
 
 interface Props {
   server: McpServer | null; // null = add a new server
@@ -18,25 +19,32 @@ export function McpConfigModal({ server, onClose, onAdd, onUpdate, onDelete, onT
   const fieldId = useId();
   const [form, setForm] = useState({
     label: server?.label ?? "",
+    transport: (server?.transport ?? "stdio") as McpTransport,
     command: server?.command ?? "",
     args: JSON.stringify(server?.args ?? [], null, 2),
+    url: server?.url ?? "",
+    headers: headerRows(server?.header_names),
+    allowPrivate: server?.allow_private ?? false,
     enabled: server?.enabled ?? true,
   });
   const [busy, setBusy] = useState<"save" | "test" | "delete" | null>(null);
   const busyRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ ok: boolean; detail: string; tools: string[] } | null>(null);
+  const remote = form.transport === "http";
   const dirty = !!server && (
-    form.label !== server.label || form.command !== server.command ||
-    form.args !== JSON.stringify(server.args, null, 2) || form.enabled !== server.enabled
+    form.label !== server.label || form.transport !== (server.transport ?? "stdio") ||
+    form.command !== server.command || form.args !== JSON.stringify(server.args ?? [], null, 2) ||
+    form.url !== (server.url ?? "") || form.allowPrivate !== (server.allow_private ?? false) ||
+    headersChanged(form.headers, server.header_names) || form.enabled !== server.enabled
   );
 
-  const payload = (): McpInput => ({
-    label: form.label.trim(),
-    command: form.command.trim(),
-    args: parseMcpArgs(form.args),
-    enabled: form.enabled,
-  });
+  const payload = (): McpInput => remote
+    ? {
+      label: form.label.trim(), transport: "http", command: "", args: [], url: remoteUrl(form.url),
+      headers: headerPayload(form.headers), allow_private: form.allowPrivate, enabled: form.enabled,
+    }
+    : { label: form.label.trim(), transport: "stdio", command: form.command.trim(), args: parseMcpArgs(form.args), enabled: form.enabled };
 
   function close() {
     if (!busyRef.current) onClose();
@@ -48,18 +56,31 @@ export function McpConfigModal({ server, onClose, onAdd, onUpdate, onDelete, onT
     setTestResult(null);
   }
 
+  function updateHeader(index: number, values: Partial<McpHeaderRow>) {
+    update({ headers: form.headers.map((row, i) => (i === index ? { ...row, ...values } : row)) });
+  }
+
   async function save() {
     if (busyRef.current) return;
     setError(null);
-    if (!form.label.trim() || !form.command.trim()) {
-      setError(t("请填写显示名和启动命令。", "Enter a display name and launch command."));
+    if (!form.label.trim() || (remote ? !form.url.trim() : !form.command.trim())) {
+      setError(remote
+        ? t("请填写显示名和服务地址。", "Enter a display name and server URL.")
+        : t("请填写显示名和启动命令。", "Enter a display name and launch command."));
+      return;
+    }
+    let body: McpInput;
+    try {
+      body = payload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("保存失败，请重试。", "Could not save. Please try again."));
       return;
     }
     busyRef.current = true;
     setBusy("save");
     try {
-      if (server) await onUpdate(server.id, payload());
-      else await onAdd(payload());
+      if (server) await onUpdate(server.id, body);
+      else await onAdd(body);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("保存失败，请重试。", "Could not save. Please try again."));
@@ -103,22 +124,52 @@ export function McpConfigModal({ server, onClose, onAdd, onUpdate, onDelete, onT
 
   return (
     <div className="overlay overlay-top" onClick={close}>
-      <div className="modal modal-form" role="dialog" aria-modal="true" aria-labelledby={`${fieldId}-title`} aria-busy={!!busy} onClick={(e) => e.stopPropagation()}>
+      <div className="modal modal-form mcp-config-form" role="dialog" aria-modal="true" aria-labelledby={`${fieldId}-title`} aria-busy={!!busy} onClick={(e) => e.stopPropagation()}>
         <h3 id={`${fieldId}-title`}>{server ? t("MCP 配置", "MCP configuration") : t("添加 MCP", "Add MCP")}</h3>
 
         <div className="field">
           <label htmlFor={`${fieldId}-label`}>{t("显示名", "Display name")}</label>
           <input id={`${fieldId}-label`} placeholder={t("如 网页读取", "e.g. Web reader")} value={form.label} disabled={!!busy} onChange={(e) => update({ label: e.target.value })} />
         </div>
-        <div className="field">
-          <label htmlFor={`${fieldId}-command`}>{t("启动命令", "Launch command")}</label>
-          <input id={`${fieldId}-command`} placeholder="uvx / npx / python" value={form.command} disabled={!!busy} spellCheck={false} onChange={(e) => update({ command: e.target.value })} />
-        </div>
-        <div className="field">
-          <label htmlFor={`${fieldId}-args`}>{t("启动参数", "Arguments")}</label>
-          <textarea id={`${fieldId}-args`} className="mono" rows={Math.min(8, Math.max(3, form.args.split("\n").length))} style={{ width: "100%", resize: "vertical" }} placeholder={'["mcp-server-fetch"]'} value={form.args} disabled={!!busy} spellCheck={false} aria-describedby={`${fieldId}-args-hint`} onChange={(e) => update({ args: e.target.value })} />
-          <div id={`${fieldId}-args-hint`} className="hint">{t("JSON 数组；每个参数单独加引号，路径中的空格会保留。", "JSON array. Quote each argument; spaces in paths are preserved.")}</div>
-        </div>
+        <fieldset className="mcp-transport" disabled={!!busy}>
+          <legend>{t("连接方式", "Connection")}</legend>
+          <label><input type="radio" name={`${fieldId}-transport`} checked={!remote} onChange={() => update({ transport: "stdio" })} />{t("本机命令", "Local command")}</label>
+          <label><input type="radio" name={`${fieldId}-transport`} checked={remote} onChange={() => update({ transport: "http" })} />{t("远程 HTTP", "Remote HTTP")}</label>
+        </fieldset>
+        {!remote && <>
+          <div className="field">
+            <label htmlFor={`${fieldId}-command`}>{t("启动命令", "Launch command")}</label>
+            <input id={`${fieldId}-command`} placeholder="uvx / npx / python" value={form.command} disabled={!!busy} spellCheck={false} onChange={(e) => update({ command: e.target.value })} />
+          </div>
+          <div className="field">
+            <label htmlFor={`${fieldId}-args`}>{t("启动参数", "Arguments")}</label>
+            <textarea id={`${fieldId}-args`} className="mono" rows={Math.min(8, Math.max(3, form.args.split("\n").length))} style={{ width: "100%", resize: "vertical" }} placeholder={'["mcp-server-fetch"]'} value={form.args} disabled={!!busy} spellCheck={false} aria-describedby={`${fieldId}-args-hint`} onChange={(e) => update({ args: e.target.value })} />
+            <div id={`${fieldId}-args-hint`} className="hint">{t("JSON 数组；每个参数单独加引号，路径中的空格会保留。", "JSON array. Quote each argument; spaces in paths are preserved.")}</div>
+          </div>
+        </>}
+        {remote && <>
+          <div className="field">
+            <label htmlFor={`${fieldId}-url`}>{t("服务地址", "Server URL")}</label>
+            <input id={`${fieldId}-url`} type="url" inputMode="url" placeholder="https://example.com/mcp" value={form.url} disabled={!!busy} spellCheck={false} autoComplete="off" onChange={(e) => update({ url: e.target.value })} />
+          </div>
+          <div className="field" role="group" aria-labelledby={`${fieldId}-headers`}>
+            <div id={`${fieldId}-headers`} className="mcp-field-title">{t("请求头", "Headers")}</div>
+            {form.headers.map((row, index) => (
+              <div className="mcp-header-row" key={index}>
+                <input aria-label={t("请求头名称", "Header name")} placeholder="Authorization" value={row.name} disabled={!!busy} spellCheck={false} autoComplete="off" onChange={(e) => updateHeader(index, { name: e.target.value })} />
+                <input type="password" aria-label={t("请求头的值", "Header value")} placeholder={row.original !== undefined ? t("留空则保持原值", "Leave blank to keep") : t("值", "Value")} value={row.value} disabled={!!busy} spellCheck={false} autoComplete="new-password" onChange={(e) => updateHeader(index, { value: e.target.value })} />
+                <button type="button" className="btn" aria-label={t("删除请求头", "Remove header")} title={t("删除请求头", "Remove header")} disabled={!!busy} onClick={() => update({ headers: form.headers.filter((_, i) => i !== index) })}>×</button>
+              </div>
+            ))}
+            <button type="button" className="btn" disabled={!!busy || form.headers.length >= 20} onClick={() => update({ headers: [...form.headers, { name: "", value: "" }] })}>{t("＋ 添加请求头", "＋ Add header")}</button>
+            <div className="hint">{t("例如 Authorization: Bearer …。值只保存在这台电脑的数据库里，保存后不再显示。", "For example Authorization: Bearer …. Values stay in this computer's database and are not shown again after saving.")}</div>
+          </div>
+          <label className="hint mcp-private">
+            <input type="checkbox" checked={form.allowPrivate} disabled={!!busy} onChange={(e) => update({ allowPrivate: e.target.checked })} />
+            {t("允许内网地址", "Allow private addresses")}
+          </label>
+          {form.allowPrivate && <div className="hint mcp-warning" role="note">{t("仅用于你信任的本机开发服务：开启后可连接本机、局域网和 Tailscale 地址，学习树会把问题相关内容发送给它。", "Only for a development server you trust on this computer: this allows loopback, local-network and Tailscale addresses, and LearningTree sends it question-related content.")}</div>}
+        </>}
         <label className="hint">
           <input type="checkbox" checked={form.enabled} disabled={!!busy} onChange={(e) => update({ enabled: e.target.checked })} style={{ marginRight: 6 }} />
           {t("启用", "Enabled")}

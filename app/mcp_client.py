@@ -1,7 +1,8 @@
-"""Persistent stdio MCP sessions with a thread-safe synchronous public API.
+"""Persistent MCP sessions with a thread-safe synchronous public API.
 
-Each server has one queue actor on a dedicated event-loop thread. The actor
-opens and closes every SDK context manager in the same task, as AnyIO requires.
+A server is a local program (stdio) or a remote Streamable HTTP endpoint. Each
+server has one queue actor on a dedicated event-loop thread. The actor opens and
+closes every SDK context manager in the same task, as AnyIO requires.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 import sys
 import threading
 from contextlib import AsyncExitStack
@@ -22,21 +24,58 @@ from pathlib import Path
 from typing import Any
 
 import anyio
+import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import get_default_environment, stdio_client
+from mcp.client.streamable_http import StreamableHTTPError, streamable_http_client
 from mcp.shared.exceptions import McpError
 from mcp.types import CONNECTION_CLOSED
+
+from . import url_guard
 
 CONNECT_TIMEOUT = 30.0
 CALL_TIMEOUT = 60.0
 SHUTDOWN_TIMEOUT = 12.0
 MAX_OUTPUT_CHARS = 24_000
 MAX_PENDING_REQUESTS = 32
+# Remote servers: 30 s to connect and write, five minutes between streamed events.
+HTTP_TIMEOUT = httpx.Timeout(30.0, read=300.0)
+# The SDK reports a POST answered 404 (an expired server session) with this code.
+SESSION_TERMINATED = 32600
+# Looked up at call time so tests can substitute a resolver.
+RESOLVER = socket.getaddrinfo
+
+# Fixed connection-test messages; exception text never reaches a client.
+REMOTE_URL_INVALID = "MCP 远程地址无效：只支持不含用户名和密码的 http(s) 地址。"
+REMOTE_URL_PRIVATE = "MCP 远程地址指向本机或内网；如果是本机开发服务，请在配置中允许内网地址。"
+REMOTE_HOST_UNRESOLVED = "无法解析 MCP 远程地址的主机名，请检查服务地址。"
+REMOTE_UNREACHABLE = "无法连接 MCP 远程服务，请检查服务地址和网络后重试。"
+REMOTE_TIMEOUT = "MCP 远程服务连接超时，请检查服务地址和网络后重试。"
+REMOTE_DENIED = "MCP 远程服务拒绝访问，请检查请求头中的凭据。"
+REMOTE_NOT_FOUND = "MCP 远程地址不存在或不是 MCP 服务，请检查服务地址。"
+REMOTE_REDIRECT = "MCP 远程服务要求重定向；为安全起见不会跟随，请填写最终地址。"
+REMOTE_FAILED = "MCP 远程服务返回错误，请稍后重试。"
+CONNECTION_FAILED = "MCP 连接失败，请检查配置后重试。"
 
 
-def server_spec(command: str, args: list[str] | None) -> dict:
+def server_spec(
+    command: str = "",
+    args: list[str] | None = None,
+    *,
+    transport: str = "stdio",
+    url: str | None = None,
+    headers: dict | None = None,
+    allow_private: bool = False,
+) -> dict:
     """Share the same launch identity between execution, testing and invalidation."""
-    spec: dict = {"command": command, "args": args}
+    if transport == "http":
+        return {
+            "transport": "http",
+            "url": (url or "").strip(),
+            "headers": {str(name): str(value) for name, value in (headers or {}).items()},
+            "allow_private": bool(allow_private),
+        }
+    spec: dict = {"transport": "stdio", "command": command, "args": args}
     launcher = Path(__file__).resolve().parents[1] / "integrations/mcp/launch.py"
     if (
         args
@@ -51,12 +90,50 @@ def server_spec(command: str, args: list[str] | None) -> dict:
     return spec
 
 
+def server_spec_for(server) -> dict:
+    """The identity of a stored McpServer row, built from every field that reaches the
+    transport. Fixtures without the newer fields read as stdio servers."""
+    return server_spec(
+        getattr(server, "command", "") or "",
+        getattr(server, "args", None),
+        transport=getattr(server, "transport", None) or "stdio",
+        url=getattr(server, "url", None),
+        headers=getattr(server, "headers", None),
+        allow_private=bool(getattr(server, "allow_private", False)),
+    )
+
+
 class MCPConnectionError(RuntimeError):
     """A lost transport allows a read-only discovery request to reconnect."""
 
 
 class MCPTimeoutError(TimeoutError):
     """The execution outcome is unknown, so a tool must not be replayed."""
+
+
+class MCPConfigError(RuntimeError):
+    """The configuration cannot be used (for example a refused address); retrying cannot help."""
+
+
+class MCPCommandNotFound(FileNotFoundError):
+    """The local launch command does not exist; the message names only that command."""
+
+
+class MCPRemoteStatusError(MCPConnectionError):
+    """A remote server answered with an HTTP error status. Only the status is kept: the
+    original exception text names the URL and could grow to include more."""
+
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+        if status_code in (401, 403):
+            message = REMOTE_DENIED
+        elif status_code in (404, 405):
+            message = REMOTE_NOT_FOUND
+        elif 300 <= status_code < 400:
+            message = REMOTE_REDIRECT
+        else:
+            message = REMOTE_FAILED
+        super().__init__(message)
 
 
 def _params(spec: dict) -> StdioServerParameters:
@@ -77,7 +154,7 @@ def _params(spec: dict) -> StdioServerParameters:
     raw_command = os.path.expanduser(spec["command"])
     command = shutil.which(raw_command, path=path)
     if command is None:
-        raise FileNotFoundError(f"未找到 MCP 启动命令：{raw_command}。请确认已经安装。")
+        raise MCPCommandNotFound(f"未找到 MCP 启动命令：{raw_command}。请确认已经安装。")
     args = [
         os.path.expanduser(str(arg)) if str(arg).startswith("~") else str(arg)
         for arg in (spec.get("args") or [])
@@ -88,10 +165,49 @@ def _params(spec: dict) -> StdioServerParameters:
     return StdioServerParameters(command=command, args=args, env=env, cwd=cwd)
 
 
+def _identity(spec: dict) -> dict:
+    if spec.get("transport") == "http":
+        return {
+            "transport": "http",
+            "url": spec.get("url"),
+            "headers": spec.get("headers") or {},
+            "allow_private": bool(spec.get("allow_private")),
+        }
+    return {key: spec.get(key) for key in ("command", "args", "env", "cwd")}
+
+
 def _key(spec: dict) -> str:
-    identity = {key: spec.get(key) for key in ("command", "args", "env", "cwd")}
-    # Environment values must not appear in logs, registry keys or thread names.
-    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    # Environment and header values must not appear in logs, registry keys or thread
+    # names, so only this digest of the identity is ever used.
+    return hashlib.sha256(json.dumps(_identity(spec), sort_keys=True).encode()).hexdigest()
+
+
+def _check_remote(spec: dict) -> None:
+    """Refuse a remote URL before connecting: http(s) only, no credentials, and every
+    resolved address public unless the server allows private addresses. The client
+    resolves the name again when it connects, so DNS rebinding after this check is
+    not prevented; redirects are never followed."""
+    url = spec.get("url") or ""
+    try:
+        url_guard.validate_url(url)
+    except url_guard.BlockedURL:
+        raise MCPConfigError(REMOTE_URL_INVALID) from None
+    if spec.get("allow_private"):
+        return
+    try:
+        url_guard.resolve_public(url, RESOLVER)
+    except url_guard.UnresolvedHost:
+        raise MCPConfigError(REMOTE_HOST_UNRESOLVED) from None
+    except url_guard.BlockedURL:
+        raise MCPConfigError(REMOTE_URL_PRIVATE) from None
+
+
+def _http_client(spec: dict) -> httpx.AsyncClient:
+    # The SDK's default client follows redirects, which could lead a remote server's
+    # answer to a loopback or private address; this one never does.
+    return httpx.AsyncClient(
+        headers=spec.get("headers") or {}, follow_redirects=False, timeout=HTTP_TIMEOUT
+    )
 
 
 def _bounded(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
@@ -166,10 +282,19 @@ def _transport_error(exc: BaseException) -> bool:
         return any(_transport_error(child) for child in exc.exceptions)
     return (
         isinstance(
-            exc, (ConnectionError, EOFError, anyio.BrokenResourceError, anyio.ClosedResourceError)
+            exc,
+            (
+                ConnectionError,
+                EOFError,
+                anyio.BrokenResourceError,
+                anyio.ClosedResourceError,
+                httpx.TransportError,
+                httpx.HTTPStatusError,
+                StreamableHTTPError,
+            ),
         )
         or isinstance(exc, McpError)
-        and exc.error.code == CONNECTION_CLOSED
+        and exc.error.code in (CONNECTION_CLOSED, SESSION_TERMINATED)
     )
 
 
@@ -177,7 +302,20 @@ def _timeout_error(exc: BaseException) -> bool:
     if isinstance(exc, BaseExceptionGroup):
         return any(_timeout_error(child) for child in exc.exceptions)
     # The installed MCP SDK represents its read deadline as HTTP status 408.
-    return isinstance(exc, TimeoutError) or isinstance(exc, McpError) and exc.error.code == 408
+    return (
+        isinstance(exc, (TimeoutError, httpx.TimeoutException))
+        or isinstance(exc, McpError)
+        and exc.error.code == 408
+    )
+
+
+def _http_status(exc: BaseException) -> int | None:
+    if isinstance(exc, BaseExceptionGroup):
+        return next(
+            (status for child in exc.exceptions if (status := _http_status(child)) is not None),
+            None,
+        )
+    return exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
 
 
 def _finish(
@@ -221,6 +359,8 @@ class _SessionWorker:
             if self.error is None:
                 if _timeout_error(exc):
                     self.error = MCPTimeoutError("MCP 连接超时，请检查启动命令和服务状态后重试。")
+                elif (status := _http_status(exc)) is not None:
+                    self.error = MCPRemoteStatusError(status)
                 elif isinstance(exc, asyncio.CancelledError) or _transport_error(exc):
                     self.error = MCPConnectionError("MCP 连接已关闭")
                 else:
@@ -245,7 +385,15 @@ class _SessionWorker:
         async with AsyncExitStack() as stack:
             # Enter/exit on this actor, never wait_for(context.__aenter__()).
             async with asyncio.timeout(CONNECT_TIMEOUT):
-                read, write = await stack.enter_async_context(stdio_client(_params(self.spec)))
+                if self.spec.get("transport") == "http":
+                    # DNS lookups block; keep this loop free to receive a stop request.
+                    await asyncio.to_thread(_check_remote, self.spec)
+                    client = await stack.enter_async_context(_http_client(self.spec))
+                    read, write, _ = await stack.enter_async_context(
+                        streamable_http_client(self.spec["url"], http_client=client)
+                    )
+                else:
+                    read, write = await stack.enter_async_context(stdio_client(_params(self.spec)))
                 session = await stack.enter_async_context(
                     ClientSession(read, write, read_timeout_seconds=timedelta(seconds=CALL_TIMEOUT))
                 )
@@ -393,7 +541,39 @@ def call_tool(spec: dict, name: str, args: dict) -> str:
     try:
         return _worker(spec).submit("call", name, args)
     except Exception as exc:
+        if spec.get("transport") == "http":
+            # Remote failures carry no exception text: it could echo request details.
+            return f"MCP 工具 {name} 调用失败：{describe_error(exc, spec)}"
         return _bounded(f"MCP 工具 {name} 调用失败：{type(exc).__name__}: {exc}", 1600)
+
+
+_FIXED_MESSAGES = frozenset(
+    {
+        "MCP 连接超时，请检查启动命令和服务状态后重试。",
+        "MCP 连接已关闭",
+        "MCP 请求超时；执行结果未确认，请先检查状态再决定是否重试。",
+        "MCP 连接已关闭；执行结果未确认。",
+        "MCP 连接中断；执行结果未确认。",
+        "MCP 工具清单返回了重复的分页游标",
+        "MCP 工具清单超过 100 页",
+        "MCP 连接启动超时",
+        "该 MCP 正忙，请稍后再试",
+        "MCP 等待超时；执行结果未确认，请检查状态后再重试。",
+    }
+)
+
+
+def describe_error(exc: BaseException, spec: dict) -> str:
+    """A fixed, credential-free message for a failed connection; never exception text."""
+    if isinstance(exc, (MCPConfigError, MCPRemoteStatusError, MCPCommandNotFound)):
+        return str(exc)
+    if spec.get("transport") == "http":
+        if isinstance(exc, MCPTimeoutError):
+            return REMOTE_TIMEOUT
+        if isinstance(exc, MCPConnectionError):
+            return REMOTE_UNREACHABLE
+    message = str(exc)
+    return message if message in _FIXED_MESSAGES else CONNECTION_FAILED
 
 
 def invalidate(spec: dict, *, _expected: _SessionWorker | None = None) -> None:

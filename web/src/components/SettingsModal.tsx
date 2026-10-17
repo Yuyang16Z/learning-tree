@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from "react";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import { localizeError, mcpDisplayName } from "../i18n/workspace";
+import { mcpTarget } from "../lib/mcpRemote";
 import type { McpServer, MemoryRetrievalStatus, ModelCfg, RetrievalSettings, Tree } from "../types";
 import { MemoryPanel } from "./MemoryPanel";
 import { PhoneAccessPanel } from "./PhoneAccessPanel";
@@ -293,7 +294,7 @@ export function SettingsModal(props: Props) {
                   }}>
                     <span className={"dot " + (s.enabled ? "dot-on" : "dot-off")} />
                     <span className="grow">{mcpDisplayName(s, locale)}</span>
-                    <span className="k mono">{s.command.split(/[\\/]/).pop()}</span>
+                    <span className="k mono">{mcpTarget(s)}</span>
                     <span className="chevron">›</span>
                   </div>
                 ))}

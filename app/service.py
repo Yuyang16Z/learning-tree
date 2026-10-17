@@ -92,7 +92,7 @@ def assemble_tools(session: Session, requested: list[str]) -> tuple[list[dict], 
             srv = session.get(McpServer, sid)
             if not srv or not srv.enabled:
                 continue
-            spec = mcp_client.server_spec(srv.command, srv.args)
+            spec = mcp_client.server_spec_for(srv)
             try:
                 for t in mcp_client.list_tools(spec):
                     oai = f"mcp_{sid}_{t['name']}"

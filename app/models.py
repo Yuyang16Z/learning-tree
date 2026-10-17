@@ -135,14 +135,25 @@ class PreferenceExtraction(SQLModel, table=True):
 
 
 class McpServer(SQLModel, table=True):
-    """A user-configured stdio MCP server whose tools are available to agent turns when enabled."""
+    """A user-configured MCP server whose tools are available to agent turns when enabled.
+
+    stdio servers are local programs (command/args); http servers are remote Streamable
+    HTTP endpoints (url/headers). Header values are credentials: they stay in this table
+    and are never returned by the API, logged or exported."""
 
     id: int | None = Field(default=None, primary_key=True)
     label: str  # Display name, e.g. "fetch" or "filesystem".
-    command: str  # Launch command, e.g. "uvx", "npx" or "python".
+    command: str  # Launch command, e.g. "uvx", "npx" or "python"; empty for http servers.
     args: list | None = Field(default=None, sa_column=Column(JSON))  # E.g. ["mcp-server-fetch"].
     enabled: bool = True
     created_at: datetime = Field(default_factory=_now)
+    transport: Literal["stdio", "http"] = Field(
+        default="stdio", sa_column=Column(String, nullable=False, default="stdio")
+    )
+    url: str | None = None  # Streamable HTTP endpoint, e.g. "https://example.com/mcp".
+    headers: dict | None = Field(default=None, sa_column=Column(JSON))  # Name -> value.
+    # Opt-in for loopback, private, link-local and CGNAT addresses (a local dev server).
+    allow_private: bool = False
 
 
 class KnowledgeTree(SQLModel, table=True):

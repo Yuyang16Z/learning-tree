@@ -988,3 +988,17 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--teal); outline-
 .memory-scopes legend { padding: 0; margin-bottom: 2px; color: var(--muted); font-size: 11px; }
 .memory-scopes label { display: flex; align-items: center; gap: 7px; }
 .memory-scopes input { margin: 0; flex: none; }
+
+/* Settings → MCP: local command or remote HTTP server, header rows and the private-address opt-in. */
+.mcp-config-form { max-height: calc(100dvh - 40px); overflow-y: auto; }
+.mcp-transport { border: 0; padding: 0; margin: 0 0 12px; display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; min-width: 0; }
+.mcp-transport legend { padding: 0; margin-bottom: 4px; color: var(--muted); font-size: 12px; }
+.mcp-transport label { display: flex; align-items: center; gap: 6px; }
+.mcp-transport input { margin: 0; }
+.mcp-field-title { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.mcp-header-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr) auto; gap: 6px; margin-bottom: 6px; }
+.mcp-header-row .btn { padding-inline: 10px; }
+.mcp-config-form .field > .btn { margin-bottom: 6px; }
+.mcp-private { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.mcp-private input { margin: 0; }
+.mcp-warning { color: var(--danger); margin-bottom: 8px; }
