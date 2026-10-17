@@ -40,6 +40,17 @@ export function restoreUnderstanding<T extends Marked>(items: readonly T[], isTa
   return withUnderstanding(items, item => isTarget(item) && (item.understanding ?? null) === attempted, previous);
 }
 
+/** The map lists at most this many unresolved questions, like its search results. */
+export const UNRESOLVED_CAP = 30;
+
+/** Questions the learner marked "Not yet" in this topic, newest first; `total` counts them all. */
+export function unresolvedNodes(nodes: readonly TreeNode[], cap = UNRESOLVED_CAP): { items: TreeNode[]; total: number } {
+  const marked = [...new Map(nodes.map(node => [node.id, node])).values()]
+    .filter(node => node.understanding === "open")
+    .sort((a, b) => b.id - a.id);
+  return { items: marked.slice(0, Math.max(0, cap)), total: marked.length };
+}
+
 const RUNNING = new Set(["pending", "streaming"]);
 const FAILED = new Set(["error", "failed", "interrupted"]);
 

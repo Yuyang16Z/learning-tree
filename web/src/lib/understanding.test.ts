@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ThreadNode, TreeNode } from "../types";
-import { cardUnderstanding, isUnderstanding, restoreUnderstanding, toggleUnderstanding, UNDERSTANDING_LEVELS, UNDERSTANDING_TEXT, withUnderstanding } from "./understanding";
+import { cardUnderstanding, isUnderstanding, restoreUnderstanding, toggleUnderstanding, UNDERSTANDING_LEVELS, UNDERSTANDING_TEXT, UNRESOLVED_CAP, unresolvedNodes, withUnderstanding } from "./understanding";
 
 function node(id: number, extra: Partial<TreeNode> = {}): TreeNode {
   return { id, parent_id: id === 1 ? null : id - 1, tree_id: 1, title: `问题 ${id}`, seed_text: null, has_summary: false, ...extra };
@@ -58,5 +58,35 @@ describe("understanding marks", () => {
     }
     expect(cardUnderstanding([node(1, { understanding: "someday" as never })])).toEqual({ value: null, className: "" });
     expect(cardUnderstanding([])).toEqual({ value: null, className: "" });
+  });
+});
+
+describe("unresolved questions", () => {
+  it("lists only nodes marked Not yet, newest first", () => {
+    const nodes = [node(1, { understanding: "open" }), node(2, { understanding: "partial" }), node(3), node(4, { understanding: "open" }), node(5, { understanding: "clear" }), node(6, { understanding: null })];
+    const { items, total } = unresolvedNodes(nodes);
+    expect(items.map(item => item.id)).toEqual([4, 1]);
+    expect(total).toBe(2);
+  });
+
+  it("follows the map's current nodes, including duplicates and an empty topic", () => {
+    const first = [node(1, { understanding: "open" }), node(2, { understanding: "open" })];
+    expect(unresolvedNodes(first).total).toBe(2);
+    // Marked elsewhere, cleared, or deleted: the next node list is the only truth.
+    const next = [node(1, { understanding: "clear" }), node(3, { understanding: "open" }), node(3, { understanding: "open" })];
+    expect(unresolvedNodes(next)).toEqual({ items: [next[1]], total: 1 });
+    expect(unresolvedNodes([])).toEqual({ items: [], total: 0 });
+  });
+
+  it("caps the list like search results while counting everything", () => {
+    const many = Array.from({ length: 45 }, (_, index) => node(index + 1, { understanding: "open" }));
+    const { items, total } = unresolvedNodes(many);
+    expect(UNRESOLVED_CAP).toBe(30);
+    expect(items).toHaveLength(30);
+    expect(items[0].id).toBe(45);
+    expect(items[29].id).toBe(16);
+    expect(total).toBe(45);
+    expect(unresolvedNodes(many, 2).items.map(item => item.id)).toEqual([45, 44]);
+    expect(unresolvedNodes(many, -1).items).toEqual([]);
   });
 });

@@ -5,7 +5,7 @@ import { api } from "../api";
 import { createMapSearcher, localMatches, mergeSearchResults, searchAnchor } from "../lib/mapSearch";
 import { groupAncestorIds, groupTopics, layoutTopics, TOPIC_CARD } from "../lib/topicLayout";
 import { navigateMapView } from "../lib/mapCamera";
-import { cardUnderstanding, UNDERSTANDING_TEXT } from "../lib/understanding";
+import { cardUnderstanding, UNDERSTANDING_TEXT, unresolvedNodes } from "../lib/understanding";
 import type { Camera, MapViewAction, ReturnView } from "../lib/mapCamera";
 import "./LearningMap.css";
 import { useI18n } from "../i18n";
@@ -32,9 +32,10 @@ const toggleSet = (set: Set<number>, id: number) => {
   return next;
 };
 
-function Icon({ name }: { name: "search" | "close" | "collapse" | "focus" | "fit" | "return" }) {
+function Icon({ name }: { name: "search" | "close" | "collapse" | "focus" | "fit" | "return" | "unresolved" }) {
   const paths = {
     search: <><circle cx="10" cy="10" r="5.5" /><path d="m14.5 14.5 4 4" /></>,
+    unresolved: <><circle cx="12" cy="12" r="8" /><path d="M9.7 9.6a2.4 2.4 0 1 1 3.4 2.2c-.7.4-1.1.9-1.1 1.7v.3M12 16.5v.1" /></>,
     close: <path d="m6 6 12 12M18 6 6 18" />,
     collapse: <path d="m9 5 7 7-7 7" />,
     focus: <><circle cx="12" cy="12" r="4" /><path d="M12 2v3m0 14v3M2 12h3m14 0h3" /></>,
@@ -54,6 +55,9 @@ export function LearningMap({ nodes, activeId, onSelect, onDelete, onCollapse, w
   const visibleCollapsed = useMemo(() => new Set([...collapsed].filter((id) => !ancestors.has(id))), [collapsed, ancestors]);
   const layout = useMemo(() => layoutTopics(tree, visibleCollapsed, expanded), [tree, visibleCollapsed, expanded]);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [unresolvedOpen, setUnresolvedOpen] = useState(false);
+  const unresolvedToggleRef = useRef<HTMLButtonElement>(null);
+  const unresolvedPanelRef = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const searcherRef = useRef(createMapSearcher({ search: (treeId, needle, signal) => api.searchTree(treeId, needle, 30, signal) }));
@@ -86,6 +90,7 @@ export function LearningMap({ nodes, activeId, onSelect, onDelete, onCollapse, w
     setExpanded(new Set());
     setQuery("");
     setSearchOpen(false);
+    setUnresolvedOpen(false);
     setReturnView(null);
     // Results from the previous topic must never show under this one.
     searcherRef.current.cancel();
@@ -230,6 +235,7 @@ export function LearningMap({ nodes, activeId, onSelect, onDelete, onCollapse, w
     if (groupId != null) setExpanded((old) => new Set(old).add(groupId));
     setQuery("");
     setSearchOpen(false);
+    setUnresolvedOpen(false);
     onSelect(node.id, anchor);
     if (node.id === activeId && !anchor) requestAnimationFrame(focusSelected);
   };
@@ -237,6 +243,19 @@ export function LearningMap({ nodes, activeId, onSelect, onDelete, onCollapse, w
     const node = nodes.find((item) => item.id === hit.node_id);
     if (node) selectResult(node, searchAnchor(hit));
   };
+  // Derived from the map's nodes, so marks made here or in another window show at once.
+  const unresolved = useMemo(() => unresolvedNodes(nodes), [nodes]);
+  const unresolvedSummary = unresolved.total === 1 ? t("1 个问题标记为「还没懂」", "1 question marked “Not yet”")
+    : unresolved.total > unresolved.items.length ? t("{count} 个问题标记为「还没懂」，显示最近 {shown} 个", "{count} questions marked “Not yet”; showing the latest {shown}", { count: unresolved.total, shown: unresolved.items.length })
+    : unresolved.total ? t("{count} 个问题标记为「还没懂」", "{count} questions marked “Not yet”", { count: unresolved.total })
+    : t("还没有标记为「还没懂」的问题；可在回答下方的「理解」中标记。", "No questions are marked “Not yet”. Mark one with Understanding under an answer.");
+  const closeUnresolved = () => {
+    setUnresolvedOpen(false);
+    unresolvedToggleRef.current?.focus();
+  };
+  useEffect(() => {
+    if (unresolvedOpen) unresolvedPanelRef.current?.focus();
+  }, [unresolvedOpen]);
   const results = useMemo(() => localMatches(nodes, query), [nodes, query]);
   const merged = useMemo(() => mergeSearchResults(results, hits, nodes), [results, hits, nodes]);
   const resultCount = merged.local.length + merged.remote.length;
@@ -246,7 +265,10 @@ export function LearningMap({ nodes, activeId, onSelect, onDelete, onCollapse, w
 
   return (
     <aside className="right learning-map" style={{ width }} aria-label={t("学习树", "LearningTree")} onKeyDown={(event) => {
-      if (event.key === "Escape" && returnView && !(event.target as HTMLElement).closest("input")) {
+      if (event.key === "Escape" && unresolvedOpen) {
+        event.preventDefault();
+        closeUnresolved();
+      } else if (event.key === "Escape" && returnView && !(event.target as HTMLElement).closest("input")) {
         event.preventDefault();
         returnPreviousView();
       }
@@ -254,13 +276,21 @@ export function LearningMap({ nodes, activeId, onSelect, onDelete, onCollapse, w
       <div className="lm-header">
         <span className="lm-heading">{t("学习树", "LearningTree")} <span>{tree.groups.length}</span></span>
         <div className="lm-header-actions">
-          <button type="button" className={searchOpen ? "lm-icon active" : "lm-icon"} aria-label={searchOpen ? t("关闭节点搜索", "Close node search") : t("搜索节点", "Search nodes")} aria-expanded={searchOpen} title={t("搜索节点", "Search nodes")} onClick={() => { setSearchOpen((old) => !old); setQuery(""); }}><Icon name="search" /></button>
+          <button type="button" ref={unresolvedToggleRef} className={`lm-icon lm-unresolved-toggle${unresolvedOpen ? " active" : ""}`} aria-label={t("没懂的问题", "Not understood")} aria-describedby="lm-unresolved-summary" aria-expanded={unresolvedOpen} title={t("没懂的问题（{count}）", "Not understood ({count})", { count: unresolved.total })} onClick={() => { setUnresolvedOpen((old) => !old); setSearchOpen(false); setQuery(""); }}><Icon name="unresolved" />{unresolved.total > 0 && <span className="lm-badge" aria-hidden="true">{unresolved.total > 99 ? "99+" : unresolved.total}</span>}</button>
+          <span id="lm-unresolved-summary" hidden>{unresolvedSummary}</span>
+          <button type="button" className={searchOpen ? "lm-icon active" : "lm-icon"} aria-label={searchOpen ? t("关闭节点搜索", "Close node search") : t("搜索节点", "Search nodes")} aria-expanded={searchOpen} title={t("搜索节点", "Search nodes")} onClick={() => { setSearchOpen((old) => !old); setUnresolvedOpen(false); setQuery(""); }}><Icon name="search" /></button>
           <button type="button" className="lm-icon" onClick={onCollapse} title={t("收起学习树", "Hide learning tree")} aria-label={t("收起学习树", "Hide learning tree")}><Icon name="collapse" /></button>
         </div>
       </div>
       {searchOpen && <div className="lm-search">
         <div className="lm-search-field"><Icon name="search" /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") { setSearchOpen(false); setQuery(""); } }} placeholder={t("找一个问题", "Find a question")} aria-label={t("搜索问题或引用", "Search questions or quotes")} />{query && <button type="button" className="lm-icon" aria-label={t("清空搜索", "Clear search")} onClick={() => setQuery("")}><Icon name="close" /></button>}</div>
         {query.trim() && <div className="lm-results" aria-label={t("搜索结果", "Search results")}><span className="lm-result-count" role="status">{resultCount ? t("{count} 个结果", "{count} results", { count: resultCount }) : t("没有找到相关问题", "No matching questions")}</span>{merged.local.map((node) => <button type="button" key={node.id} onClick={() => selectResult(node)}><span>{node.title || node.seed_text || t("新问题", "New question")}</span></button>)}{merged.remote.length > 0 && <div className="lm-result-group" role="group" aria-label={t("记录中的匹配", "Matches in history")}>{merged.remote.map((hit) => { const node = nodes.find((item) => item.id === hit.node_id); return <button type="button" key={`${hit.kind}:${hit.node_id}:${hit.message_id ?? ""}`} onClick={() => selectHit(hit)}><span>{node?.title || node?.seed_text || t("新问题", "New question")}</span><small className="lm-result-snippet">{hitKind[hit.kind]} · {hit.snippet}</small></button>; })}</div>}</div>}
+      </div>}
+      {unresolvedOpen && <div className="lm-search lm-unresolved" ref={unresolvedPanelRef} tabIndex={-1} role="region" aria-label={t("没懂的问题", "Not understood")}>
+        <div className="lm-results"><span className="lm-result-count" role="status">{unresolvedSummary}</span>{unresolved.items.map((node) => {
+          const group = tree.byId.get(tree.nodeToGroup.get(node.id) ?? -1);
+          return <button type="button" key={node.id} onClick={() => selectResult(node)}><span>{node.title || node.seed_text || t("新问题", "New question")}</span>{group && group.id !== node.id && <small className="lm-result-snippet">{t("属于「{title}」", "In “{title}”", { title: group.title })}</small>}</button>;
+        })}</div>
       </div>}
       <div className={`lm-viewport${dragging ? " dragging" : ""}`} ref={canvasRef} tabIndex={0} role="region" aria-label={t("学习树画布，方向键平移，加减键缩放，Home 键总览，Escape 键返回原视图", "Learning tree canvas. Arrow keys pan; plus and minus zoom; Home shows the overview; Escape restores the previous view.")} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={stopPointer} onPointerCancel={stopPointer} onLostPointerCapture={stopPointer} onKeyDown={(event) => {
         if (event.target !== event.currentTarget) return;
