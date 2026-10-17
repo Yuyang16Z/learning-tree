@@ -1,4 +1,5 @@
 import { readSSE } from "./lib/sse";
+import { toolReference, type ToolReference } from "./lib/toolSteps";
 import { getLocale, translate } from "./i18n";
 import { localizeError } from "./i18n/workspace";
 import type {
@@ -23,6 +24,7 @@ import type {
   RetrievalSettings,
   SearchHit,
   ThreadNode,
+  ToolResultPage,
   Tree,
   TreeNode,
   SourceAnchor,
@@ -97,7 +99,7 @@ async function relay(res: Response, on: AskHandlers, start: AskMeta, signal?: Ab
       if (typeof obj.reasoning === 'string') on.onReasoning?.(obj.reasoning);
       if (obj.context_status === 'summarizing' || obj.context_status === 'ready') on.onContextStatus?.(obj.context_status);
       if (obj.tool_start) on.onToolStart?.(obj.tool_start.name, obj.tool_start.args);
-      if (obj.tool_end) on.onToolEnd?.(obj.tool_end.name, obj.tool_end.result);
+      if (obj.tool_end) on.onToolEnd?.(obj.tool_end.name, obj.tool_end.result, toolReference(obj.tool_end, obj));
       if (obj.diagnostics && typeof obj.diagnostics === 'object' && !Array.isArray(obj.diagnostics)) on.onDiagnostics?.(obj.diagnostics as AnswerDiagnostics);
       // Memory provenance is dispatched, never merged into the completion metadata.
       if (Array.isArray(obj.sources)) on.onSources?.(obj.sources as AnswerSource[]);
@@ -133,7 +135,8 @@ export interface AskHandlers {
   onReasoning?: (s: string) => void;
   onContextStatus?: (status: ContextStatus) => void;
   onToolStart?: (name: string, args: unknown) => void;
-  onToolEnd?: (name: string, result: string) => void;
+  /** `reference` points at the call's stored complete result when the preview is shorter. */
+  onToolEnd?: (name: string, result: string, reference: ToolReference) => void;
   /** Numeric request/usage/timing summary, sent once before the answer ends. */
   onDiagnostics?: (diagnostics: AnswerDiagnostics) => void;
   onSources?: (sources: AnswerSource[]) => void;
@@ -236,6 +239,9 @@ export const api = {
   deleteTree: (id: number) => fetch(`${API}/trees/${id}`, { method: "DELETE" }).then(j<unknown>),
 
   getNode: (id: number) => fetch(`${API}/nodes/${id}`).then(j<NodeDetail>),
+  // One page of a tool call's stored complete result (the step shows a preview).
+  toolResult: (nodeId: number, callIndex: number, requestId: string, start = 0, signal?: AbortSignal) =>
+    fetch(`${API}/nodes/${nodeId}/tool-results/${callIndex}?${new URLSearchParams({ request_id: requestId, start: String(start), max_chars: "20000" })}`, { signal }).then(j<ToolResultPage>),
   getThread: (id: number) =>
     fetch(`${API}/nodes/${id}/thread`).then(j<{ nodes: ThreadNode[] }>).then((r) => r.nodes),
   // Explicit deletion only. Editing creates a separate version through ask(mode=revise).

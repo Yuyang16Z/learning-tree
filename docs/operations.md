@@ -20,7 +20,7 @@ An occupied port is not forcibly freed. Ctrl+C stops the app. Use one backend pe
 
 | Location | Contains |
 | --- | --- |
-| `branch_learning.db` | Normal chats, model keys, notes, memory, user-managed `PreferenceProfile`, the `RetrievalSettings` scope switches, rebuildable `MemoryEmbedding` vectors, the rebuildable `search_index` full-text table, rebuildable per-model `ModelCalibration` ratios, numeric per-answer diagnostics and tool configuration. |
+| `branch_learning.db` | Normal chats, model keys, notes, memory, user-managed `PreferenceProfile`, the `RetrievalSettings` scope switches, rebuildable `MemoryEmbedding` vectors, the rebuildable `search_index` full-text table, rebuildable per-model `ModelCalibration` ratios, numeric per-answer diagnostics, the complete text of each answer's tool calls (`ToolResult`, up to 2,000,000 characters per call, removed with its branch or topic and omitted from tree exports) and tool configuration, including remote MCP request headers. |
 | `.runtime/dev.db` | Separate development data and demo configuration. |
 | `.runtime/retrieval/models/` | Pinned public embedding/reranker weights; no chat records. |
 | `.backups/` | Private database copies including credentials. |

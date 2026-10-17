@@ -27,7 +27,19 @@ export interface TreeNode extends LearningFields {
   id: number; tree_id: number; parent_id: number | null; title: string;
   seed_text: string | null; has_summary: boolean;
 }
-export interface ToolStep { tool: string; result: string | null }
+/**
+ * One tool call of an answer and a preview of its result. A truncated preview may point at
+ * the stored complete text: `call_index` within `request_id`, on the step's or the row's node.
+ */
+export interface ToolStep {
+  tool: string; result: string | null;
+  call_index?: number; truncated?: boolean; request_id?: string; node_id?: number;
+}
+/** One page of a stored complete tool result. */
+export interface ToolResultPage {
+  node_id: number; request_id: string; call_index: number; tool: string; truncated: boolean;
+  text: string; start: number; end: number; total_chars: number; next_start: number | null;
+}
 /** Numbers only: how an answer's request was budgeted, what the provider reported and how long each phase took. */
 export interface AnswerDiagnostics {
   estimated_input_tokens: number;

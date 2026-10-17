@@ -231,6 +231,41 @@ async function poll(callback, label) {
     assert.equal(await menu.getByRole('checkbox', { name: '读取网页', exact: true }).count(), 0);
     checks.push('Chinese also presents a single 联网搜索 entry, with no duplicate webpage reader');
 
+    // A stored answer whose tool preview was cut offers its complete result, paged from the server.
+    const seeded = spawnSync(process.env.LEARNING_TREE_E2E_PYTHON, ['-c', `
+import json, os, sys
+from pathlib import Path
+from sqlalchemy.engine import make_url
+from sqlmodel import Session, select
+from app.db import engine
+from app.models import Message, Node, ToolResult
+payload = json.load(sys.stdin)
+database = Path(make_url(os.environ['DATABASE_URL']).database).resolve()
+assert os.environ['LEARNING_TREE_E2E'] == '1'
+assert database.parent.name.startswith('learning-tree-e2e-') and database.name == 'test.db'
+with Session(engine) as session:
+    node = session.exec(select(Node).where(Node.tree_id == payload['tree']).order_by(Node.id.desc())).first()
+    answer = session.exec(select(Message).where(Message.node_id == node.id, Message.role == 'assistant')).first()
+    full = 'Synthetic complete tool output. ' * 800 + 'FULL-RESULT-END'
+    answer.steps = [{'tool': 'web_search', 'result': full[:3000], 'truncated': True, 'call_index': 1, 'request_id': node.request_id}]
+    session.add(answer)
+    session.add(ToolResult(node_id=node.id, request_id=node.request_id, call_index=1, tool_name='web_search', content=full))
+    session.commit()
+    print(json.dumps({'total': len(full)}))
+`], { cwd: path.resolve(__dirname, '..'), encoding: 'utf8', input: JSON.stringify({ tree: tree.id }) });
+    assert.equal(seeded.status, 0, seeded.stderr);
+    const { total } = JSON.parse(seeded.stdout);
+    await page.reload(); // The init script restores English.
+    await page.locator('.chat-question').filter({ hasText: 'Offline check after disabling a selected web preset.' }).waitFor();
+    const storedStep = page.locator('details.chat-reasoning').filter({ hasText: 'Web search · Done' });
+    await storedStep.locator('summary').click();
+    assert.equal(await storedStep.getByText('FULL-RESULT-END').count(), 0, 'Only the preview is shown at first');
+    await storedStep.getByRole('button', { name: 'View full result', exact: true }).click();
+    await storedStep.getByRole('button', { name: `Load more (20000 of ${total} characters)`, exact: true }).click();
+    await storedStep.getByText(/FULL-RESULT-END/).waitFor();
+    assert.equal(await storedStep.getByRole('button').count(), 0, 'Nothing is left to load');
+    checks.push('A stored tool step with a cut preview loads its complete result in pages on request');
+
     const output = path.resolve(__dirname, '../artifacts');
     fs.mkdirSync(output, { recursive: true });
     await page.screenshot({ path: path.join(output, 'web-tools-combined.png'), fullPage: true });

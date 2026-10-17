@@ -142,6 +142,17 @@ def test_tool_errors_and_large_output_are_bounded(server_spec):
     assert "已截断" in output
 
 
+def test_complete_output_is_returned_beside_the_bounded_text(server_spec):
+    spec, _ = server_spec
+    complete = []
+    output = mcp_client.call_tool(spec, "huge", {}, complete)
+    assert len(output) <= mcp_client.MAX_OUTPUT_CHARS and "已截断" in output
+    assert complete == ["large-output-" * 5000]
+    failed = []
+    error = mcp_client.call_tool(spec, "fails", {}, failed)
+    assert failed == [error] and "expected tool error" in error
+
+
 def test_binary_result_is_not_dumped_into_model_context():
     result = CallToolResult(
         content=[ImageContent(type="image", mimeType="image/png", data="A" * 500_000)]

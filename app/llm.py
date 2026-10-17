@@ -357,6 +357,7 @@ def run_agent(
     protected_system: str | None = None,
     diagnostics: dict | None = None,
     cache_prefix: str | None = None,
+    late_tool_defs: list[dict] | None = None,
 ) -> Iterator[dict]:
     """Yield events: {"type":"tool_start"|"tool_end"|"reasoning"|"delta", ...}.
 
@@ -369,6 +370,8 @@ def run_agent(
     execute(name, args): caller-provided router for direct built-in calls or MCP forwarding.
     diagnostics, when given, collects per-round estimates, usage and the tool-round count.
     cache_prefix is the stable head of `system` that a native cache may mark.
+    late_tool_defs are advertised only once a tool has executed in this answer (the
+    read_tool_result reader), and never in the final no-tool round.
     """
     if _is_mock(spec):
         # A demo must never launch a real process or invoke a selected external tool.
@@ -382,9 +385,16 @@ def run_agent(
     # The prefix travels on a request copy so adapters and doubles keep their signatures.
     turn_spec = replace(spec, cache_prefix=cache_prefix) if cache_prefix else spec
 
+    executed_any = False
     for round_index in range(max_rounds + 1):
         final = round_index == max_rounds
         current_tools = [] if final else tool_catalog.definitions if tool_catalog else tool_defs
+        if executed_any and late_tool_defs and not final:
+            present = {tool["function"]["name"] for tool in current_tools}
+            current_tools = [
+                *current_tools,
+                *(item for item in late_tool_defs if item["function"]["name"] not in present),
+            ]
         closing = (
             "\n工具调用已达本轮上限。请根据已取得的资料回答用户问题，明确未核实的部分；"
             "不要继续调用工具，也不要声称完成未执行的操作。"
@@ -458,6 +468,7 @@ def run_agent(
                     result = tool_catalog.search(tc["args"])
                 else:
                     result = execute(tc["name"], tc["args"])
+                    executed_any = True
                 yield {"type": "tool_end", "name": tc["name"], "result": result}
                 convo.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
             if streamed and r.get("content"):

@@ -24,6 +24,7 @@ import { NavigationGate, readSaved, saveValue, clearLegacyRecovery, removeWorksp
 import { mergePendingTitles, pollPendingTitles } from "./lib/titlePolling";
 import { resumeAnswer } from "./lib/answerStream";
 import { keepIfSame, planRefresh, watchChanges } from "./lib/changeFeed";
+import { finishToolStep, startToolStep } from "./lib/toolSteps";
 import { SettingsModal } from "./components/SettingsModal";
 import { NewTreeModal } from "./components/NewTreeModal";
 import { AddModelModal } from "./components/AddModelModal";
@@ -422,13 +423,8 @@ export default function App() {
         if (abortRef.current === ctrl && contextStatusRequestRef.current === requestId && !ctrl.signal.aborted)
           setContextStatus(status);
       },
-      onToolStart: name => setLiveSteps(s => [...s, { tool: name, result: null }]),
-      onToolEnd: (name, result) => setLiveSteps(s => {
-        const copy = [...s];
-        const index = copy.map(x => x.result === null).lastIndexOf(true);
-        if (index >= 0) copy[index] = { tool: name, result };
-        return copy;
-      }),
+      onToolStart: name => setLiveSteps(s => startToolStep(s, name)),
+      onToolEnd: (name, result, reference) => setLiveSteps(s => finishToolStep(s, name, result, reference)),
       onDiagnostics: setLiveDiagnostics,
       onSources: sources => setLiveSources(sources),
     };

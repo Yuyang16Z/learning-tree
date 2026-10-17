@@ -7,8 +7,11 @@ import json
 import re
 
 from .context_budget import ContextBudgetExceeded, estimate_request_tokens
+from .tool_results import TOOL_RESULT_TOOL_NAME
 
 SEARCH_TOOL_NAME = "search_available_tools"
+# Names the agent loop owns; a selected tool with one of them is never registered.
+RESERVED_TOOL_NAMES = frozenset({SEARCH_TOOL_NAME, TOOL_RESULT_TOOL_NAME})
 # Preloaded before any search: the built-in web tools and the managed web-research
 # MCP's equivalents, whose names carry the mcp_{server_id}_ prefix.
 _PRELOADED = re.compile(r"(?:mcp_\d+_)?(web_search|fetch|read_webpage)")
@@ -85,7 +88,7 @@ class ToolCatalog:
             if not isinstance(function, dict):
                 continue
             name = function.get("name")
-            if not isinstance(name, str) or not name or name == SEARCH_TOOL_NAME:
+            if not isinstance(name, str) or not name or name in RESERVED_TOOL_NAMES:
                 continue
             # First definition wins, matching the stable order of selected groups.
             if name not in self._registry:

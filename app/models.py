@@ -221,6 +221,24 @@ class Message(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now)
 
 
+class ToolResult(SQLModel, table=True):
+    """The complete text one tool call returned during an answer, for paging.
+
+    Bound to the node and request that produced it; `call_index` counts the answer's
+    tool calls from 1. Side data outside the change feed: deleted with its node or
+    topic and never exported. `truncated` marks text cut at the storage limit."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    node_id: int = Field(foreign_key="node.id", index=True)
+    request_id: str = Field(index=True)
+    call_index: int
+    tool_name: str
+    arguments: dict | None = Field(default=None, sa_column=Column(JSON))
+    content: str
+    truncated: bool = False
+    created_at: datetime = Field(default_factory=_now)
+
+
 class ContextSummary(SQLModel, table=True):
     """Disposable, source-versioned context compression; never a long-term memory."""
 

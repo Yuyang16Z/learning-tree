@@ -10,6 +10,7 @@ import { ATTACHMENT_ACCEPT, attachmentKind, ImageAttachmentQueue, MAX_IMAGES, re
 import { copyText } from "../lib/clipboard";
 import { hasManagedWebSearch, managedMcpPreset, selectedChatTools } from "../lib/chatTools";
 import { matchesDeletedWorkspace, onWorkspaceDeletion, type WorkspaceDeletion } from "../lib/workspace";
+import { fullResultSource, type FullResultSource } from "../lib/toolSteps";
 import { DocumentCards } from "./DocumentCards";
 import { ChatTurnNavigator, turnKey } from "./ChatTurnNavigator";
 import type { AnswerDiagnostics, AnswerSource, DocumentSummary, McpServer, ModelCfg, ThreadNode, ToolStep } from "../types";
@@ -105,15 +106,50 @@ function ReasoningBlock({ text }: { text: string }) {
   if (!text) return null;
   return <details className="chat-reasoning"><summary>{t("思考过程", "Reasoning")}</summary><div>{text}</div></details>;
 }
-function ToolSteps({ steps, mcpServers }: { steps: ToolStep[]; mcpServers: McpServer[] }) {
+/** A truncated step's preview, replaced by the stored complete text page by page on request. */
+function FullToolResult({ preview, source }: { preview: string; source: FullResultSource }) {
+  const { t, locale } = useI18n();
+  const [text, setText] = useState<string | null>(null);
+  const [next, setNext] = useState<number | null>(null);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function load(start: number) {
+    setLoading(true);
+    setError(null);
+    try {
+      const page = await api.toolResult(source.nodeId, source.callIndex, source.requestId, start);
+      setText(current => (start === 0 ? "" : current ?? "") + page.text);
+      setNext(page.next_start);
+      setTotal(page.total_chars);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("完整结果暂时无法读取。", "The full result could not be loaded."));
+    } finally {
+      setLoading(false);
+    }
+  }
+  const busy = loading ? t("读取中…", "Loading…") : null;
+  return <>
+    <div>{text ?? preview}</div>
+    <p className="chat-tool-full">
+      {text === null && <button type="button" className="btn" disabled={loading} onClick={() => void load(0)}>{busy ?? t("查看完整结果", "View full result")}</button>}
+      {text !== null && next !== null && <button type="button" className="btn" disabled={loading} onClick={() => void load(next)}>{busy ?? t("继续加载（已显示 {shown}/{total} 字）", "Load more ({shown} of {total} characters)", { shown: text.length, total })}</button>}
+      {error && <span className="test-bad" role="alert">{localizeError(error, locale)}</span>}
+    </p>
+  </>;
+}
+function ToolSteps({ steps, mcpServers, nodeId }: { steps: ToolStep[]; mcpServers: McpServer[]; nodeId?: number | null }) {
   const { t } = useI18n();
-  const toolLabels: Record<string, string> = { fetch: t("读取网页", "Read webpage"), web_search: t("联网搜索", "Web search"), search_available_tools: t("查找可用工具", "Find available tools"), read_learning_source: t("回查学习记录", "Read learning history"), read_document_source: t("查阅文档", "Read document") };
+  const toolLabels: Record<string, string> = { fetch: t("读取网页", "Read webpage"), web_search: t("联网搜索", "Web search"), search_available_tools: t("查找可用工具", "Find available tools"), read_learning_source: t("回查学习记录", "Read learning history"), read_document_source: t("查阅文档", "Read document"), read_tool_result: t("回看工具结果", "Reread tool result") };
   for (const server of mcpServers) {
     if (managedMcpPreset(server) !== "web-research") continue;
     toolLabels[`mcp_${server.id}_web_search`] = t("联网搜索", "Web search");
     toolLabels[`mcp_${server.id}_read_webpage`] = t("读取网页", "Read webpage");
   }
-  return <>{steps.map((step, i) => <details className="chat-reasoning" key={i}><summary>{toolLabels[step.tool] ?? step.tool}{step.result === null ? t(" · 进行中", " · Running") : t(" · 已完成", " · Done")}</summary>{step.result !== null && <div>{step.result}</div>}</details>)}</>;
+  return <>{steps.map((step, i) => {
+    const source = fullResultSource(step, nodeId);
+    return <details className="chat-reasoning" key={i}><summary>{toolLabels[step.tool] ?? step.tool}{step.result === null ? t(" · 进行中", " · Running") : t(" · 已完成", " · Done")}</summary>{step.result !== null && (source ? <FullToolResult preview={step.result} source={source} /> : <div>{step.result}</div>)}</details>;
+  })}</>;
 }
 /** Numbers only, collapsed by default: how the request was budgeted and what the provider reported. */
 function DiagnosticsBlock({ data }: { data?: AnswerDiagnostics | null }) {
@@ -676,7 +712,7 @@ export function ChatPane(props: Props) {
             {!loading && !visibleThread.length && !showStream && <div className="chat-welcome"><span className="chat-eyebrow">{focusedSeed ? t("从这里展开", "Explore from here") : t("新的起点", "A fresh start")}</span><h2>{focusedSeed ? `「${focusedSeed}」` : treeTitle}</h2><p>{t("想先弄懂什么？", "What would you like to understand first?")}</p></div>}
             {visibleThread.map((node, index) => <section className="chat-turn" data-turn-node={node.node_id} data-turn-key={turnKey(node, index)} key={turnKey(node, index)}>
               <div className="chat-question"><ImageStrip images={node.images ?? []} /><DocumentCards documents={node.documents ?? []} /><div>{node.question}</div><div className="chat-question-actions"><CopyButton text={node.question ?? ""} label={t("复制问题", "Copy question")} /><button onClick={() => editNode(node)} disabled={streaming || attachmentsBusy || node.status === "pending"} title={t("编辑后生成新版本，保留原有问答与分支", "Create a new version while keeping the original conversation and branches")}>{t("编辑", "Edit")}</button></div></div>
-              {node.answer != null && <div className="chat-answer"><div className="chat-answer-label"><span className="chat-answer-dot" />{node.answered_by ?? "AI"}{node.status === "error" || node.status === "interrupted" ? <span>{t("· 未完成", "· Incomplete")}</span> : null}</div><ReasoningBlock text={node.reasoning ?? ""} /><ToolSteps steps={node.steps ?? []} mcpServers={mcpServers} /><div className="chat-markdown" data-answer-node={node.node_id} data-message-id={node.answer_message_id ?? undefined} tabIndex={0}><Markdown text={node.answer} /></div><SourcesLine sources={node.sources ?? []} activeTreeId={activeTreeId} onNavigate={openSource} onOpenSource={onOpenSource} />{node.answer.trim() && <div className="chat-answer-actions"><CopyButton text={node.answer} label={t("复制回答", "Copy answer")} /><button onClick={() => void branchAnswer(node)} disabled={branching || streaming || loading} title={t("从这条回答展开一个新的问题", "Explore a new question from this answer")}><Icon name="tree" />{t("新分支", "New branch")}</button></div>}<DiagnosticsBlock data={node.diagnostics} /></div>}
+              {node.answer != null && <div className="chat-answer"><div className="chat-answer-label"><span className="chat-answer-dot" />{node.answered_by ?? "AI"}{node.status === "error" || node.status === "interrupted" ? <span>{t("· 未完成", "· Incomplete")}</span> : null}</div><ReasoningBlock text={node.reasoning ?? ""} /><ToolSteps steps={node.steps ?? []} mcpServers={mcpServers} nodeId={node.node_id} /><div className="chat-markdown" data-answer-node={node.node_id} data-message-id={node.answer_message_id ?? undefined} tabIndex={0}><Markdown text={node.answer} /></div><SourcesLine sources={node.sources ?? []} activeTreeId={activeTreeId} onNavigate={openSource} onOpenSource={onOpenSource} />{node.answer.trim() && <div className="chat-answer-actions"><CopyButton text={node.answer} label={t("复制回答", "Copy answer")} /><button onClick={() => void branchAnswer(node)} disabled={branching || streaming || loading} title={t("从这条回答展开一个新的问题", "Explore a new question from this answer")}><Icon name="tree" />{t("新分支", "New branch")}</button></div>}<DiagnosticsBlock data={node.diagnostics} /></div>}
               {node.status === "pending" && <div className="chat-retry chat-remote-answer" role="status"><span className="chat-answer-dot is-loading" /><span>{t("正在回答，完成前会自动更新", "Responding. This updates automatically until it finishes.")}</span>{onStopNode && <button onClick={() => onStopNode(node.node_id)}>{t("停止", "Stop")}</button>}</div>}
               {!!node.attempts?.length && <details className="chat-reasoning chat-prior-attempts"><summary>{t("之前的未完成回答（{count}）", "Previous incomplete responses ({count})", { count: node.attempts.length })}</summary>{node.attempts.map(attempt => <div className="chat-markdown" data-answer-node={node.node_id} data-message-id={attempt.message_id} key={attempt.message_id}><Markdown text={attempt.content || t("未收到内容", "No content received")} /></div>)}</details>}
               {(node.status === "error" || node.status === "interrupted") && <div className="chat-retry"><span>{node.status === "interrupted" ? t("回答已停止", "Response stopped") : t("这次回答未完成", "This response is incomplete")}</span><button onClick={() => void send(node)} disabled={streaming || noModel}>{t("重试", "Retry")}</button>{node.error && <details><summary>{t("详情", "Details")}</summary><p>{localizeError(node.error, locale)}</p></details>}</div>}

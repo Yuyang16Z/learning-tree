@@ -39,6 +39,9 @@ CONNECT_TIMEOUT = 30.0
 CALL_TIMEOUT = 60.0
 SHUTDOWN_TIMEOUT = 12.0
 MAX_OUTPUT_CHARS = 24_000
+# The complete text kept beside the bounded model text, for storage and paging. It
+# stays above the store's 2,000,000-character limit so the store can flag a cut.
+MAX_FULL_OUTPUT_CHARS = 2_100_000
 MAX_PENDING_REQUESTS = 32
 # A worker reuses its listed tools this long, unless the server announces a change
 # (notifications/tools/list_changed) or a connection test asks for a fresh list.
@@ -222,13 +225,15 @@ def _bounded(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     return text[: max(0, limit - len(suffix))] + suffix
 
 
-def _safe_structure(value: Any, depth: int = 0) -> Any:
+def _safe_structure(value: Any, depth: int = 0, *, complete: bool = False) -> Any:
+    """Structured content without binary payloads; bounded unless `complete`."""
     if depth > 6:
         return "[结构过深，已省略]"
     if isinstance(value, str):
         if value.startswith("data:") and ";base64," in value[:100]:
             return "[二进制 data URL 已省略]"
-        return _bounded(value, 2000)
+        return value if complete else _bounded(value, 2000)
+    limit = None if complete else 40
     if isinstance(value, dict):
         return {
             str(k): (
@@ -236,50 +241,70 @@ def _safe_structure(value: Any, depth: int = 0) -> Any:
                 if str(k).lower() in {"data", "base64", "blob"}
                 and isinstance(v, str)
                 and len(v) > 1000
-                else _safe_structure(v, depth + 1)
+                else _safe_structure(v, depth + 1, complete=complete)
             )
-            for k, v in list(value.items())[:40]
+            for k, v in list(value.items())[:limit]
         }
     if isinstance(value, (list, tuple)):
-        return [_safe_structure(item, depth + 1) for item in value[:40]]
+        return [_safe_structure(item, depth + 1, complete=complete) for item in value[:limit]]
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return f"[{type(value).__name__}]"
 
 
-def _result_text(result: Any) -> str:
+def _block_text(block: Any) -> str:
+    kind = getattr(block, "type", "")
+    if kind == "text":
+        return block.text
+    if kind in {"image", "audio"}:
+        label = "图片" if kind == "image" else "音频"
+        return (
+            f"[{label}：{getattr(block, 'mimeType', '未知格式')}；"
+            "当前工具通道仅传递文字，二进制内容未发送给模型。]"
+        )
+    if kind == "resource":
+        resource = getattr(block, "resource", None)
+        return (
+            f"[资源 {getattr(resource, 'uri', '')}]\n"
+            f"{getattr(resource, 'text', None) or '[二进制资源内容已省略]'}"
+        )
+    if kind == "resource_link":
+        return f"[资源 {getattr(block, 'name', '')}] {getattr(block, 'uri', '')}"
+    return f"[未展示的 MCP 内容类型：{kind or type(block).__name__}]"
+
+
+def _result_texts(result: Any) -> tuple[str, str]:
+    """(model text bounded to MAX_OUTPUT_CHARS, complete text up to MAX_FULL_OUTPUT_CHARS).
+
+    Both drop binary content the same way; only the complete text keeps every block
+    and the whole of long ones, for storage and paging."""
     parts: list[str] = []
-    length = 0
+    complete: list[str] = []
+    length = complete_length = 0
     for block in result.content:
-        kind = getattr(block, "type", "")
-        if kind == "text":
-            part = block.text
-        elif kind in {"image", "audio"}:
-            label = "图片" if kind == "image" else "音频"
-            part = (
-                f"[{label}：{getattr(block, 'mimeType', '未知格式')}；"
-                "当前工具通道仅传递文字，二进制内容未发送给模型。]"
-            )
-        elif kind == "resource":
-            resource = getattr(block, "resource", None)
-            part = (
-                f"[资源 {getattr(resource, 'uri', '')}]\n"
-                f"{getattr(resource, 'text', None) or '[二进制资源内容已省略]'}"
-            )
-        elif kind == "resource_link":
-            part = f"[资源 {getattr(block, 'name', '')}] {getattr(block, 'uri', '')}"
+        part = _block_text(block)
+        if length < MAX_OUTPUT_CHARS:
+            parts.append(_bounded(part))
+            length += len(parts[-1])
+        if complete_length < MAX_FULL_OUTPUT_CHARS:
+            complete.append(part)
+            complete_length += len(part) + 1
         else:
-            part = f"[未展示的 MCP 内容类型：{kind or type(block).__name__}]"
-        parts.append(_bounded(part))
-        length += len(parts[-1])
-        if length >= MAX_OUTPUT_CHARS:
             break
-    if not parts and getattr(result, "structuredContent", None) is not None:
-        parts.append(json.dumps(_safe_structure(result.structuredContent), ensure_ascii=False))
+    structured = getattr(result, "structuredContent", None)
+    if not parts and structured is not None:
+        parts.append(json.dumps(_safe_structure(structured), ensure_ascii=False))
+        complete.append(json.dumps(_safe_structure(structured, complete=True), ensure_ascii=False))
     text = "\n".join(parts) or "（工具无输出）"
+    full = "\n".join(complete) or "（工具无输出）"
     if getattr(result, "isError", False):
         text = "MCP 工具报告错误：\n" + text
-    return _bounded(text)
+        full = "MCP 工具报告错误：\n" + full
+    return _bounded(text), full[:MAX_FULL_OUTPUT_CHARS]
+
+
+def _result_text(result: Any) -> str:
+    return _result_texts(result)[0]
 
 
 def _transport_error(exc: BaseException) -> bool:
@@ -428,7 +453,7 @@ class _SessionWorker:
                                 request.args,
                                 read_timeout_seconds=timedelta(seconds=CALL_TIMEOUT),
                             )
-                            result = _result_text(response)
+                            result = _result_texts(response)
                     _finish(request.future, value=result)
                 except TimeoutError:
                     self.error = MCPTimeoutError(
@@ -574,15 +599,23 @@ def list_tools(spec: dict, *, refresh: bool = False) -> list[dict]:
         return _worker(spec).submit("list", args={"refresh": refresh})
 
 
-def call_tool(spec: dict, name: str, args: dict) -> str:
-    """Return bounded text. A failed or timed-out tool is never retried here."""
+def call_tool(spec: dict, name: str, args: dict, full: list[str] | None = None) -> str:
+    """Return bounded text. A failed or timed-out tool is never retried here.
+
+    `full`, an optional out-parameter, receives the complete text (up to
+    MAX_FULL_OUTPUT_CHARS) so a caller can store what the bound cut off."""
     try:
-        return _worker(spec).submit("call", name, args)
+        text, complete = _worker(spec).submit("call", name, args)
     except Exception as exc:
         if spec.get("transport") == "http":
             # Remote failures carry no exception text: it could echo request details.
-            return f"MCP 工具 {name} 调用失败：{describe_error(exc, spec)}"
-        return _bounded(f"MCP 工具 {name} 调用失败：{type(exc).__name__}: {exc}", 1600)
+            text = f"MCP 工具 {name} 调用失败：{describe_error(exc, spec)}"
+        else:
+            text = _bounded(f"MCP 工具 {name} 调用失败：{type(exc).__name__}: {exc}", 1600)
+        complete = text
+    if full is not None:
+        full.append(complete)
+    return text
 
 
 _FIXED_MESSAGES = frozenset(

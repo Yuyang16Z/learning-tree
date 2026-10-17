@@ -147,6 +147,7 @@ const diagnostics: [string, string][] = [
   ["该请求头由连接自动设置，不能自定义。", "This header is set by the connection and cannot be customized."],
   ["请求头名称重复。", "Duplicate header name."],
   ["请求头的值不能包含换行。", "Header values cannot contain line breaks."],
+  ["工具结果不存在或已删除。", "This tool result no longer exists or was deleted."],
 ];
 const managedNames: Record<string, [string, string]> = {
   "web-research": ["联网搜索", "Web search"],

@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from uuid import uuid4
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import delete
 from sqlalchemy.orm import defer
@@ -35,6 +35,7 @@ from ..models import (
     Node,
     PreferenceExtraction,
     PreferenceSupplement,
+    ToolResult,
 )
 from ..retrieval import read_retrieval_settings
 from ..schemas import AskIn, BranchIn, ExplainIn, NodePatch, StopIn, TitleIn
@@ -52,6 +53,16 @@ from ..service import (
 )
 from ..title_generation import fallback_title, summarize_question
 from ..tool_catalog import SEARCH_TOOL_DEF, ToolCatalog, needs_catalog, tool_definition_cost
+from ..tool_results import (
+    PREVIEW_CHARS,
+    TOOL_RESULT_TOOL_DEF,
+    TOOL_RESULT_TOOL_NAME,
+    find_result,
+    make_tool_result_reader,
+    page,
+    portable_steps,
+    stored_text,
+)
 from ..tree_identity import record_node_id
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
@@ -103,6 +114,10 @@ class Generation:
 _GENERATIONS: dict[int, Generation] = {}
 _CANCELLED_REQUESTS: dict[tuple[int, str], float] = {}
 _STREAM_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+# Appended to a model-facing tool result whose complete text is longer than it.
+_COMPLETE_RESULT_NOTE = (
+    "\n[完整结果共 {total} 字，已保存；可调用 read_tool_result(call_index={index}) 分页阅读。]"
+)
 
 
 def discard_node_work(node_ids) -> None:
@@ -345,6 +360,30 @@ def get_thread_route(node_id: int, session: Session = Depends(get_session)) -> d
     }
 
 
+@router.get("/{node_id}/tool-results/{call_index}")
+def get_tool_result(
+    node_id: int,
+    call_index: int,
+    request_id: str = Query(min_length=1, max_length=100),
+    start: int = Query(default=0, ge=0),
+    max_chars: int = Query(default=20000, ge=1, le=50000),
+    session: Session = Depends(get_session),
+) -> dict:
+    """One page of the complete text a tool call returned during an answer."""
+    _get(session, node_id)
+    row = find_result(session, node_id, request_id, call_index)
+    if row is None:
+        raise HTTPException(404, "工具结果不存在或已删除。")
+    return {
+        "node_id": node_id,
+        "request_id": request_id,
+        "call_index": call_index,
+        "tool": row.tool_name,
+        "truncated": row.truncated,
+        **page(row.content, start, max_chars),
+    }
+
+
 @router.patch("/{node_id}")
 def patch_node(node_id: int, body: NodePatch, session: Session = Depends(get_session)) -> dict:
     with _REQUEST_LOCK:
@@ -379,6 +418,7 @@ def delete_node(node_id: int, session: Session = Depends(get_session)) -> dict:
         session.execute(delete(PreferenceExtraction).where(PreferenceExtraction.node_id.in_(ids)))
         for message in session.exec(select(Message).where(Message.node_id.in_(ids))).all():
             session.delete(message)
+        session.execute(delete(ToolResult).where(ToolResult.node_id.in_(ids)))
         for memory in session.exec(select(Memory).where(Memory.source_node_id.in_(ids))).all():
             session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory.id))
             session.delete(memory)
@@ -664,6 +704,31 @@ def _persist(target_id: int, generation: Generation, label: str) -> None:
         generation.message_id = message.id
 
 
+def _store_tool_result(
+    target_id: int, generation: Generation, call_index: int, name: str, arguments, text: str
+) -> bool:
+    """Keep the complete text of one call. Like _persist, a late writer cannot add rows
+    to a deleted node or under a request that a retry has replaced."""
+    content, truncated = stored_text(text)
+    with _REQUEST_LOCK, Session(engine) as session:
+        node = session.get(Node, target_id)
+        if not node or node.request_id != generation.request_id:
+            return False
+        session.add(
+            ToolResult(
+                node_id=target_id,
+                request_id=generation.request_id,
+                call_index=call_index,
+                tool_name=name,
+                arguments=arguments if isinstance(arguments, dict) else None,
+                content=content,
+                truncated=truncated,
+            )
+        )
+        session.commit()
+    return True
+
+
 @router.post("/{node_id}/stop")
 def stop(
     node_id: int, body: StopIn | None = Body(default=None), session: Session = Depends(get_session)
@@ -884,7 +949,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     images=previous.images,
                     document_ids=previous.document_ids,
                     reasoning=previous.reasoning,
-                    steps=previous.steps,
+                    steps=portable_steps(previous.steps),
                     diagnostics=previous.diagnostics,
                     sources=previous.sources,
                 )
@@ -958,6 +1023,9 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
         # Provider rounds (estimates, reported usage) collected by stream_chat/run_agent.
         usage: dict = {}
         context_stats: dict = {}
+        # The tool call in progress (numbered from 1) and complete texts by call index.
+        call: dict = {"index": 0, "args": None}
+        complete_texts: dict[int, str] = {}
 
         def report_diagnostics() -> None:
             """Numbers only: never the protected/stable system text held in context_stats."""
@@ -1154,6 +1222,17 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     max_page_chars=max(32, min(1200, (policy.tool_reserve - 1024) // 4)),
                     max_page_items=max(1, min(10, (policy.tool_reserve - 700) // 700)),
                 )
+            # Complete results of this answer's own calls; offered once a tool has run.
+            tool_result_reader = (
+                make_tool_result_reader(
+                    engine,
+                    target_id,
+                    request_id,
+                    max_page_chars=max(200, min(2000, policy.input_budget // 8)),
+                )
+                if context_defs and not is_mock
+                else None
+            )
             if generation.stop.is_set():
                 return
             if context_stats["compacted"] and not is_mock:
@@ -1209,20 +1288,34 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             if tool_defs:
                 execute = make_executor(tool_router)
 
+                def run_tool(name, arguments):
+                    if name == SOURCE_TOOL_NAME and source_reader is not None:
+                        return source_reader(arguments)
+                    if name == DOCUMENT_TOOL_NAME and document_reader is not None:
+                        return document_reader(arguments)
+                    if name == HISTORY_TOOL_NAME and history_search is not None:
+                        return history_search(arguments)
+                    if name == TOOL_RESULT_TOOL_NAME and tool_result_reader is not None:
+                        return tool_result_reader(arguments)
+                    return execute(name, arguments)
+
                 def guarded_execute(name, arguments):
                     if generation.stop.is_set():
                         raise RuntimeError("generation cancelled before tool execution")
                     tool_started = time.monotonic()
                     try:
-                        if name == SOURCE_TOOL_NAME and source_reader is not None:
-                            return source_reader(arguments)
-                        if name == DOCUMENT_TOOL_NAME and document_reader is not None:
-                            return document_reader(arguments)
-                        if name == HISTORY_TOOL_NAME and history_search is not None:
-                            return history_search(arguments)
-                        return execute(name, arguments)
+                        result = run_tool(name, arguments)
                     finally:
                         timings["tools"] += time.monotonic() - tool_started
+                    # The executor may carry the complete text of a bounded MCP result.
+                    text = str(result)
+                    complete = getattr(result, "full", text)
+                    complete_texts[call["index"]] = complete
+                    if len(complete) > len(text):
+                        text += _COMPLETE_RESULT_NOTE.format(
+                            total=len(complete), index=call["index"]
+                        )
+                    return text
 
                 stream = run_agent(
                     spec,
@@ -1233,6 +1326,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     protected_system=context_stats["protected_system"],
                     diagnostics=usage,
                     cache_prefix=context_stats.get("stable_system"),
+                    late_tool_defs=[TOOL_RESULT_TOOL_DEF] if tool_result_reader else None,
                     **({"tool_catalog": tool_catalog, "max_rounds": 6} if tool_catalog else {}),
                     **({"deep": True} if body.deep_think else {}),
                 )
@@ -1252,14 +1346,44 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             for event in stream:
                 if generation.stop.is_set():
                     break
+                kind = event["type"]
+                reference: dict = {}
+                if kind == "tool_start":
+                    # Calls are sequential: this index names the call until its tool_end.
+                    call.update(index=call["index"] + 1, args=event["args"])
+                elif kind == "tool_end":
+                    text = str(event["result"])
+                    complete = complete_texts.pop(call["index"], text)
+                    try:
+                        stored = _store_tool_result(
+                            target_id,
+                            generation,
+                            call["index"],
+                            event["name"],
+                            call["args"],
+                            complete,
+                        )
+                    except Exception:
+                        stored = False  # The preview still reaches the step.
+                    preview = text[:PREVIEW_CHARS]
+                    reference = {"truncated": len(complete) > len(preview)}
+                    if stored:
+                        reference["call_index"] = call["index"]
                 with generation.lock:
-                    kind = event["type"]
                     if kind == "tool_start":
                         outgoing = {"tool_start": {"name": event["name"], "args": event["args"]}}
                     elif kind == "tool_end":
-                        result = str(event["result"])[:3000]
-                        generation.steps.append({"tool": event["name"], "result": result})
-                        outgoing = {"tool_end": {"name": event["name"], "result": result}}
+                        generation.steps.append(
+                            {
+                                "tool": event["name"],
+                                "result": preview,
+                                **reference,
+                                **({"request_id": request_id} if stored else {}),
+                            }
+                        )
+                        outgoing = {
+                            "tool_end": {"name": event["name"], "result": preview, **reference}
+                        }
                     elif kind == "reasoning":
                         generation.reasoning.append(event["text"])
                         outgoing = {"reasoning": event["text"]}

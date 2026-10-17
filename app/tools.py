@@ -43,6 +43,18 @@ TOOL_DEFS: dict[str, dict] = {
 }
 
 
+class ToolText(str):
+    """A tool result as the model receives it; `.full` keeps the complete text when the
+    model text was bounded (MCP output), so the caller can store and page it."""
+
+    full: str
+
+    def __new__(cls, text: str, full: str | None = None):
+        value = super().__new__(cls, text)
+        value.full = text if full is None else full
+        return value
+
+
 def tool_defs_for(names: list[str]) -> list[dict]:
     return [TOOL_DEFS[n] for n in names if n in TOOL_DEFS]
 
