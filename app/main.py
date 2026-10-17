@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
 
+from . import access_token
 from .changes import router as changes_router
 from .config import settings
 from .db import engine, init_db
@@ -62,15 +63,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_LOCAL_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
+_LOCAL_HOSTNAMES = access_token.LOCAL_HOSTNAMES
 _STATE_CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
-
-
-def _hostname(host_header: str) -> str:
-    value = host_header.strip().lower()
-    if value.startswith("["):  # [::1]:8099
-        return value[1:].split("]", 1)[0]
-    return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
+_hostname = access_token.hostname
+# Shown by the app when a phone's pairing is missing, wrong or was rotated.
+PAIRING_REQUIRED = "需要重新配对：请在电脑上打开「设置 → 手机访问」，用手机扫描二维码。"
 
 
 def host_allowed(host_header: str) -> bool:
@@ -102,6 +99,15 @@ async def reject_cross_site_requests(request: Request, call_next):
     if request.method in _STATE_CHANGING and origin is not None:
         if not origin_allowed(origin, host):
             return JSONResponse({"detail": "不允许的跨站请求"}, status_code=403)
+    # Requests from elsewhere (a phone through Tailscale Serve, another host name) need
+    # the pairing cookie; this computer's own requests never do.
+    if (
+        settings.access_token_mode == "required"
+        and access_token.is_remote(request.headers)
+        and not access_token.exempt(request.method, request.url.path)
+        and not access_token.token_matches(request.cookies.get(access_token.COOKIE_NAME))
+    ):
+        return JSONResponse({"detail": PAIRING_REQUIRED}, status_code=401)
     return await call_next(request)
 
 

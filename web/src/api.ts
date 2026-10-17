@@ -1,5 +1,6 @@
 import { readSSE } from "./lib/sse";
 import { toolReference, type ToolReference } from "./lib/toolSteps";
+import { reportPairingRequired } from "./lib/phonePairing";
 import { getLocale, translate } from "./i18n";
 import { localizeError } from "./i18n/workspace";
 import type {
@@ -35,6 +36,8 @@ import type {
 const API = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
 
 async function requestError(res: Response): Promise<Error> {
+  // Another device whose pairing is missing or was rotated: ask it to scan again.
+  reportPairingRequired(res.status, globalThis.location?.hostname);
   let detail: any;
   try { const data = await res.json(); detail = data.detail ?? data; } catch { detail = null; }
   const message = typeof detail === 'string' ? detail : detail?.message;
@@ -261,6 +264,8 @@ export const api = {
   }).then(j<unknown>),
 
   phoneAccess: (signal?: AbortSignal) => fetch(`${API}/phone-access`, { signal, cache: "no-store" }).then(j<PhoneAccess>),
+  // Only this computer may rotate; every paired phone must scan the new QR code.
+  rotatePhoneAccess: () => jsonPost(`${API}/phone-access/rotate`, {}).then(j<PhoneAccess>),
 
   changes: (since: string, signal?: AbortSignal) =>
     fetch(`${API}/changes?${new URLSearchParams({ since })}`, { signal, cache: "no-store" }).then(j<ChangeNotice>),

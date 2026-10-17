@@ -148,6 +148,12 @@ const diagnostics: [string, string][] = [
   ["请求头名称重复。", "Duplicate header name."],
   ["请求头的值不能包含换行。", "Header values cannot contain line breaks."],
   ["工具结果不存在或已删除。", "This tool result no longer exists or was deleted."],
+  ["需要重新配对：请在电脑上打开「设置 → 手机访问」，用手机扫描二维码。", "Pairing required: open Settings → Phone access on the computer and scan the QR code with this phone."],
+  ["配对链接无效或已更换，请在电脑上重新扫描二维码。", "This pairing link is invalid or was replaced. Scan the QR code on the computer again."],
+  ["配对尝试过多，请稍后再试。", "Too many pairing attempts. Try again later."],
+  ["本机访问无需配对。", "Access from this computer needs no pairing."],
+  ["只能在这台电脑上更换访问令牌。", "The access token can only be replaced on this computer."],
+  ["无法保存手机访问令牌，请检查 .runtime 目录的权限。", "Could not save the phone access token. Check the permissions of the .runtime folder."],
 ];
 const managedNames: Record<string, [string, string]> = {
   "web-research": ["联网搜索", "Web search"],

@@ -1002,3 +1002,6 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--teal); outline-
 .mcp-private { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
 .mcp-private input { margin: 0; }
 .mcp-warning { color: var(--danger); margin-bottom: 8px; }
+
+/* A phone whose pairing is missing or was rotated on the computer. */
+.pairing-required { padding: 10px 22px; font-size: 13px; line-height: 1.6; background: var(--err-bg); color: var(--danger); border-bottom: 1px solid var(--err-border); }

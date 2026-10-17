@@ -22,6 +22,7 @@ An occupied port is not forcibly freed. Ctrl+C stops the app. Use one backend pe
 | --- | --- |
 | `branch_learning.db` | Normal chats, model keys, notes, memory, user-managed `PreferenceProfile`, the `RetrievalSettings` scope switches, rebuildable `MemoryEmbedding` vectors, the rebuildable `search_index` full-text table, rebuildable per-model `ModelCalibration` ratios, numeric per-answer diagnostics, the complete text of each answer's tool calls (`ToolResult`, up to 2,000,000 characters per call, removed with its branch or topic and omitted from tree exports) and tool configuration, including remote MCP request headers. |
 | `.runtime/dev.db` | Separate development data and demo configuration. |
+| `.runtime/phone-access-token` | The phone-access token (mode 0600) that paired devices present; replacing or deleting it unpairs every device. |
 | `.runtime/retrieval/models/` | Pinned public embedding/reranker weights; no chat records. |
 | `.backups/` | Private database copies including credentials. |
 | `learning-materials/` | Files exposed to the optional file tool; only its public README is tracked. |
@@ -67,11 +68,13 @@ If the app reports that a question, quotation, image or individual tool definiti
 
 ## Phone access
 
-A phone uses this computer's backend directly, so records, models and MCP settings are shared without any synchronization. The API has no sign-in: reach it only through a private network you control.
+A phone uses this computer's backend directly, so records, models and MCP settings are shared without any synchronization. Requests from this computer need no sign-in; another device pairs once with an access token. Still reach the app only through a private network you control.
 
 1. Install [Tailscale](https://tailscale.com/download) on this computer and the phone, and sign in to the same account.
 2. Run `tailscale serve --bg 8099` once; the setting persists. It serves `https://<computer>.<tailnet>.ts.net` with a certificate, only to devices in your tailnet. HTTPS is required: the app uses browser features that exist only in secure contexts, so a plain `http://` network address cannot send questions.
-3. Open **Settings → Phone access** and scan the QR code. The panel only reads Tailscale status; it never changes it.
+3. Open **Settings → Phone access** on this computer and scan the QR code. Its link carries an access token in the URL fragment: opening it pairs the phone, which exchanges the token for a long-lived, `HttpOnly`, same-site-only cookie and removes it from the address bar. Afterwards the phone can open the plain address. The panel only reads Tailscale status; it never changes it.
+
+A phone that is not paired, or whose token was replaced, shows **This device needs to be paired again**: scan the QR code on this computer again. A phone that used the app before pairing existed must scan the new QR code once. **Replace access token** in the same panel (only on this computer) unpairs every device; deleting `.runtime/phone-access-token` also unpairs them, and opening the panel creates a new token. **Copy pairing link** copies the token-bearing link without showing it; send it only to your own devices. Requests from this computer, scripts such as `integrations/mcp/register.py` and Docker's loopback-published port need no token. If you reach the app under another host name with `ALLOWED_HOSTS`, those requests also need pairing: open `http://<host>:8099/#token=<token>` once with the token from `.runtime/phone-access-token`. `ACCESS_TOKEN_MODE=off` disables the check; use it only on a network you fully control.
 
 Keep the computer awake while you use it remotely, for example by preventing automatic sleep on the power adapter; a sleeping computer cannot answer. An answer started on the phone keeps running if the phone locks, and the page reconnects when it returns to the foreground. Do not use Tailscale Funnel, router port forwarding or public tunnels: anyone who reaches the API can read your records and run MCP programs on this computer. The panel warns when Funnel exposes the app; `tailscale funnel reset` removes the exposure.
 

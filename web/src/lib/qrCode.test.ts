@@ -39,6 +39,12 @@ describe("QR encoding", () => {
     expect(() => qrMatrix("x".repeat(214))).toThrow(RangeError);
   });
 
+  it("fits a pairing link: a long Tailscale address plus a 43-character token", () => {
+    const link = `https://study-macbook-air-2026.tail1a2b3c.ts.net:8443/#token=${"A1_-".repeat(10)}abc`;
+    expect(link.length).toBeLessThan(120);
+    expect(qrMatrix(link).length).toBeLessThanOrEqual(57);
+  });
+
   it("places finder patterns in three corners", () => {
     const matrix = qrMatrix("https://mac.tail0.ts.net");
     const size = matrix.length;

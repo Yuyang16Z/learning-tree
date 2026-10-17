@@ -166,6 +166,10 @@ export interface PhoneAccess {
   url?: string;
   host?: string | null;
   command?: string;
+  /** The address plus "#token=…", given to this computer only; the QR code encodes it. */
+  access_url?: string;
+  /** Fixed message when the token cannot be stored. */
+  access_error?: string;
 }
 export interface MemoryRetrievalStatus {
   state: 'ready' | 'preparing' | 'degraded' | 'disabled' | 'not_installed';
