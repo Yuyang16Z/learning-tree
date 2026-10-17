@@ -84,6 +84,7 @@ _ADDED_COLUMNS = {
         "source_start": "INTEGER",
         "source_end": "INTEGER",
         "learning_note": "TEXT",
+        "understanding": "TEXT",  # Nullable: existing nodes read as "not marked".
         "revision_of": "INTEGER",
         "request_id": "TEXT",
         "title_state": "TEXT NOT NULL DEFAULT 'legacy'",

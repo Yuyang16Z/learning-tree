@@ -33,7 +33,7 @@ from ..models import (
     PreferenceExtraction,
     PreferenceSupplement,
 )
-from ..schemas import NodeOut, TreeIn, TreeOut, TreePatch
+from ..schemas import UNDERSTANDING_LEVELS, NodeOut, TreeIn, TreeOut, TreePatch, Understanding
 from ..search_index import excerpt, search_text
 from ..tree_identity import record_node_id, record_tree_id
 from .nodes import _CANCELLED_REQUESTS, _REQUEST_LOCK, discard_node_work, node_metadata
@@ -144,6 +144,8 @@ class PortableNode(Portable):
     source_start: int | None = Field(default=None, ge=0)
     source_end: int | None = Field(default=None, ge=0)
     learning_note: str | None = Field(default=None, max_length=10000)
+    # Exported only when marked; backups without it import as "not marked".
+    understanding: Understanding | None = None
     revision_of: int | None = None
 
 
@@ -329,8 +331,17 @@ def export_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
         "tree": {"title": tree.title},
         "nodes": [
             {
-                **node.model_dump(exclude={"tree_id", "created_at", "request_id", "title_state"}),
+                **node.model_dump(
+                    exclude={"tree_id", "created_at", "request_id", "title_state", "understanding"}
+                ),
                 "kind": node_metadata(node)["kind"],
+                # Only marked nodes carry the field, so a topic without marks stays
+                # importable by versions that predate it.
+                **(
+                    {"understanding": node.understanding}
+                    if node.understanding in UNDERSTANDING_LEVELS
+                    else {}
+                ),
             }
             for node in nodes
         ],

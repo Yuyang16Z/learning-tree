@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -83,6 +83,11 @@ class TreePatch(BaseModel):
         return self
 
 
+# A learner's own mark on a node; None means "not marked".
+Understanding = Literal["open", "partial", "clear"]
+UNDERSTANDING_LEVELS: tuple[str, ...] = get_args(Understanding)
+
+
 class NodeOut(BaseModel):
     id: int
     tree_id: int
@@ -99,6 +104,7 @@ class NodeOut(BaseModel):
     source_start: int | None = None
     source_end: int | None = None
     learning_note: str | None = None
+    understanding: Understanding | None = None
     revision_of: int | None = None
     request_id: str | None = None
 
@@ -267,7 +273,10 @@ class ExplainIn(BaseModel):
 
 
 class NodePatch(BaseModel):
+    """Only the fields sent are changed; an explicit null clears that field."""
+
     learning_note: str | None = Field(default=None, max_length=10000)
+    understanding: Understanding | None = None
 
 
 class StopIn(BaseModel):
