@@ -48,6 +48,8 @@ export interface AnswerDiagnostics {
   output_tokens: number | null;
   compacted: boolean;
   tool_rounds: number;
+  /** The agent budget that ended the tool rounds early (time limit or tool-result size); null when none did. */
+  tool_budget_stop?: 'time' | 'tokens' | null;
   calibration_ratio: number;
   timings_ms: { retrieval: number; tools: number; summary: number; model: number; total: number };
 }

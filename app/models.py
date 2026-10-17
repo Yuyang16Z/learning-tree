@@ -213,7 +213,8 @@ class Message(SQLModel, table=True):
     reasoning: str | None = None
     # Tool steps: [{"tool":..,"args":..,"result":..}] for collapsible frontend display.
     steps: list | None = Field(default=None, sa_column=Column(JSON))
-    # Per-answer numbers only (token estimates, usage, timings); never prompt text.
+    # Per-answer numbers (token estimates, usage, timings) and fixed labels such as the
+    # budget that stopped tool rounds; never prompt text.
     diagnostics: dict | None = Field(default=None, sa_column=Column(JSON))
     # Memory records the answer was given: [{memory_id, source_node_id, tree_id,
     # tree_title, scope}]. Local provenance only; excluded from exports.

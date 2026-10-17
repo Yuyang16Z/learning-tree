@@ -13,6 +13,7 @@ without an API key.
 
 import inspect
 import json
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from typing import Literal
@@ -20,7 +21,7 @@ from typing import Literal
 from openai import OpenAI
 
 from . import anthropic_provider, model_catalog
-from .context_budget import ContextPolicy, fit_request
+from .context_budget import ContextPolicy, estimate_request_tokens, fit_request
 from .tool_catalog import SEARCH_TOOL_NAME, ToolCatalog
 
 MOCK_ANSWER = (
@@ -344,6 +345,11 @@ def _chat_once(spec: LLMSpec, convo: list[dict], tools: list[dict], deep: bool =
     return _openai_turn(spec, convo, tools)
 
 
+def _tool_message_cost(message: dict) -> int:
+    """Estimated request tokens one tool-result message adds, as request fitting counts it."""
+    return estimate_request_tokens("", [message]) - estimate_request_tokens("", [])
+
+
 def run_agent(
     spec: LLMSpec,
     system: str,
@@ -358,6 +364,8 @@ def run_agent(
     diagnostics: dict | None = None,
     cache_prefix: str | None = None,
     late_tool_defs: list[dict] | None = None,
+    time_limit_seconds: float | None = None,
+    tool_token_budget: int | None = None,
 ) -> Iterator[dict]:
     """Yield events: {"type":"tool_start"|"tool_end"|"reasoning"|"delta", ...}.
 
@@ -372,6 +380,10 @@ def run_agent(
     cache_prefix is the stable head of `system` that a native cache may mark.
     late_tool_defs are advertised only once a tool has executed in this answer (the
     read_tool_result reader), and never in the final no-tool round.
+    time_limit_seconds and tool_token_budget end the tool rounds early: once the loop has
+    run that long, or its tool results reach that many estimated tokens, the next round
+    is the final no-tool round. They are checked between rounds, so a call in progress
+    is never interrupted; diagnostics["tool_budget_stop"] names the budget that stopped.
     """
     if _is_mock(spec):
         # A demo must never launch a real process or invoke a selected external tool.
@@ -386,8 +398,11 @@ def run_agent(
     turn_spec = replace(spec, cache_prefix=cache_prefix) if cache_prefix else spec
 
     executed_any = False
+    started = time.monotonic()
+    tool_tokens = 0
+    budget_stop: str | None = None
     for round_index in range(max_rounds + 1):
-        final = round_index == max_rounds
+        final = round_index == max_rounds or budget_stop is not None
         current_tools = [] if final else tool_catalog.definitions if tool_catalog else tool_defs
         if executed_any and late_tool_defs and not final:
             present = {tool["function"]["name"] for tool in current_tools}
@@ -470,7 +485,18 @@ def run_agent(
                     result = execute(tc["name"], tc["args"])
                     executed_any = True
                 yield {"type": "tool_end", "name": tc["name"], "result": result}
-                convo.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+                tool_message = {"role": "tool", "tool_call_id": tc["id"], "content": result}
+                convo.append(tool_message)
+                tool_tokens += _tool_message_cost(tool_message)
+            # Budgets apply between rounds; only an otherwise-allowed tool round is skipped.
+            if round_index + 1 < max_rounds:
+                elapsed = time.monotonic() - started
+                if time_limit_seconds is not None and elapsed >= time_limit_seconds:
+                    budget_stop = "time"
+                elif tool_token_budget is not None and tool_tokens >= tool_token_budget:
+                    budget_stop = "tokens"
+                if budget_stop and diagnostics is not None:
+                    diagnostics["tool_budget_stop"] = budget_stop
             if streamed and r.get("content"):
                 # Narration streamed before these calls; keep it a paragraph apart
                 # from the text of the next round.

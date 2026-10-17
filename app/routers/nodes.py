@@ -15,6 +15,7 @@ from sqlalchemy.orm import defer
 from sqlmodel import Session, select
 
 from ..calibration import record_usage
+from ..config import settings
 from ..context import BASE_SYSTEM, build_context, context_messages, make_content
 from ..context_budget import ContextBudgetExceeded, ContextPolicy, estimate_request_tokens
 from ..context_sources import SOURCE_TOOL_DEF, SOURCE_TOOL_NAME, make_source_reader
@@ -1049,6 +1050,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 "output_tokens": total("output_tokens"),
                 "compacted": bool(context_stats.get("compacted")),
                 "tool_rounds": int(usage.get("tool_rounds") or 0),
+                # "time" or "tokens" when an agent budget ended the tool rounds early.
+                "tool_budget_stop": usage.get("tool_budget_stop"),
                 "calibration_ratio": round(float(spec.calibration), 3),
                 "timings_ms": {
                     "retrieval": ms(timings["retrieval"]),
@@ -1327,6 +1330,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     diagnostics=usage,
                     cache_prefix=context_stats.get("stable_system"),
                     late_tool_defs=[TOOL_RESULT_TOOL_DEF] if tool_result_reader else None,
+                    time_limit_seconds=settings.agent_time_limit_seconds,
+                    tool_token_budget=settings.agent_tool_token_budget,
                     **({"tool_catalog": tool_catalog, "max_rounds": 6} if tool_catalog else {}),
                     **({"deep": True} if body.deep_think else {}),
                 )

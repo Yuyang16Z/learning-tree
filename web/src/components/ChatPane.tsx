@@ -11,6 +11,7 @@ import { copyText } from "../lib/clipboard";
 import { hasManagedWebSearch, managedMcpPreset, selectedChatTools } from "../lib/chatTools";
 import { matchesDeletedWorkspace, onWorkspaceDeletion, type WorkspaceDeletion } from "../lib/workspace";
 import { fullResultSource, type FullResultSource } from "../lib/toolSteps";
+import { budgetStopLabel } from "../lib/answerDiagnostics";
 import { DocumentCards } from "./DocumentCards";
 import { ChatTurnNavigator, turnKey } from "./ChatTurnNavigator";
 import type { AnswerDiagnostics, AnswerSource, DocumentSummary, McpServer, ModelCfg, ThreadNode, ToolStep } from "../types";
@@ -161,7 +162,7 @@ function DiagnosticsBlock({ data }: { data?: AnswerDiagnostics | null }) {
     ? t("上下文：估算 {est} · 实际 {actual} tokens", "Context: est. {est} · actual {actual} tokens", { est: n(data.estimated_input_tokens), actual: n(data.actual_input_tokens) })
     : t("上下文：估算 {est} tokens", "Context: est. {est} tokens", { est: n(data.estimated_input_tokens) });
   const cached = data.cached_input_tokens ? t("（缓存 {cached}）", " (cached {cached})", { cached: n(data.cached_input_tokens) }) : "";
-  const parts = [context + cached, data.tool_rounds ? t("工具 {rounds} 轮", "{rounds} tool rounds", { rounds: data.tool_rounds }) : null, `${seconds} s`].filter(Boolean);
+  const parts = [context + cached, data.tool_rounds ? t("工具 {rounds} 轮", "{rounds} tool rounds", { rounds: data.tool_rounds }) : null, budgetStopLabel(data.tool_budget_stop, t), `${seconds} s`].filter(Boolean);
   const timing = (label: string, ms: number | undefined) => `${label} ${((ms ?? 0) / 1000).toFixed(2)} s`;
   return <details className="chat-reasoning chat-diagnostics"><summary>{parts.join(" · ")}</summary><div>
     {t("输出 {tokens} tokens", "Output {tokens} tokens", { tokens: n(data.output_tokens) })} · {data.compacted ? t("历史已压缩", "History compacted") : t("历史完整", "Full history")} · {t("校准系数 {ratio}", "Calibration ratio {ratio}", { ratio: (data.calibration_ratio ?? 1).toFixed(2) })}{"\n"}
