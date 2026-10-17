@@ -129,7 +129,8 @@ def test_server(server_id: int, session: Session = Depends(get_session)) -> McpT
         raise HTTPException(404, "MCP server 不存在")
     spec = mcp_client.server_spec_for(srv)
     try:
-        tools = mcp_client.list_tools(spec)
+        # A test always lists again, so an upgraded server's tools show up at once.
+        tools = mcp_client.list_tools(spec, refresh=True)
         names = [t["name"] for t in tools]
         return McpTestOut(ok=True, detail=f"连上了，发现 {len(names)} 个工具", tools=names)
     except Exception as e:  # noqa: BLE001

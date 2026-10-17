@@ -185,8 +185,24 @@ def test_expired_remote_session_reconnects_once_for_discovery(remote, remote_spe
     assert mcp_client.list_tools(remote_spec)
     sessions = stats(remote)["sessions"]
     httpx.get(f"{remote}/control/expire", timeout=5).raise_for_status()
-    assert {tool["name"] for tool in mcp_client.list_tools(remote_spec)} >= {"increment"}
+    refreshed = mcp_client.list_tools(remote_spec, refresh=True)
+    assert {tool["name"] for tool in refreshed} >= {"increment"}
     assert stats(remote)["sessions"] == sessions + 1
+
+
+def test_remote_change_announcement_refreshes_the_cached_list(remote, remote_spec, monkeypatch):
+    listings = []
+    original = mcp_client._SessionWorker._list
+
+    async def counting(session):
+        listings.append(True)
+        return await original(session)
+
+    monkeypatch.setattr(mcp_client._SessionWorker, "_list", staticmethod(counting))
+    assert mcp_client.list_tools(remote_spec) and mcp_client.list_tools(remote_spec)
+    assert len(listings) == 1
+    assert mcp_client.call_tool(remote_spec, "announce", {}) == "announced"
+    assert mcp_client.list_tools(remote_spec) and len(listings) == 2
 
 
 def test_remote_checks_refuse_private_unresolvable_and_credentialed_urls(monkeypatch):
@@ -413,13 +429,15 @@ def test_connection_test_reports_fixed_messages_only(api, monkeypatch):
     seen = []
 
     def failing(spec, *args, **kwargs):
-        seen.append(spec)
+        seen.append((spec, kwargs))
         raise RuntimeError(f"upstream echoed Authorization: Bearer {SECRET}")
 
     monkeypatch.setattr(mcp_client, "list_tools", failing)
     result = client.post(f"/mcp/{sid}/test").json()
     assert result == {"ok": False, "detail": mcp_client.CONNECTION_FAILED, "tools": []}
-    assert seen[0]["headers"] == REMOTE["headers"] and seen[0]["url"] == REMOTE["url"]
+    spec, options = seen[0]
+    assert spec["headers"] == REMOTE["headers"] and spec["url"] == REMOTE["url"]
+    assert options == {"refresh": True}  # A test never answers from the tool-list cache.
     for error, expected in (
         (mcp_client.MCPRemoteStatusError(403), mcp_client.REMOTE_DENIED),
         (mcp_client.MCPRemoteStatusError(404), mcp_client.REMOTE_NOT_FOUND),

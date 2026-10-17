@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import concurrent.futures
+import copy
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ import shutil
 import socket
 import sys
 import threading
+import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import timedelta
@@ -25,7 +27,7 @@ from typing import Any
 
 import anyio
 import httpx
-from mcp import ClientSession, StdioServerParameters
+from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import get_default_environment, stdio_client
 from mcp.client.streamable_http import StreamableHTTPError, streamable_http_client
 from mcp.shared.exceptions import McpError
@@ -38,6 +40,9 @@ CALL_TIMEOUT = 60.0
 SHUTDOWN_TIMEOUT = 12.0
 MAX_OUTPUT_CHARS = 24_000
 MAX_PENDING_REQUESTS = 32
+# A worker reuses its listed tools this long, unless the server announces a change
+# (notifications/tools/list_changed) or a connection test asks for a fresh list.
+TOOLS_CACHE_SECONDS = 60.0
 # Remote servers: 30 s to connect and write, five minutes between streamed events.
 HTTP_TIMEOUT = httpx.Timeout(30.0, read=300.0)
 # The SDK reports a POST answered 404 (an expired server session) with this code.
@@ -349,6 +354,11 @@ class _SessionWorker:
         self.cancel_sent = False
         self.error: BaseException | None = None
         self.active: _Request | None = None
+        # Tool-list cache, owned by the actor. The session's message handler only sets
+        # the stale flag (on this loop), never touching the registry lock.
+        self.tools: list[dict] | None = None
+        self.tools_listed_at = 0.0
+        self.tools_stale = False
         self.thread = threading.Thread(target=self._run, name="learning-tree-mcp", daemon=True)
         self.thread.start()
 
@@ -395,7 +405,12 @@ class _SessionWorker:
                 else:
                     read, write = await stack.enter_async_context(stdio_client(_params(self.spec)))
                 session = await stack.enter_async_context(
-                    ClientSession(read, write, read_timeout_seconds=timedelta(seconds=CALL_TIMEOUT))
+                    ClientSession(
+                        read,
+                        write,
+                        read_timeout_seconds=timedelta(seconds=CALL_TIMEOUT),
+                        message_handler=self._on_message,
+                    )
                 )
                 await session.initialize()
             while self.accepting:
@@ -406,7 +421,7 @@ class _SessionWorker:
                 try:
                     async with asyncio.timeout(CALL_TIMEOUT):
                         if request.operation == "list":
-                            result = await self._list(session)
+                            result = await self._cached_list(session, request.args.get("refresh"))
                         else:
                             response = await session.call_tool(
                                 request.name,
@@ -442,13 +457,33 @@ class _SessionWorker:
                 finally:
                     self.active = None
 
+    async def _on_message(self, message) -> None:
+        """ClientSession forwards server notifications here; a tool-list change is not
+        handled by the SDK itself, so mark the cached list stale for the next request."""
+        if isinstance(message, types.ServerNotification) and isinstance(
+            message.root, types.ToolListChangedNotification
+        ):
+            self.tools_stale = True
+
+    async def _cached_list(self, session: ClientSession, refresh: bool = False) -> list[dict]:
+        expired = time.monotonic() - self.tools_listed_at >= TOOLS_CACHE_SECONDS
+        if refresh or self.tools is None or self.tools_stale or expired:
+            # Clear first: a failed listing leaves no stale copy behind, and a change
+            # announced while listing marks the new list stale again.
+            self.tools, self.tools_stale = None, False
+            self.tools = await self._list(session)
+            self.tools_listed_at = time.monotonic()
+        return copy.deepcopy(self.tools)
+
     @staticmethod
     async def _list(session: ClientSession) -> list[dict]:
         tools: list[dict] = []
         cursor: str | None = None
         seen: set[str] = set()
         for _ in range(100):
-            response = await session.list_tools(cursor=cursor)
+            response = await session.list_tools(
+                params=types.PaginatedRequestParams(cursor=cursor) if cursor else None
+            )
             tools.extend(
                 {
                     "name": tool.name,
@@ -526,14 +561,17 @@ def _worker(spec: dict) -> _SessionWorker:
         return worker
 
 
-def list_tools(spec: dict) -> list[dict]:
-    """Read every page; reconnect once after transport loss, never replay tools."""
+def list_tools(spec: dict, *, refresh: bool = False) -> list[dict]:
+    """Read every page; reconnect once after transport loss, never replay tools.
+
+    The worker reuses its last list for TOOLS_CACHE_SECONDS unless the server announced
+    a change; refresh=True (a connection test) always lists again."""
     worker = _worker(spec)
     try:
-        return worker.submit("list")
+        return worker.submit("list", args={"refresh": refresh})
     except MCPConnectionError:
         invalidate(spec, _expected=worker)
-        return _worker(spec).submit("list")
+        return _worker(spec).submit("list", args={"refresh": refresh})
 
 
 def call_tool(spec: dict, name: str, args: dict) -> str:
