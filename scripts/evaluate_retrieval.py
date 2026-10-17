@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline evaluation harness for a LearningTree database.
+"""Offline evaluation of memory retrieval, topic search and the token estimator.
 
 Evaluate a temporary copy of your own database, or a deterministic synthetic fixture:
 
@@ -11,23 +11,29 @@ into a fresh private temporary directory; DATABASE_URL points at that copy befor
 any application module is imported, app.main is never imported, nothing is
 written next to the source, and the copy is deleted afterwards. No model API is
 called and no weights are downloaded (--hybrid only loads cached local models).
-The JSON report holds ids and counts: no absolute paths and no question, answer,
-fact, note or title text.
+The JSON report holds ids, counts, scores and timings: no absolute paths and,
+unless --include-text is given, no question, answer, fact, note or title text.
+Relevance labels are structural proxies, not human judgments. See
+docs/retrieval-evaluation.md.
 """
 
 import argparse
 import json
+import math
 import os
 import platform
+import re
 import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 from collections import Counter
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -36,6 +42,14 @@ DEFAULT_OUTPUT = ROOT / "artifacts" / "retrieval-evaluation.json"
 WORKSPACE_PREFIX = "learning-tree-eval-"
 # Scope name -> (include_siblings, include_other_trees), as saved in RetrievalSettings.
 SCOPES = {"path": (False, False), "tree": (True, False), "all": (True, True)}
+# (context window, answer reserve): the default model settings and a 1M-token window.
+POLICIES = ((32768, 4096), (1048576, 4096))
+SEARCH_LIMIT = 20  # Default page of GET /trees/{id}/search.
+MIN_TERM_CHARS = 3  # Trigram full-text search needs three characters.
+MAX_TERM_CHARS = 300  # Query limit of GET /trees/{id}/search.
+# superseded_by value that hides a not-yet-extracted fact on the copy; ids start at 1.
+HIDDEN = 0
+_INVALID_SOURCE_STATES = {"pending", "error", "interrupted"}
 _SQLITE_HEADER = b"SQLite format 3\x00"
 _SIDECARS = ("-wal", "-shm", "-journal")
 _ENVIRONMENT = (
@@ -45,6 +59,8 @@ _ENVIRONMENT = (
     "HF_HUB_OFFLINE",
     "TRANSFORMERS_OFFLINE",
 )
+_CJK_RUN = re.compile("[぀-ヿ㐀-䶿一-鿿가-힯豈-﫿]+")
+_WORD = re.compile(r"[A-Za-z0-9_]+")
 
 
 class EvaluationError(Exception):
@@ -774,6 +790,151 @@ def load_snapshot(engine) -> _Snapshot:
     return _Snapshot(archived, nodes, messages, facts, questions, answered, skipped)
 
 
+# ---------- Statistics ----------
+
+
+def _percentile(ordered: list[float], fraction: float) -> float:
+    position = (len(ordered) - 1) * fraction
+    low, high = math.floor(position), math.ceil(position)
+    return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
+
+
+def summarize(values, digits: int = 3) -> dict:
+    """Count, extremes, mean and linearly interpolated percentiles."""
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        return {"count": 0}
+    result = {"count": len(ordered), "min": round(ordered[0], digits)}
+    for name, fraction in (("p50", 0.5), ("p90", 0.9), ("p95", 0.95), ("p99", 0.99)):
+        result[name] = round(_percentile(ordered, fraction), digits)
+    result["max"] = round(ordered[-1], digits)
+    result["mean"] = round(sum(ordered) / len(ordered), digits)
+    return result
+
+
+def _share(part: int, whole: int) -> float | None:
+    return round(part / whole, 4) if whole else None
+
+
+# ---------- (a) Estimator comparison per learning path ----------
+
+
+def content_units(message: _Message, measure) -> int:
+    """One wire message's content cost as estimate_request_tokens counts it (no role overhead).
+
+    `measure` is text_tokens for the byte estimator or estimate_text_tokens; a question
+    with images is a list of a text part and image parts, as context.make_content builds.
+    """
+    from app.context_budget import IMAGE_TOKEN_RESERVE
+
+    if not message.images:
+        return measure(message.content)
+    part = {"type": "text", "text": message.content}
+    serialized = json.dumps(part, ensure_ascii=False, separators=(",", ":"))
+    return measure(serialized) + 16 + message.images * (IMAGE_TOKEN_RESERVE + 64)
+
+
+def measure_estimator(snapshot: _Snapshot, compaction_ratio: float) -> dict:
+    """UTF-8 bytes versus the character-class estimate for every learning path."""
+    from app.context import _full_system, context_messages
+    from app.context_budget import ContextPolicy, estimate_text_tokens, text_tokens
+
+    policies = [ContextPolicy(window, output, 1.0, compaction_ratio) for window, output in POLICIES]
+    units: dict[int, tuple[int, int]] = {}
+
+    def cost(message: _Message) -> tuple[int, int]:
+        if message.id not in units:
+            units[message.id] = (
+                content_units(message, text_tokens),
+                content_units(message, estimate_text_tokens),
+            )
+        return units[message.id]
+
+    paths = []
+    for node_id in sorted(snapshot.answered):
+        node = snapshot.nodes[node_id]
+        ancestors = [
+            (snapshot.nodes[item], snapshot.messages.get(item, []))
+            for item in _ancestry(snapshot.nodes, node)
+        ]
+        system = _full_system(ancestors, node, "")
+        sent = [
+            message
+            for _, messages in [*ancestors, (node, snapshot.messages.get(node_id, []))]
+            for message in context_messages(messages)
+        ]
+        text = "\n".join([system, *(message.content for message in sent)])
+        # Same structure as estimate_request_tokens: system + 64, then 48 per message.
+        request = [text_tokens(system) + 64, estimate_text_tokens(system) + 64]
+        for message in sent:
+            in_bytes, in_units = cost(message)
+            request[0] += 48 + in_bytes
+            request[1] += 48 + in_units
+        paths.append(
+            {
+                "node_id": node_id,
+                "tree_id": node.tree_id,
+                "depth": len(ancestors) + 1,
+                "messages": len(sent),
+                "images": sum(message.images for message in sent),
+                "text_bytes": text_tokens(text),
+                "text_estimate": estimate_text_tokens(text),
+                "request_bytes": request[0],
+                "request_estimate": request[1],
+            }
+        )
+    outcomes = []
+    for policy in policies:
+        by_bytes = sum(path["request_bytes"] > policy.compaction_budget for path in paths)
+        by_units = sum(path["request_estimate"] > policy.compaction_budget for path in paths)
+        outcomes.append(
+            {
+                "window_tokens": policy.window_tokens,
+                "output_tokens": policy.output_tokens,
+                "input_budget": policy.input_budget,
+                "compaction_budget": policy.compaction_budget,
+                "would_compact": {"utf8_bytes": by_bytes, "estimate": by_units},
+                "would_compact_share": {
+                    "utf8_bytes": _share(by_bytes, len(paths)),
+                    "estimate": _share(by_units, len(paths)),
+                },
+            }
+        )
+    return {
+        "definition": (
+            "One learning path per node with a completed answer: the system prompt that path "
+            "gets plus every completed question and answer from the root, as a follow-up from "
+            "that node would carry them, without retrieved memories, document excerpts, tool "
+            "definitions or the follow-up itself. text_* measure that text; request_* add the "
+            "per-message overheads and image reservations of estimate_request_tokens. "
+            "utf8_bytes counts text as the earlier UTF-8 byte estimator did; estimate uses "
+            "estimate_text_tokens."
+        ),
+        "paths": len(paths),
+        "text_bytes": summarize((path["text_bytes"] for path in paths), 1),
+        "text_estimate": summarize((path["text_estimate"] for path in paths), 1),
+        "bytes_per_estimated_unit": summarize(
+            (path["text_bytes"] / path["text_estimate"] for path in paths if path["text_estimate"]),
+            4,
+        ),
+        "compaction_ratio": compaction_ratio,
+        "policies": outcomes,
+        "cases": paths,
+    }
+
+
+# ---------- (c) Topic full-text search ----------
+
+
+def key_term(question: str) -> str | None:
+    """The longest CJK run, otherwise the longest ASCII word, of at least three characters."""
+    for pattern in (_CJK_RUN, _WORD):
+        candidates = [run for run in pattern.findall(question) if len(run) >= MIN_TERM_CHARS]
+        if candidates:
+            return max(candidates, key=len)[:MAX_TERM_CHARS]
+    return None
+
+
 def _index_ready(engine) -> bool:
     from app.search_index import INDEX_TABLE, fts5_available
 
@@ -784,13 +945,185 @@ def _index_ready(engine) -> bool:
         return bool(fts5_available(connection) and exists)
 
 
-def semantic_status(hybrid: bool) -> dict:
-    """Readiness of the local semantic models for --hybrid; never downloads weights."""
+def measure_search(engine, snapshot: _Snapshot, include_text: bool) -> dict:
+    from sqlmodel import Session
+
+    from app.search_index import search_text
+
+    cases, skipped = [], 0
+    for question in snapshot.questions:
+        term = key_term(question.text)
+        if term is None:
+            skipped += 1
+            continue
+        with Session(engine) as session:
+            started = time.perf_counter()
+            hits = search_text(session, term, tree_id=question.tree_id, limit=SEARCH_LIMIT)
+            elapsed = (time.perf_counter() - started) * 1000
+        rank = next((hit.rank for hit in hits if hit.node_id == question.node_id), None)
+        case_ = {
+            "question_message_id": question.message_id,
+            "node_id": question.node_id,
+            "tree_id": question.tree_id,
+            "term_chars": len(term),
+            "hits": len(hits),
+            "by_kind": dict(Counter(hit.kind for hit in hits)),
+            "node_found": rank is not None,
+            "node_rank": rank,
+            "latency_ms": round(elapsed, 3),
+        }
+        if include_text:
+            case_["term"] = term
+        cases.append(case_)
+    found = sum(case_["node_found"] for case_ in cases)
+    return {
+        "definition": (
+            "For each completed question, the full-text part of the map search (search_text, "
+            f"limit {SEARCH_LIMIT}) runs in the question's topic with its key term: the longest "
+            f"CJK run, otherwise the longest ASCII word, of at least {MIN_TERM_CHARS} "
+            "characters. node_found says whether any hit belongs to the question's own node."
+        ),
+        "index": "fts5" if _index_ready(engine) else "like",
+        "queries": len(cases),
+        "skipped_without_term": skipped,
+        "hits": summarize((case_["hits"] for case_ in cases), 1),
+        "by_kind": dict(sum((Counter(case_["by_kind"]) for case_ in cases), Counter())),
+        "node_found": found,
+        "node_found_share": _share(found, len(cases)),
+        "node_rank": summarize(
+            (case_["node_rank"] for case_ in cases if case_["node_rank"] is not None), 1
+        ),
+        "latency_ms": summarize(case_["latency_ms"] for case_ in cases),
+        "cases": cases,
+    }
+
+
+# ---------- (b) Memory retrieval with proxy labels ----------
+
+
+class FactTimeline:
+    """Replays, on the copy, which facts existed when each question was asked.
+
+    A fact counts from its created_at; a superseded fact stops counting once the fact
+    that replaced it was created. Hidden facts get a temporary superseded_by of 0, which
+    retrieval and the search index already skip; restore() writes the original values
+    back. Questions must be visited in time order after reset().
+    """
+
+    def __init__(self, engine, facts: list[_Fact]) -> None:
+        self.engine = engine
+        self.original = {fact.id: fact.superseded_by for fact in facts}
+        created = {fact.id: fact.created_at for fact in facts}
+        self.initial: dict[int, int | None] = {}
+        events = []
+        for fact in facts:
+            retired = None
+            if fact.superseded_by is not None:
+                retired = created.get(fact.superseded_by) or fact.updated_at
+            superseded = fact.superseded_by
+            if fact.created_at is None:
+                self.initial[fact.id] = superseded if superseded and retired is None else None
+                if superseded and retired is not None:
+                    events.append((retired, fact.id, superseded))
+                continue
+            self.initial[fact.id] = HIDDEN
+            if superseded is None:
+                events.append((fact.created_at, fact.id, None))
+            elif retired is None or retired <= fact.created_at:
+                events.append((fact.created_at, fact.id, superseded))
+            else:
+                events.append((fact.created_at, fact.id, None))
+                events.append((retired, fact.id, superseded))
+        self.events = sorted(events, key=lambda event: (event[0], event[1]))
+        self.current = dict(self.original)  # What the copy holds right now.
+        self.reset()
+
+    def reset(self) -> None:
+        self.state = dict(self.initial)
+        self.position = 0
+        self.dirty = set(self.state)
+
+    def advance(self, moment: datetime) -> None:
+        """Show the facts as they were just before `moment`."""
+        while self.position < len(self.events) and self.events[self.position][0] < moment:
+            _, fact_id, value = self.events[self.position]
+            self.state[fact_id] = value
+            self.dirty.add(fact_id)
+            self.position += 1
+        self._write({fact_id: self.state[fact_id] for fact_id in self.dirty})
+        self.dirty.clear()
+
+    def visible(self, fact_id: int) -> bool:
+        return self.state.get(fact_id, HIDDEN) is None
+
+    def restore(self) -> None:
+        self._write(self.original)
+
+    def _write(self, target: dict[int, int | None]) -> None:
+        from sqlalchemy import text
+
+        changes = [
+            {"value": value, "id": fact_id}
+            for fact_id, value in target.items()
+            if self.current[fact_id] != value
+        ]
+        if not changes:
+            return
+        with self.engine.begin() as connection:
+            connection.execute(
+                text("UPDATE memory SET superseded_by = :value WHERE id = :id"), changes
+            )
+        for change in changes:
+            self.current[change["id"]] = change["value"]
+
+
+class _LexicalOnly:
+    """A backend that refuses, so retrieve_memory takes its keyword path, as in lexical mode."""
+
+    model_key = "lexical-evaluation"
+
+    def embed_query(self, *args):
+        raise RuntimeError("semantic retrieval is not part of this evaluation")
+
+    embed_documents = rerank = embed_query
+
+
+class _RecordingBackend:
+    """Delegates to the local models and counts attempts, so silent fallbacks are visible."""
+
+    def __init__(self, inner) -> None:
+        self.inner = inner
+        self.model_key = inner.model_key
+        self.queries = 0
+        self.failures = 0
+
+    def embed_query(self, query):
+        self.queries += 1
+        try:
+            return self.inner.embed_query(query)
+        except Exception:
+            self.failures += 1
+            raise
+
+    def embed_documents(self, documents):
+        try:
+            return self.inner.embed_documents(documents)
+        except Exception:
+            self.failures += 1
+            raise
+
+    def rerank(self, query, documents):
+        return self.inner.rerank(query, documents)
+
+
+def semantic_backend(hybrid: bool):
+    """The backend to evaluate with and its readiness; never downloads weights."""
     if not hybrid:
-        return {"state": "lexical", "embedding_ready": False}
+        return _LexicalOnly(), {"state": "lexical", "embedding_ready": False}
     from app.semantic_models import get_backend
 
-    status = get_backend().prepare(allow_download=False)
+    backend = get_backend()
+    status = backend.prepare(allow_download=False)
     if not status.get("embedding_ready"):
         state = status.get("state")
         if state == "not_installed":
@@ -803,7 +1136,215 @@ def semantic_status(hybrid: bool) -> dict:
             f"Hybrid retrieval was requested, but the local semantic models are unavailable "
             f"(state: {state}); {hint}. Nothing was evaluated."
         )
-    return status
+    return _RecordingBackend(backend), status
+
+
+def _proxy(entries: list[tuple[int, int, int | None]], k: int) -> dict:
+    """recall@k, hit rate@k and MRR@k over (found in top k, relevant, first rank)."""
+    if not entries:
+        return {"cases": 0, "recall_at_k": None, "hit_rate_at_k": None, "mrr_at_k": None}
+    return {
+        "cases": len(entries),
+        "recall_at_k": round(
+            sum(found / min(relevant, k) for found, relevant, _ in entries) / len(entries), 4
+        ),
+        "hit_rate_at_k": round(sum(found > 0 for found, _, _ in entries) / len(entries), 4),
+        "mrr_at_k": round(sum(1 / rank if rank else 0 for _, _, rank in entries) / len(entries), 4),
+    }
+
+
+def _label(ranked: list[int], relevant: set[int], k: int) -> dict:
+    top = ranked[:k]
+    rank = next((position for position, item in enumerate(top, 1) if item in relevant), None)
+    return {"relevant": len(relevant), "found": sum(item in relevant for item in top), "rank": rank}
+
+
+def _read_scope_row(engine):
+    from sqlmodel import Session
+
+    from app.models import RetrievalSettings
+
+    with Session(engine) as session:
+        row = session.get(RetrievalSettings, 1)
+        return (
+            None if row is None else (row.include_siblings, row.include_other_trees, row.revision)
+        )
+
+
+def _write_scope_row(engine, values) -> None:
+    """Save RetrievalSettings on the copy: (siblings, other topics, revision) or None."""
+    from sqlmodel import Session
+
+    from app.models import RetrievalSettings
+
+    with Session(engine) as session:
+        row = session.get(RetrievalSettings, 1)
+        if values is None:
+            if row is not None:
+                session.delete(row)
+        else:
+            row = row or RetrievalSettings(id=1)
+            row.include_siblings, row.include_other_trees, row.revision = values
+            session.add(row)
+        session.commit()
+
+
+def measure_retrieval(
+    engine, snapshot: _Snapshot, scopes: list[str], k: int, backend, include_text: bool
+) -> dict:
+    from sqlmodel import Session
+
+    from app.retrieval import RetrievalConfig, read_retrieval_settings, retrieve_memory
+
+    valid_nodes = {
+        node_id
+        for node_id, node in snapshot.nodes.items()
+        if node.status not in _INVALID_SOURCE_STATES
+    }
+    by_node: dict[int, list[_Fact]] = {}
+    for fact in snapshot.facts:
+        source = snapshot.nodes.get(fact.source_node_id)
+        if source is not None and source.id in valid_nodes and source.tree_id == fact.tree_id:
+            by_node.setdefault(fact.source_node_id, []).append(fact)
+    fact_types = {fact.id: fact.fact_type for fact in snapshot.facts}
+    timeline = FactTimeline(engine, snapshot.facts)
+    saved_scope = _read_scope_row(engine)
+    labels: dict[int, tuple[list, tuple | None]] = {}
+    cases, summaries = [], {}
+    recording = isinstance(backend, _RecordingBackend)
+
+    def run(session, question, config):
+        return retrieve_memory(
+            session,
+            question.tree_id,
+            list(question.path),
+            question.text,
+            quoted_text=question.quote,
+            existing_text=question.existing,
+            config=config,
+            backend=backend,
+        )
+
+    try:
+        for scope in scopes:
+            siblings, others = SCOPES[scope]
+            _write_scope_row(engine, (siblings, others, uuid4().hex))
+            timeline.reset()
+            warmed = False
+            latencies, returned, modes, types = [], Counter(), Counter(), Counter()
+            sizes, self_entries, parent_entries = [], [], []
+            reranked = eligible = fallbacks = 0
+            for question in snapshot.questions:
+                timeline.advance(question.moment)
+                if question.message_id not in labels:
+                    thread = [
+                        (
+                            node_id,
+                            {f.id for f in by_node.get(node_id, ()) if timeline.visible(f.id)},
+                        )
+                        for node_id in question.thread
+                    ]
+                    parent = None
+                    if question.parent_id is not None:
+                        parent = (
+                            question.parent_id,
+                            {
+                                f.id
+                                for f in by_node.get(question.parent_id, ())
+                                if timeline.visible(f.id)
+                            },
+                        )
+                    labels[question.message_id] = (thread, parent)
+                thread, parent = labels[question.message_id]
+                with Session(engine) as session:
+                    # The same settings read and config that service.fetch_memory_note uses.
+                    stored = read_retrieval_settings(session)
+                    config = RetrievalConfig(
+                        include_siblings=stored.include_siblings,
+                        include_other_trees=stored.include_other_trees,
+                    )
+                    if not warmed:
+                        run(session, question, config)  # Untimed warm-up per scope.
+                        warmed = True
+                    attempts = (backend.queries, backend.failures) if recording else (0, 0)
+                    started = time.perf_counter()
+                    result = run(session, question, config)
+                    elapsed = (time.perf_counter() - started) * 1000
+                ranked = [item.memory_id for item in result.facts]
+                origins = Counter(item.scope for item in result.facts)
+                case_ = {
+                    "scope": scope,
+                    "question_message_id": question.message_id,
+                    "node_id": question.node_id,
+                    "tree_id": question.tree_id,
+                    "returned": {name: origins.get(name, 0) for name in ("path", "tree", "other")},
+                    "memory_ids": ranked,
+                    "mode": result.mode,
+                    "reranked": result.reranked,
+                    "latency_ms": round(elapsed, 3),
+                    "self": [],
+                    "parent": None,
+                }
+                if recording:
+                    tried = backend.queries > attempts[0]
+                    eligible += tried
+                    fallbacks += tried and (
+                        backend.failures > attempts[1] or result.mode != "hybrid"
+                    )
+                for node_id, relevant in thread:
+                    if relevant:
+                        label = _label(ranked, relevant, k)
+                        case_["self"].append({"source_node_id": node_id, **label})
+                        self_entries.append((label["found"], label["relevant"], label["rank"]))
+                if parent and parent[1]:
+                    label = _label(ranked, parent[1], k)
+                    case_["parent"] = {"source_node_id": parent[0], **label}
+                    parent_entries.append((label["found"], label["relevant"], label["rank"]))
+                if include_text:
+                    case_["question"] = question.text
+                    case_["facts"] = [item.content for item in result.facts]
+                cases.append(case_)
+                latencies.append(elapsed)
+                sizes.append(len(ranked))
+                returned.update(origins)
+                modes[result.mode] += 1
+                reranked += result.reranked
+                types.update(fact_types.get(memory_id, "conclusion") for memory_id in ranked)
+            summaries[scope] = {
+                "queries": len(snapshot.questions),
+                "with_facts": sum(size > 0 for size in sizes),
+                "returned": {name: returned.get(name, 0) for name in ("path", "tree", "other")},
+                "returned_per_query": summarize(sizes, 2),
+                "by_fact_type": dict(sorted(types.items())),
+                "modes": dict(modes),
+                "reranked": reranked,
+                "semantic_attempts": eligible,
+                "semantic_fallbacks": fallbacks,
+                "latency_ms": summarize(latencies),
+                "self_recall": _proxy(self_entries, k),
+                "parent_recall": _proxy(parent_entries, k),
+            }
+    finally:
+        timeline.restore()
+        _write_scope_row(engine, saved_scope)
+    return {
+        "definition": (
+            "Every completed question is replayed through retrieve_memory with its node's "
+            "learning path, quote and note, against the facts that existed when it was asked "
+            "(created earlier and not yet superseded), once per scope with RetrievalSettings "
+            "saved on the copy. Rank is the position in the rendered fact list (path facts, "
+            "then other branches, then other topics). Labels are structural proxies, not human "
+            "relevance judgments: self = facts from the question's own node and the earlier "
+            "turns of its follow-up thread, scored once per source node; parent = facts from "
+            "the parent node. recall_at_k = relevant facts in the top k / min(k, relevant); "
+            "hit_rate_at_k = share with at least one in the top k; mrr_at_k = mean of 1/rank "
+            "of the first relevant fact within the top k. Latency times the retrieve_memory "
+            "call after one untimed warm-up per scope."
+        ),
+        "k": k,
+        "scopes": summaries,
+        "cases": cases,
+    }
 
 
 # ---------- Report ----------
@@ -835,18 +1376,46 @@ def _database_counts(engine, snapshot: _Snapshot) -> dict:
     }
 
 
-def evaluate(database: Path, args, status: dict, preloaded: bool) -> dict:
-    """Describe the copy at `database`."""
+def evaluate(database: Path, args, backend, status: dict, preloaded: bool) -> dict:
+    """All measurements, on the copy at `database`."""
+    from app.config import settings
+
     _check_binding(database, preloaded)
     engine = _engine(database)
     try:
         prepare_copy(engine)
         snapshot = load_snapshot(engine)
+        started = time.perf_counter()
+        estimator = measure_estimator(snapshot, settings.context_compaction_ratio)
+        search_started = time.perf_counter()
+        search = measure_search(engine, snapshot, args.include_text)
+        retrieval_started = time.perf_counter()
+        retrieval = measure_retrieval(
+            engine, snapshot, args.scopes, args.k, backend, args.include_text
+        )
+        finished = time.perf_counter()
         counts = _database_counts(engine, snapshot)
     finally:
         engine.dispose()
+    attempts = sum(item["semantic_attempts"] for item in retrieval["scopes"].values())
+    fallbacks = sum(item["semantic_fallbacks"] for item in retrieval["scopes"].values())
+    hybrid_cases = sum(item["modes"].get("hybrid", 0) for item in retrieval["scopes"].values())
+    semantic = {
+        "requested": args.hybrid,
+        "state": status.get("state"),
+        "embedding_ready": bool(status.get("embedding_ready")),
+        "reranker_ready": bool(status.get("reranker_ready")),
+        "semantic_attempts": attempts,
+        "hybrid_cases": hybrid_cases,
+        "fallback_cases": fallbacks,
+        "achieved": bool(args.hybrid and status.get("embedding_ready") and not fallbacks),
+    }
     return {
-        "scope": "Offline evaluation on a temporary copy that was deleted afterwards.",
+        "scope": (
+            "Offline evaluation on a temporary copy that was deleted afterwards. Relevance "
+            "labels are structural proxies, not human judgments; no model API was called and "
+            "nothing was downloaded."
+        ),
         "source": "synthetic fixture" if args.synthetic else "copy of a user database",
         "settings": {
             "k": args.k,
@@ -860,12 +1429,15 @@ def evaluate(database: Path, args, status: dict, preloaded: bool) -> dict:
             "machine": platform.machine(),
         },
         "database": counts,
-        "semantic": {
-            "requested": args.hybrid,
-            "state": status.get("state"),
-            "embedding_ready": bool(status.get("embedding_ready")),
-            "reranker_ready": bool(status.get("reranker_ready")),
+        "semantic": semantic,
+        "timings_s": {
+            "estimator": round(search_started - started, 3),
+            "search": round(retrieval_started - search_started, 3),
+            "retrieval": round(finished - retrieval_started, 3),
         },
+        "estimator": estimator,
+        "full_text_search": search,
+        "memory_retrieval": retrieval,
     }
 
 
@@ -959,10 +1531,10 @@ def main(argv: list[str] | None = None) -> int:
             # From here on, any application module that is imported binds to the copy.
             previous = bind_environment(database, args.hybrid)
             try:
-                status = semantic_status(args.hybrid)
+                backend, status = semantic_backend(args.hybrid)
                 if args.synthetic:
                     build_synthetic(database)
-                report = evaluate(database, args, status, preloaded)
+                report = evaluate(database, args, backend, status, preloaded)
             finally:
                 restore_environment(previous)
     except HybridUnavailable as exc:
@@ -974,10 +1546,19 @@ def main(argv: list[str] | None = None) -> int:
     _write_report(report, output)
     counts = report["database"]
     print(
-        f"Evaluated a temporary database ({report['source']}): {counts['topics']} topics, "
-        f"{counts['completed_questions']} completed questions, {counts['facts']} facts."
+        f"Evaluated a temporary database ({report['source']}): "
+        f"{counts['completed_questions']} completed questions, "
+        f"{report['estimator']['paths']} learning paths, scopes {','.join(args.scopes)}, "
+        f"{report['settings']['retrieval_mode']} retrieval."
     )
-    print(f"Report: {_display(output)}")
+    print(f"Report: {_display(output)} (proxy labels, not human relevance judgments).")
+    if args.hybrid and not report["semantic"]["achieved"]:
+        print(
+            "Hybrid retrieval was requested but not achieved for every case; see "
+            "semantic.fallback_cases in the report.",
+            file=sys.stderr,
+        )
+        return 2
     return 0
 
 
