@@ -211,7 +211,8 @@ class Message(SQLModel, table=True):
     document_ids: list[str] | None = Field(default=None, sa_column=Column(JSON))
     # Deep thinking: assistant reasoning from the model's reasoning_content field.
     reasoning: str | None = None
-    # Tool steps: [{"tool":..,"args":..,"result":..}] for collapsible frontend display.
+    # Tool steps for collapsible display: [{"tool", "result" (a 3,000-character preview),
+    # "truncated", "call_index", "request_id"}]; the last two locate the ToolResult row.
     steps: list | None = Field(default=None, sa_column=Column(JSON))
     # Per-answer numbers (token estimates, usage, timings) and fixed labels such as the
     # budget that stopped tool rounds; never prompt text.
