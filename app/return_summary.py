@@ -3,9 +3,11 @@
 Returning from a branch to the passage it quoted, the learner sees a few
 sentences from the branch's stored answers, picked by the categories context
 compaction already uses (corrections, conditions, definitions, open questions)
-together with their own note and understanding mark. Nothing is generated or
-written: no model call, no database write, and the excerpts are whole sentences
-of stored answers with Markdown markers removed (long ones are shortened).
+together with their own note and understanding mark. Only the answers the
+conversation shows count: the latest attempt of each question, when complete.
+Nothing is generated or written: no model call, no database write, and the
+excerpts are whole sentences of stored answers with Markdown markers removed
+(long ones are shortened).
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import re
 
 from sqlmodel import Session, select
 
+from .context import context_messages
 from .context_compaction import extract
 from .models import Message, Node
 from .schemas import UNDERSTANDING_LEVELS
@@ -75,15 +78,16 @@ def _shorten(text: str) -> str:
 
 
 def _candidates(path: list[Node], messages: dict[int, list[Message]]) -> list[tuple]:
+    # Like the conversation and the context builder, the latest answer attempt is the
+    # answer even when incomplete; a complete attempt it superseded is not quoted.
+    current = [(node, context_messages(messages.get(node.id, []))) for node in path]
     order = {
         message.id: index
-        for index, message in enumerate(
-            message for node in path for message in messages.get(node.id, [])
-        )
+        for index, message in enumerate(message for _, rows in current for message in rows)
     }
     found = []
-    for node in path:
-        for excerpt in extract(node, messages.get(node.id, [])):
+    for node, rows in current:
+        for excerpt in extract(node, rows):
             category = CATEGORIES.get(excerpt.category)
             if excerpt.section != "message" or category is None:
                 continue  # Notes and the quoted passage are shown separately.

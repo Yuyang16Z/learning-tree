@@ -153,6 +153,54 @@ def test_only_the_branch_path_and_open_questions_from_the_learner_count(setup):
     assert all(item["node_id"] == 2 for item in body["excerpts"])
 
 
+def test_an_answer_superseded_by_a_newer_attempt_is_not_quoted(setup):
+    """The latest attempt is the answer, even when incomplete, as in the thread and context.
+
+    Legacy or imported nodes can hold a complete answer followed by a newer failed one;
+    the conversation shows the older answer under "Previous incomplete responses", so
+    the recap must not present it as what the branch added."""
+    client, engine = setup
+    seed(engine)
+    with Session(engine) as session:
+        session.add(
+            Message(
+                id=10, node_id=3, role="assistant", content="较新的回答只写了一半", status="error"
+            )
+        )
+        session.commit()
+    row = client.get("/nodes/3/thread").json()["nodes"][-1]
+    assert row["answer"] == "较新的回答只写了一半"
+    assert [attempt["message_id"] for attempt in row["attempts"]] == [7]
+    excerpts = client.get("/nodes/3/return-summary").json()["excerpts"]
+    assert all(item["message_id"] not in (7, 10) for item in excerpts), excerpts
+    assert [(item["category"], item["node_id"], item["message_id"]) for item in excerpts] == [
+        ("correction", 2, 5),
+        ("condition", 2, 5),
+        ("definition", 2, 5),
+        ("question", 2, 3),
+    ]
+    # A newer complete retry is the answer again, so its sentences return.
+    with Session(engine) as session:
+        session.add(
+            Message(
+                id=11,
+                node_id=3,
+                role="assistant",
+                content="实际上，尾递归改写也需要语言支持。",
+                status="complete",
+            )
+        )
+        session.commit()
+    excerpts = client.get("/nodes/3/return-summary").json()["excerpts"]
+    assert excerpts[0] == {
+        "category": "correction",
+        "text": "实际上，尾递归改写也需要语言支持。",
+        "node_id": 3,
+        "message_id": 11,
+    }
+    assert all(item["message_id"] not in (7, 10) for item in excerpts), excerpts
+
+
 def test_headings_tables_and_lead_ins_are_skipped_and_long_sentences_shortened(setup):
     client, engine = setup
     seed(engine)
