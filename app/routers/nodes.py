@@ -37,6 +37,7 @@ from ..models import (
     PreferenceSupplement,
 )
 from ..retrieval import read_retrieval_settings
+from ..return_summary import build_return_summary
 from ..schemas import UNDERSTANDING_LEVELS, AskIn, BranchIn, ExplainIn, NodePatch, StopIn, TitleIn
 from ..search_index import HISTORY_TOOL_DEF, HISTORY_TOOL_NAME, make_history_search
 from ..service import (
@@ -347,6 +348,15 @@ def get_thread_route(node_id: int, session: Session = Depends(get_session)) -> d
             for row in _qa_rows(node, messages, session)
         ]
     }
+
+
+@router.get("/{node_id}/return-summary")
+def get_return_summary(node_id: int, session: Session = Depends(get_session)) -> dict:
+    """Local excerpts of what the branch around this node added; no model call, no writes."""
+    summary = build_return_summary(session, _get(session, node_id))
+    if summary is None:
+        raise HTTPException(404, "这个节点不在分支中")
+    return summary
 
 
 @router.patch("/{node_id}")

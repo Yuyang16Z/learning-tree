@@ -59,6 +59,16 @@ export interface SearchHit {
   rank: number;
 }
 export interface RetrievalSettings { include_siblings: boolean; include_other_trees: boolean; revision: string }
+export type ReturnExcerptCategory = 'correction' | 'condition' | 'definition' | 'question' | 'explanation';
+/** What a branch added, extracted locally from its stored answers when returning to the source. */
+export interface ReturnSummary {
+  branch_node_id: number;
+  branch_title: string;
+  understanding: Understanding | null;
+  note: string | null;
+  excerpts: { category: ReturnExcerptCategory; text: string; node_id: number; message_id: number | null }[];
+  source: { node_id: number; message_id: number | null; start: number | null; end: number | null; text: string | null };
+}
 export interface DocumentSummary {
   id: string; name: string; media_type: string; size: number; characters: number; warnings: string[];
 }

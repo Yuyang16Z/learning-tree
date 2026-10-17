@@ -110,6 +110,21 @@
 .chat-remote-answer > button { margin-left: auto; }
 .chat-latest { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); padding: 6px 13px; border-radius: 20px; background: var(--bg); border: 1px solid var(--border); box-shadow: 0 3px 12px #00000008; font-size: 11px !important; color: var(--muted); }
 .chat-compose-area { flex: none; padding: 0 28px 24px; width: 100%; max-width: 806px; margin: 0 auto; }
+.chat-return-card { margin: 0 0 10px; padding: 10px 14px; max-height: min(240px, 34vh); overflow: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); font-size: 12px; line-height: 1.65; }
+.chat-return-head { display: flex; align-items: center; gap: 8px; }
+.chat-return-head h2 { flex: 1; min-width: 0; margin: 0; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.chat-return-mark { flex: none; padding: 1px 8px; border-radius: 999px; font-size: 10px; }
+.chat-return-mark.u-open { color: var(--u-open); background: var(--u-open-bg); }
+.chat-return-mark.u-partial { color: var(--u-partial); background: var(--u-partial-bg); }
+.chat-return-mark.u-clear { color: var(--u-clear); background: var(--u-clear-bg); }
+.chat-pane .chat-return-dismiss { flex: none; padding: 0 3px; border: 0; background: none; color: var(--muted); font-size: 17px; line-height: 1; }
+.chat-pane .chat-return-dismiss:hover { color: var(--text); }
+.chat-return-card ul { display: grid; gap: 4px; margin: 7px 0 0; padding: 0; list-style: none; }
+.chat-return-card li, .chat-return-note { overflow-wrap: anywhere; }
+.chat-return-category { display: inline-block; margin-right: 7px; padding: 0 5px; border-radius: 4px; background: var(--panel-2); color: var(--muted); font-size: 10px; line-height: 1.7; }
+.chat-return-note { margin: 7px 0 0; }
+.chat-return-note > span { margin-right: 7px; color: var(--teal); font-size: 10px; }
+.chat-return-hint { margin: 6px 0 0; color: var(--muted); font-size: 10px; }
 .chat-compose-box { border: 1px solid var(--border-strong); border-radius: 17px; padding: 14px 14px 10px; background: var(--bg); box-shadow: 0 3px 15px #00000004; transition: border-color .15s, box-shadow .15s; }
 .chat-compose-box:focus-within { border-color: color-mix(in srgb, var(--teal), var(--border) 60%); box-shadow: 0 3px 15px #00000006; }
 .chat-compose-box textarea { width: 100%; border: 0; outline: 0; border-radius: 0; padding: 0 3px; min-height: 40px; max-height: 160px; resize: none; background: none; color: var(--text); font-size: 13px; line-height: 1.75; box-shadow: none; }

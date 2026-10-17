@@ -66,6 +66,7 @@ const diagnostics: [string, string][] = [
   ["这段草稿暂时保留在当前页面，请保存后再关闭。", "This draft is only available on this page. Save it before closing."],
   ["记忆不存在", "Memory not found"], ["模型不存在", "Model not found"],
   ["知识树不存在", "Learning tree not found"], ["节点不存在", "Node not found"],
+  ["这个节点不在分支中", "This node is not inside a branch."],
   ["MCP server 不存在", "MCP server not found"],
   ["请先在设置中添加模型", "Add a model in Settings first"],
   ["备份超过 25 MB，请分成较小的主题", "The backup exceeds 25 MB. Split it into smaller topics."],
