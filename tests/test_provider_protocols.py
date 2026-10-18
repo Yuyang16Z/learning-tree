@@ -72,7 +72,8 @@ def sse(blocks=None, stop="end_turn", *, terminal=True, usage=None):
     for index, block in enumerate(blocks):
         initial = dict(block)
         if block["type"] == "text":
-            initial["text"] = ""
+            # Some proxies put the first text in the block start; "prefix" emulates them.
+            initial["text"] = initial.pop("prefix", "")
             deltas = [{"type": "text_delta", "text": block["text"]}]
         elif block["type"] == "thinking":
             initial.update(thinking="", signature="")
@@ -589,6 +590,24 @@ def test_anthropic_final_round_keeps_tool_definitions_and_forbids_calls(monkeypa
     assert bodies[1]["tool_choice"] == {"type": "none"}
     assert "工具调用已达本轮上限" in bodies[1]["system"]
     assert bodies[1]["messages"][-1]["content"][0]["type"] == "tool_result"
+
+
+def test_anthropic_tool_turns_keep_text_a_proxy_sends_in_the_block_start(monkeypatch):
+    first = [{"type": "text", "prefix": "我先", "text": "查一下。"}, TOOL_USE]
+    final = [{"type": "text", "prefix": "前缀", "text": "正文"}]
+    _, bodies, _ = mock_anthropic(monkeypatch, [sse(first, stop="tool_use"), sse(final)])
+    events = list(
+        llm.run_agent(SPEC, "系统", [{"role": "user", "content": "查"}], TOOLS, lambda *a: "资料")
+    )
+    deltas = [event["text"] for event in events if event["type"] == "delta"]
+    assert "".join(deltas) == "我先查一下。\n\n前缀正文"
+    assert bodies[1]["messages"][-2]["content"][0] == {"type": "text", "text": "我先查一下。"}
+    # The plain stream already relayed such a prefix; both paths now agree.
+    _, _, _ = mock_anthropic(monkeypatch, [sse(final)])
+    assert list(llm.stream_chat(SPEC, "系统", [{"role": "user", "content": "问"}])) == [
+        ("text", "前缀"),
+        ("text", "正文"),
+    ]
 
 
 def test_incomplete_tool_arguments_never_execute(monkeypatch):

@@ -301,6 +301,11 @@ def chat_once(spec, conversation: list[dict], tools: list[dict], deep: bool = Fa
                     yield "text", event.text
                 elif event.type == "thinking":
                     yield "reasoning", event.thinking
+                elif event.type == "content_block_start" and event.content_block.type == "text":
+                    # Helper text events cover deltas only; some proxies start a block
+                    # with text, which the final message (and the history) still holds.
+                    if event.content_block.text:
+                        yield "text", event.content_block.text
                 elif event.type == "message_stop":
                     stopped = True
             if not stopped:
