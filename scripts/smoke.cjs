@@ -131,6 +131,22 @@ async function poll(callback) {
     assert.deepEqual(scopeSaves[0], { include_siblings: true, include_other_trees: false, revision: 'initial' });
     await poll(async () => siblingScope.isChecked());
     await page.unroute(scopeRoute);
+    // A save still running keeps Settings open, and its conflict is reported after a tab switch.
+    let releaseScopeSave;
+    await page.route(scopeRoute, async route => {
+      if (route.request().method() !== 'PUT') return route.continue();
+      await new Promise(resolve => { releaseScopeSave = resolve; });
+      await route.fulfill({ status: 409, json: { detail: '检索范围设置已在其他窗口更新，请重新载入。' } });
+    });
+    await otherScope.click();
+    await poll(async () => releaseScopeSave !== undefined);
+    assert(await memoryDialog.getByRole('button', { name: 'Close', exact: true }).isDisabled(), 'Settings stays open while a scope change is saving');
+    await memoryDialog.getByRole('button', { name: 'Appearance', exact: true }).click();
+    releaseScopeSave();
+    await memoryDialog.getByRole('button', { name: 'Memory', exact: true }).click();
+    await retrievalPanel.getByRole('alert').filter({ hasText: 'your change was not saved' }).waitFor();
+    assert(!(await otherScope.isChecked()), 'The switch shows the setting saved elsewhere');
+    await page.unroute(scopeRoute);
     checks.push('Memory settings offer opt-in sibling and other-topic recall, saving each change with its revision');
     retrievalFixture = { state: 'degraded', embedding_ready: false, reranker_ready: false };
     await memoryDialog.getByRole('button', { name: 'Refresh status', exact: true }).click();
