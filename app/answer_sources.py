@@ -125,12 +125,15 @@ def scrub_sources(
     trees, nodes, memories = (sorted(set(ids)) for ids in (tree_ids, node_ids, memory_ids))
     # The JSON column stores an absent list as the JSON text 'null'.
     if every_memory:
-        session.execute(
-            update(Message)
-            .where(text("sources IS NOT NULL AND sources <> 'null'"))
-            .values(sources=None)
-            .execution_options(synchronize_session=False)
-        )
+        stored = text("sources IS NOT NULL AND sources <> 'null'")
+        # A bulk update makes every window reload, so skip it when nothing is stored.
+        if session.exec(select(Message.id).where(stored).limit(1)).first() is not None:
+            session.execute(
+                update(Message)
+                .where(stored)
+                .values(sources=None)
+                .execution_options(synchronize_session=False)
+            )
         return
     if not (trees or nodes or memories):
         return

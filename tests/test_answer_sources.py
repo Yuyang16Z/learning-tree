@@ -262,3 +262,22 @@ def test_an_answer_finishing_after_a_deletion_does_not_store_stale_provenance(se
     assert client.delete(f"/trees/{ids['b']}").status_code == 200
     nodes._persist(ids["a_root"], generation, "Offline test")
     assert stored(engine) == [[entry(ids, "own", "path", title=False)]]
+
+
+def test_clearing_memories_reloads_other_windows_only_when_answers_kept_provenance(
+    setup, monkeypatch
+):
+    from app.changes import feed
+
+    client, engine = setup
+    ids = build(client, engine)
+    cursor = feed.since("")["cursor"]
+    assert client.delete("/memories").status_code == 200
+    notice = feed.since(cursor)
+    assert notice["memory"] and not notice["reload"]
+
+    ids = build(client, engine)
+    answer(client, monkeypatch, ids["a_root"], [entry(ids, "own", "path")])
+    cursor = feed.since("")["cursor"]
+    assert client.delete("/memories").status_code == 200
+    assert feed.since(cursor)["reload"] and stored(engine) == []
