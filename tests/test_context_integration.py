@@ -198,6 +198,44 @@ def test_model_summary_is_only_resolved_once_after_tool_preflight_and_preserves_
         assert session.get(Message, 2).content.startswith("Historical background")
 
 
+def test_model_summary_of_a_two_byte_script_history_is_used_not_discarded(api, monkeypatch):
+    """Cyrillic costs about 1.8 UTF-8 bytes per estimate unit. The byte budget handed to
+    the summary resolver follows the history's own density, so the resolver's output,
+    which fills that budget, fits the room and the paid model summary reaches the answer."""
+    client, engine, calls = api
+    with Session(engine) as session:
+        cfg = session.get(ModelConfig, 1)
+        cfg.context_window, cfg.max_tokens = 32768, 4096
+        session.add(cfg)
+        for index in range(12):
+            session.add(
+                Message(node_id=1, role="user", content=f"Вопрос {index}: когда действует правило?")
+            )
+            session.add(
+                Message(
+                    node_id=1,
+                    role="assistant",
+                    content=" ".join(
+                        f"Правило {index}.{part} действует только с явного разрешения владельца."
+                        for part in range(40)
+                    ),
+                )
+            )
+        session.commit()
+    generated = []
+
+    def provider(spec, payload, max_output_bytes):
+        generated.append(payload[0]["source_id"])
+        return f"covered:\n- Ранее объяснялось условие разрешения. [{payload[0]['source_id']}]"
+
+    monkeypatch.setattr(learning_summaries, "summarize_learning_context", provider)
+    events = ask(client, "Когда действует правило?")
+    assert events[-1]["status"] == "complete", events
+    assert len(generated) == 1, "one optional summary call per question"
+    _, system, _, _ = calls["agent"][0]
+    assert "模型摘要（node=1" in system and generated[0] in system
+
+
 @pytest.mark.parametrize("failure", ["error", "oversized", "empty"])
 def test_optional_summary_failures_keep_the_answer_and_source_access(api, monkeypatch, failure):
     client, engine, calls = api

@@ -134,3 +134,44 @@ def test_no_summary_falls_back_to_compact():
     system, messages = build_context([(root, root_msgs)], current, [], "追问")
     assert messages[0]["content"] == "根节点的问题"
     assert messages[1]["content"] == "根节点的回答"
+
+
+def test_document_excerpts_keep_to_a_third_of_the_room_in_a_two_byte_script():
+    """Document excerpts are budgeted in UTF-8 bytes converted at the documents' own
+    density, so Cyrillic (about 1.8 bytes per unit) does not take about half the room."""
+    from app.context import _full_system
+    from app.context_budget import estimate_request_tokens, estimate_text_tokens
+    from app.document_context import NOTICE
+
+    policy = ContextPolicy(8192, 1024)
+    current = _node(1, "Правила")
+    question = "Когда действует правило?"
+    text = " ".join(f"Правило {i} действует только с явного разрешения." for i in range(400))
+    document = {
+        "id": "doc-1",
+        "name": "rules.txt",
+        "characters": len(text),
+        "warnings": [],
+        "sections": [{"label": "全文", "text": text}],
+    }
+    system, _ = build_context([], current, [], question, documents=[document], policy=policy)
+    note = system[system.index(NOTICE) :]
+    mandatory = estimate_request_tokens(
+        _full_system([], current, ""), [{"role": "user", "content": question}]
+    )
+    room = (int(policy.input_budget * policy.compaction_ratio) - mandatory) // 3
+    assert "Правило 0 действует" in note
+    assert estimate_text_tokens(note) <= room
+
+
+def test_byte_rate_follows_the_material_within_its_bounds():
+    from app.context import BYTES_PER_UNIT, MIN_BYTES_PER_UNIT, bytes_per_unit
+
+    assert bytes_per_unit([]) == bytes_per_unit(["", None]) == BYTES_PER_UNIT
+    assert bytes_per_unit(["Plain English prose about trees."]) == BYTES_PER_UNIT
+    assert bytes_per_unit(["中文学习记录的内容"]) == BYTES_PER_UNIT, "CJK stays conservative"
+    russian = bytes_per_unit(["Синтаксический анализатор проверяет вложенную структуру."])
+    assert MIN_BYTES_PER_UNIT <= russian < 1.9
+    # Very long material is sampled in spread windows; the blend stays within bounds.
+    mixed = bytes_per_unit(["Анализатор проверяет. " * 5000, "Plain English. " * 5000])
+    assert russian < mixed < BYTES_PER_UNIT
