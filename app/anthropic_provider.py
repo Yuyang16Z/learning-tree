@@ -40,7 +40,10 @@ def client(spec) -> Anthropic:
 
 # Base URLs whose provider answered HTTP 400 to cache_control; remembered per process.
 _CACHE_CONTROL_UNSUPPORTED: set[str] = set()
-# Shorter prefixes are below the provider's cacheable minimum and would only cost a write.
+# The stable head gets its own system breakpoint from this length on; shorter heads
+# stay in one string. This only skips a split that rarely pays: a request below the
+# model's cacheable minimum (512 to 4,096 tokens, tools included) is processed
+# without caching and without a cache write, so a marker never costs anything there.
 CACHE_PREFIX_MIN_CHARS = 1024
 
 
@@ -154,21 +157,20 @@ def _kwargs(spec, conversation: list[dict], tools: list[dict] | None = None) -> 
     system, converted = messages(conversation)
     kwargs = {"model": spec.llm_model, "max_tokens": spec.max_tokens, "messages": converted}
     prefix = getattr(spec, "cache_prefix", None)
-    if (
-        system
-        and prefix
-        and len(prefix) >= CACHE_PREFIX_MIN_CHARS
-        and system.startswith(prefix)
-        and spec.base_url not in _CACHE_CONTROL_UNSUPPORTED
-    ):
-        # Block 1 is the stable head (rules and path) with an explicit breakpoint;
-        # the top-level marker lets the provider also cache the growing turn tail.
+    # Only answer requests supply a prefix; summaries and titles stay unmarked.
+    caching = bool(prefix) and spec.base_url not in _CACHE_CONTROL_UNSUPPORTED
+    if caching:
+        # The top-level marker caches the request up to its last block (tools, system
+        # and the conversation so far), whatever the length of the stable head.
+        kwargs["cache_control"] = {"type": "ephemeral"}
+    if caching and system and len(prefix) >= CACHE_PREFIX_MIN_CHARS and system.startswith(prefix):
+        # Block 1 is the stable head (rules and path) with its own breakpoint, which
+        # stays valid when only the per-turn tail of the system prompt changes.
         remainder = system[len(prefix) :]
         kwargs["system"] = [
             {"type": "text", "text": prefix, "cache_control": {"type": "ephemeral"}},
             *([{"type": "text", "text": remainder}] if remainder else []),
         ]
-        kwargs["cache_control"] = {"type": "ephemeral"}
     elif system:
         kwargs["system"] = system
     if tools:

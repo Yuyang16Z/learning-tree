@@ -360,16 +360,37 @@ TOOL_USE = {"type": "tool_use", "id": "toolu_a", "name": "mcp_1_lookup", "input"
 @pytest.mark.parametrize(
     "prefix,system",
     [
-        ("短前缀", "短前缀\n其余系统提示"),  # below the cacheable minimum
+        ("短前缀", "短前缀\n其余系统提示"),  # too short for its own breakpoint
         (CACHE_PREFIX, "另一段开头" + CACHE_PREFIX),  # fit_request replaced the system
         (None, CACHE_PREFIX + CACHE_TAIL),  # no prefix supplied
     ],
+    ids=["short-prefix", "replaced-system", "no-prefix"],
 )
 def test_system_stays_a_plain_string_without_a_usable_cache_prefix(monkeypatch, prefix, system):
     monkeypatch.setattr(adapter, "_CACHE_CONTROL_UNSUPPORTED", set())
     _, bodies, _ = mock_anthropic(monkeypatch, [sse()])
     list(llm.stream_chat(SPEC, system, [{"role": "user", "content": "问题"}], cache_prefix=prefix))
-    assert bodies[0]["system"] == system and "cache_control" not in bodies[0]
+    assert bodies[0]["system"] == system
+    # An answer request (one that supplies a prefix) still caches its conversation.
+    assert bodies[0].get("cache_control") == ({"type": "ephemeral"} if prefix else None)
+
+
+def test_short_stable_heads_still_cache_the_conversation_of_answer_requests(monkeypatch):
+    monkeypatch.setattr(adapter, "_CACHE_CONTROL_UNSUPPORTED", set())
+    _, bodies, _ = mock_anthropic(
+        monkeypatch, [sse(), sse([TOOL_USE], stop="tool_use"), sse(), sse()]
+    )
+    head = "固定规则。\n学习路径：根节点（node=1）"
+    history = [{"role": "user", "content": "问题"}]
+    list(llm.stream_chat(SPEC, head + CACHE_TAIL, history, cache_prefix=head))
+    list(
+        llm.run_agent(SPEC, head + CACHE_TAIL, history, TOOLS, lambda *a: "资料", cache_prefix=head)
+    )
+    assert llm.complete(SPEC, head, history) == "你好"
+    answers, summary = bodies[:3], bodies[3]
+    assert all(body["cache_control"] == {"type": "ephemeral"} for body in answers)
+    assert all(isinstance(body["system"], str) for body in answers)
+    assert "cache_control" not in summary, "requests without a prefix stay unmarked"
 
 
 @pytest.mark.parametrize("path", ["stream", "agent"])
