@@ -81,17 +81,20 @@ def _stream_completion(spec: LLMSpec, api: OpenAI, **kwargs):
 
 
 def _openai_usage(usage) -> dict | None:
+    """Input, cached and output tokens; None for a count the provider did not report."""
     if usage is None:
         return None
+    prompt = getattr(usage, "prompt_tokens", None)
+    completion = getattr(usage, "completion_tokens", None)
     details = getattr(usage, "prompt_tokens_details", None)
     cached = getattr(details, "cached_tokens", None) if details is not None else None
     if cached is None:
         # DeepSeek reports prefix-cache hits through an untyped extra field.
         cached = getattr(usage, "prompt_cache_hit_tokens", None)
     return {
-        "input_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
-        "cached_input_tokens": int(cached or 0),
-        "output_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+        "input_tokens": None if prompt is None else int(prompt),
+        "cached_input_tokens": None if prompt is None else int(cached or 0),
+        "output_tokens": None if completion is None else int(completion),
     }
 
 

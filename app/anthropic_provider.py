@@ -208,13 +208,19 @@ def _usage_parts(usage) -> dict:
 
 
 def _counts(parts: dict) -> dict:
+    """Input, cached and output tokens; None for a count the provider did not report."""
+    output = parts.get("output")
+    counts = {"output_tokens": None if output is None else int(output)}
+    if all(parts.get(key) is None for key in ("input", "creation", "read")):
+        # A proxy that sends no input counts reported nothing, not zero tokens.
+        return {"input_tokens": None, "cached_input_tokens": None, **counts}
     # Total input is the sum of uncached, cache-creation and cache-read tokens.
     read = int(parts.get("read") or 0)
     creation = int(parts.get("creation") or 0)
     return {
         "input_tokens": int(parts.get("input") or 0) + creation + read,
         "cached_input_tokens": read,
-        "output_tokens": int(parts.get("output") or 0),
+        **counts,
     }
 
 

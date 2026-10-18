@@ -52,7 +52,8 @@ TOOLS = [
 ]
 
 
-def sse(blocks=None, stop="end_turn", *, terminal=True, usage=None):
+def sse(blocks=None, stop="end_turn", *, terminal=True, usage=None, start_usage=None):
+    """Anthropic event stream; start_usage replaces message_start's usage verbatim."""
     blocks = blocks or [{"type": "text", "text": "你好"}]
     events = [
         {
@@ -65,7 +66,11 @@ def sse(blocks=None, stop="end_turn", *, terminal=True, usage=None):
                 "content": [],
                 "stop_reason": None,
                 "stop_sequence": None,
-                "usage": {"input_tokens": 10, "output_tokens": 1, **(usage or {})},
+                "usage": (
+                    start_usage
+                    if start_usage is not None
+                    else {"input_tokens": 10, "output_tokens": 1, **(usage or {})}
+                ),
             },
         }
     ]
@@ -457,6 +462,27 @@ def test_anthropic_usage_sums_cache_tokens_into_input_and_reports_cached_reads(m
     )
     assert llm.complete(SPEC, "系统", [{"role": "user", "content": "问题"}], diagnostics=plain)
     assert len(plain["rounds"]) == 2 and plain["rounds"][1]["output_tokens"] == 12
+
+
+@pytest.mark.parametrize("path", ["stream", "agent"])
+def test_anthropic_usage_without_input_counts_is_unknown_rather_than_zero(monkeypatch, path):
+    # A proxy that leaves the input counts out of message_start reports nothing.
+    mock_anthropic(monkeypatch, [sse(start_usage={"output_tokens": 1})])
+    history = [{"role": "user", "content": "问题"}]
+    diagnostics = {}
+    if path == "stream":
+        list(llm.stream_chat(SPEC, "系统", history, diagnostics=diagnostics))
+    else:
+        list(llm.run_agent(SPEC, "系统", history, TOOLS, lambda *a: "", diagnostics=diagnostics))
+    (round_one,) = diagnostics["rounds"]
+    assert round_one["input_tokens"] is None and round_one["cached_input_tokens"] is None
+    assert round_one["output_tokens"] == 12
+    # A reported cache read alone still counts as input.
+    mock_anthropic(monkeypatch, [sse(start_usage={"cache_read_input_tokens": 7})])
+    partial = {}
+    list(llm.stream_chat(SPEC, "系统", history, diagnostics=partial))
+    assert partial["rounds"][0]["input_tokens"] == 7
+    assert partial["rounds"][0]["cached_input_tokens"] == 7
 
 
 def test_anthropic_tool_loop_records_every_round_and_counts_tool_rounds(monkeypatch):
@@ -862,6 +888,26 @@ def test_openai_stream_requests_and_reads_the_usage_chunk(monkeypatch, usage, ca
     assert round_one["estimated_input_tokens"] == estimate_request_tokens(
         "系统", [{"role": "user", "content": "问题"}]
     )
+
+
+def test_openai_usage_without_prompt_tokens_is_unknown_rather_than_zero(monkeypatch):
+    monkeypatch.setattr(llm, "_STREAM_OPTIONS_UNSUPPORTED", set())
+    answer = [({"role": "assistant", "content": "答"}, None), ({}, "stop")]
+    monkeypatch.setattr(
+        llm,
+        "_client",
+        openai_client(lambda request: openai_stream(answer, {"completion_tokens": 3})),
+    )
+    spec = LLMSpec("兼容", "https://provider.test/v1", "custom-model", "synthetic-key")
+    diagnostics = {}
+    list(
+        llm.stream_chat(
+            spec, "系统", [{"role": "user", "content": "问题"}], diagnostics=diagnostics
+        )
+    )
+    (round_one,) = diagnostics["rounds"]
+    assert round_one["input_tokens"] is None and round_one["cached_input_tokens"] is None
+    assert round_one["output_tokens"] == 3
 
 
 def test_openai_stream_options_rejection_falls_back_once_per_base_url(monkeypatch):
