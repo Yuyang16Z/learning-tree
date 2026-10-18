@@ -18,7 +18,15 @@ import app.service as service
 from app import learning_summaries
 from app.context_budget import ContextPolicy, estimate_request_tokens
 from app.context_sources import SOURCE_TOOL_NAME
-from app.models import ContextSummary, KnowledgeTree, Message, ModelConfig, Node, RetrievalSettings
+from app.models import (
+    ContextSummary,
+    KnowledgeTree,
+    Memory,
+    Message,
+    ModelConfig,
+    Node,
+    RetrievalSettings,
+)
 from app.routers import nodes, trees
 from app.search_index import HISTORY_TOOL_NAME
 from app.tool_catalog import SEARCH_TOOL_NAME, tool_definition_cost
@@ -993,6 +1001,14 @@ def test_memory_sources_are_announced_once_persisted_and_kept_out_of_exports(api
             },
         ],
     )
+    with Session(engine) as session:
+        # Provenance is shown only for records that exist; memory 8 never reached the prompt.
+        session.add(
+            Memory(
+                id=7, kind="fact", content="只有收到明确授权才执行。", tree_id=1, source_node_id=1
+            )
+        )
+        session.commit()
     monkeypatch.setattr(nodes, "fetch_memory_note", lambda *args, **kwargs: note)
     events = ask(client)
     assert events[-1]["done"], events
@@ -1013,7 +1029,9 @@ def test_memory_sources_are_announced_once_persisted_and_kept_out_of_exports(api
     assert "sources" not in json.dumps(client.get("/trees/1/export").json())
     with Session(engine) as session:
         answer = session.exec(select(Message).where(Message.node_id == 2)).all()[-1]
-        assert answer.role == "assistant" and answer.sources == [note.sources[0]]
+        # At rest an answer keeps ids and scope only; the title is read from the live topic.
+        stored = {key: value for key, value in note.sources[0].items() if key != "tree_title"}
+        assert answer.role == "assistant" and answer.sources == [stored]
 
     monkeypatch.setattr(nodes, "fetch_memory_note", lambda *args, **kwargs: "")
     events = ask(client, "再问一次。")

@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import delete, func, or_
 from sqlmodel import Session, select
 
+from ..answer_sources import scrub_sources
 from ..context_compaction import forget_tree
 from ..db import get_session
 from ..documents import (
@@ -462,11 +463,16 @@ def delete_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
         for message in session.exec(select(Message).where(Message.node_id.in_(ids))).all():
             session.delete(message)
         session.execute(delete(ToolResult).where(ToolResult.node_id.in_(ids)))
+        memory_ids = []
         for memory in session.exec(
             select(Memory).where((Memory.tree_id == tree_id) | Memory.source_node_id.in_(ids))
         ).all():
             session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory.id))
+            memory_ids.append(memory.id)
             session.delete(memory)
+        # Other topics' answers keep no provenance (ids) pointing into this topic.
+        session.flush()
+        scrub_sources(session, tree_ids=[tree_id], node_ids=ids, memory_ids=memory_ids)
         # One statement removes parents and children together; SQLite checks the
         # self-referencing parent key at the end of the statement. The triggers in
         # app/search_index.py drop the full-text rows of every deleted record;

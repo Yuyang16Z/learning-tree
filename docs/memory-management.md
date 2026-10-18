@@ -136,6 +136,14 @@ topic when needed. Records that compaction dropped from the prompt are not
 listed. The list is stored with the answer and shown again later; it refers to
 this database's ids, so learning-tree exports leave it out.
 
+The stored list holds only record ids and their scope. Topic names are read when
+the answer is shown, so a renamed topic shows its new name, and entries whose
+fact, source node or topic no longer exists are left out. Deleting a topic, a
+branch or facts also removes the entries that pointed at them from the answers
+that kept them, so a deleted topic leaves neither its name nor its ids behind
+in other topics. Text that an answer or its tool steps already quoted (for
+example a history-search result) belongs to that answer and is not rewritten.
+
 ## Topic search
 
 The learning map's search box filters titles and quoted passages instantly and,
@@ -204,7 +212,7 @@ only created on the first save and is kept when topics are deleted.
 `GET /trees/{id}/search?q=&limit=` returns `{results: [{node_id, message_id,
 kind, snippet, rank}]}` with `kind` one of `title`, `message`, `note` or
 `memory`. `Memory` rows gained `fact_type`, `terms`, `superseded_by` and
-`updated_at`; `Message` rows gained `sources`. All additions are additive and
+`updated_at`; `Message` rows gained `sources` (ids and scope). All additions are additive and
 idempotent; database backups include them, learning-tree exports exclude
 `sources`.
 
@@ -220,7 +228,9 @@ idempotent; database backups include them, learning-tree exports exclude
   但不再进入回答、搜索索引和模型的历史检索；用户手动编辑过的事实不会被自动替代。
 - **参考了哪些记忆**：每条回答下方列出实际进入提示的记忆编号及来源节点，来自其他分支或
   主题的会标注；点击可跳到来源节点。被压缩掉的记忆不会列出。该列表随回答保存，但不随
-  学习树导出。
+  学习树导出。保存的只有记录编号和范围，主题名称在显示时读取；记忆、来源节点或主题已删除
+  的条目不再显示。删除主题、分支或记忆时，其他回答中指向它们的条目会一并移除，已删除主题
+  的名称和编号不会留在其他主题里；回答正文或工具步骤中已经引用的文字属于该回答本身，不会被改写。
 - **主题内全文搜索**：学习树搜索框除了即时匹配标题和引用，还会向服务端查询已完成回答、
   学习笔记和当前事实中的原文片段，作为第二组结果展示；选择回答结果会跳转并高亮对应段落。
   索引由 SQLite FTS5（三元组分词）和触发器维护，触发器按由来源记录推算的 rowid 定位索引行，

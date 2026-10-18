@@ -14,6 +14,7 @@ from sqlalchemy import delete
 from sqlalchemy.orm import defer
 from sqlmodel import Session, select
 
+from ..answer_sources import resolve_sources, scrub_sources, sources_for_storage
 from ..calibration import record_usage
 from ..config import settings
 from ..context import BASE_SYSTEM, build_context, context_messages, make_content
@@ -295,7 +296,22 @@ def _message_documents(session: Session, message: Message | None) -> list[dict]:
     ]
 
 
-def _qa_rows(node: Node, messages: list[Message], session: Session) -> list[dict]:
+def _answer_sources(session: Session, messages: list[Message]) -> dict[int, list[dict] | None]:
+    """Current provenance of these answers, resolved together: three queries in all,
+    entries whose records were deleted dropped and topic titles read live."""
+    answers = [message for message in messages if message.sources]
+    resolved = resolve_sources(session, [message.sources for message in answers])
+    return {message.id: sources for message, sources in zip(answers, resolved, strict=True)}
+
+
+def _qa_rows(
+    node: Node,
+    messages: list[Message],
+    session: Session,
+    sources: dict[int, list[dict] | None] | None = None,
+) -> list[dict]:
+    if sources is None:
+        sources = _answer_sources(session, messages)
     # Preserve all legacy Q/A pairs without changing message or branch IDs.
     pairs: list[tuple[Message | None, list[Message]]] = []
     for message in messages:
@@ -329,7 +345,7 @@ def _qa_rows(node: Node, messages: list[Message], session: Session) -> list[dict
                 "reasoning": answer.reasoning if answer else None,
                 "steps": answer.steps if answer else None,
                 "diagnostics": answer.diagnostics if answer else None,
-                "sources": answer.sources if answer else None,
+                "sources": sources.get(answer.id) if answer else None,
                 "answered_by": answer.answered_by if answer else None,
                 "attempts": [
                     {"message_id": m.id, "status": m.status, "content": m.content}
@@ -351,6 +367,7 @@ def _get(session: Session, node_id: int) -> Node:
 def get_node(node_id: int, session: Session = Depends(get_session)) -> dict:
     node = _get(session, node_id)
     msgs = get_messages(session, node_id)
+    sources = _answer_sources(session, msgs)
     return {
         "id": node.id,
         "tree_id": node.tree_id,
@@ -362,6 +379,7 @@ def get_node(node_id: int, session: Session = Depends(get_session)) -> dict:
         "messages": [
             {
                 **m.model_dump(exclude={"created_at", "node_id"}),
+                "sources": sources.get(m.id),
                 "documents": _message_documents(session, m),
             }
             for m in msgs
@@ -371,11 +389,11 @@ def get_node(node_id: int, session: Session = Depends(get_session)) -> dict:
 
 @router.get("/{node_id}/thread")
 def get_thread_route(node_id: int, session: Session = Depends(get_session)) -> dict:
+    thread = get_thread(session, _get(session, node_id))
+    sources = _answer_sources(session, [message for _, messages in thread for message in messages])
     return {
         "nodes": [
-            row
-            for node, messages in get_thread(session, _get(session, node_id))
-            for row in _qa_rows(node, messages, session)
+            row for node, messages in thread for row in _qa_rows(node, messages, session, sources)
         ]
     }
 
@@ -454,9 +472,14 @@ def delete_node(node_id: int, session: Session = Depends(get_session)) -> dict:
         for message in session.exec(select(Message).where(Message.node_id.in_(ids))).all():
             session.delete(message)
         session.execute(delete(ToolResult).where(ToolResult.node_id.in_(ids)))
+        memory_ids = []
         for memory in session.exec(select(Memory).where(Memory.source_node_id.in_(ids))).all():
             session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory.id))
+            memory_ids.append(memory.id)
             session.delete(memory)
+        # Answers elsewhere keep no provenance pointing into the deleted subtree.
+        session.flush()
+        scrub_sources(session, node_ids=ids, memory_ids=memory_ids)
         # The full-text search_index rows of these messages, memories and notes are
         # removed by the SQLite triggers in app/search_index.py as the rows go.
         # References outside the deleted subtree must not point to nonexistent nodes.
@@ -730,7 +753,8 @@ def _persist(target_id: int, generation: Generation, label: str) -> None:
         message.reasoning = "".join(generation.reasoning) or None
         message.steps = list(generation.steps) or None
         message.diagnostics = generation.diagnostics or None
-        message.sources = list(generation.sources) or None
+        # Ids only, and only records that still exist: a deletion may have come first.
+        message.sources = sources_for_storage(session, generation.sources)
         message.status = generation.status
         node.status, node.error = generation.status, generation.error
         session.add(message)
@@ -986,7 +1010,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     reasoning=previous.reasoning,
                     steps=portable_steps(previous.steps),
                     diagnostics=previous.diagnostics,
-                    sources=previous.sources,
+                    sources=sources_for_storage(session, previous.sources),
                 )
                 session.add(copied)
                 copied_history.append(copied)

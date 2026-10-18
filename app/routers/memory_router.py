@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import delete, func, update
 from sqlmodel import Session, select
 
+from ..answer_sources import scrub_sources
 from ..db import get_session
 from ..memory_preferences import begin_memory_write, read_preferences
 from ..models import (
@@ -222,6 +223,7 @@ def delete_facts(body: FactDeleteIn, session: Session = Depends(get_session)) ->
     )
     session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id.in_(ids)))
     session.execute(delete(Memory).where(Memory.id.in_(ids), Memory.kind == "fact"))
+    scrub_sources(session, memory_ids=ids)
     session.commit()
     return {"deleted": len(ids)}
 
@@ -264,6 +266,7 @@ def delete_memory(memory_id: int, session: Session = Depends(get_session)) -> di
         raise HTTPException(404, "记忆不存在")
     session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory_id))
     session.delete(m)
+    scrub_sources(session, memory_ids=[memory_id])
     session.commit()
     return {"deleted": memory_id}
 
@@ -274,6 +277,7 @@ def clear_memories(session: Session = Depends(get_session)) -> dict:
     session.execute(delete(MemoryEmbedding))
     n = session.exec(select(func.count()).select_from(Memory)).one()
     session.execute(delete(Memory))
+    scrub_sources(session, every_memory=True)
     n += session.exec(select(func.count()).select_from(PreferenceSupplement)).one()
     session.execute(delete(PreferenceSupplement))
     # Keep the replay ledger and invalidate extractions started before clear-all.

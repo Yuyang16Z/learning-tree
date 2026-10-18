@@ -464,6 +464,12 @@ with Session(engine) as session:
     assert session.get(ToolResult, payload['tool_result']) is None
     assert not session.exec(select(ToolResult).where(ToolResult.node_id.in_(payload['nodes']))).all()
     assert session.get(ToolResult, payload['kept_tool_result']) is not None
+    # Answers that remain keep no memory provenance pointing into the deleted topic.
+    for message in session.exec(select(Message)).all():
+        for entry in message.sources or []:
+            assert entry.get('tree_id') != payload['tree'] and 'tree_title' not in entry
+            assert entry.get('source_node_id') not in payload['nodes']
+            assert entry.get('memory_id') != payload['memory']
 with engine.connect() as connection:
     if connection.exec_driver_sql("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'search_index'").first():
         # The full-text index is derived data: triggers drop the deleted topic's rows.
