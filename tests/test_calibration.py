@@ -560,3 +560,46 @@ def test_concurrent_answers_never_lose_a_calibration_sample(tmp_path, monkeypatc
         assert row.estimated_total == 4000 * (before + 2)
         assert row.actual_total == 4000 * before + 8000 + 12000
     engine.dispose()
+
+
+def test_diagnostics_report_the_largest_request_apart_from_the_sum_over_requests(workspace):
+    """Each tool round is a provider request of its own, so an answer's summed input can
+    exceed the model window; the report also names the largest single request."""
+    client, engine, monkeypatch = workspace
+    with Session(engine) as session:
+        config = session.get(ModelConfig, 1)
+        config.context_window, config.max_tokens = 65536, 4096
+        session.add(config)
+        session.commit()
+
+    def agent(spec, system, messages, tools, execute, **kwargs):
+        kwargs["diagnostics"]["rounds"] = [
+            {
+                "estimated_input_tokens": estimated,
+                "input_tokens": actual,
+                "cached_input_tokens": cached,
+                "output_tokens": 30,
+            }
+            for estimated, actual, cached in [
+                (29000, 28700, 0),
+                (31000, 30900, 28000),
+                (30000, 29800, 30000),
+            ]
+        ]
+        kwargs["diagnostics"]["tool_rounds"] = 2
+        yield {"type": "delta", "text": "合成回答。"}
+
+    monkeypatch.setattr(nodes, "run_agent", agent)
+    monkeypatch.setattr(nodes, "assemble_tools", lambda *args, **kwargs: ([LOOKUP], {}))
+    events = ask(client, tools=["lookup"])
+    assert events[-1]["status"] == "complete", events
+    report = next(event["diagnostics"] for event in events if "diagnostics" in event)
+    assert report["estimated_input_tokens"] == 90000 and report["actual_input_tokens"] == 89400
+    assert report["requests"] == 3 and report["tool_rounds"] == 2
+    assert report["largest_request"] == {
+        "estimated_input_tokens": 31000,
+        "actual_input_tokens": 30900,
+        "cached_input_tokens": 28000,
+    }
+    assert report["largest_request"]["actual_input_tokens"] < 65536 < report["actual_input_tokens"]
+    assert all(isinstance(value, (int, float, bool, type(None))) for value in leaves(report))

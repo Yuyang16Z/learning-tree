@@ -1077,15 +1077,38 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     return None
                 return int(sum(values))
 
+            def largest() -> dict | None:
+                # The request with the largest estimate (the later one on a tie): what a
+                # single request carried, which the summed totals are not.
+                if not rounds:
+                    return None
+                _, peak = max(
+                    enumerate(rounds),
+                    key=lambda item: (item[1].get("estimated_input_tokens") or 0, item[0]),
+                )
+
+                def number(key: str) -> int | None:
+                    value = peak.get(key)
+                    return None if value is None else int(value)
+
+                return {
+                    "estimated_input_tokens": int(peak.get("estimated_input_tokens") or 0),
+                    "actual_input_tokens": number("input_tokens"),
+                    "cached_input_tokens": number("cached_input_tokens"),
+                }
+
             def ms(seconds: float) -> int:
                 return int(round(max(0.0, seconds) * 1000))
 
             report = {
+                # Summed over every provider request: each tool round and the final answer.
                 "estimated_input_tokens": total("estimated_input_tokens")
                 or int(context_stats.get("estimated_input_tokens") or 0),
                 "actual_input_tokens": total("input_tokens"),
                 "cached_input_tokens": total("cached_input_tokens"),
                 "output_tokens": total("output_tokens"),
+                "requests": len(rounds),
+                "largest_request": largest(),
                 "compacted": bool(context_stats.get("compacted")),
                 "tool_rounds": int(usage.get("tool_rounds") or 0),
                 # "time" or "tokens" when an agent budget ended the tool rounds early.
