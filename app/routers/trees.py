@@ -32,9 +32,11 @@ from ..models import (
     Node,
     PreferenceExtraction,
     PreferenceSupplement,
+    ToolResult,
 )
 from ..schemas import UNDERSTANDING_LEVELS, NodeOut, TreeIn, TreeOut, TreePatch, Understanding
 from ..search_index import excerpt, search_text
+from ..tool_results import portable_steps
 from ..tree_identity import record_node_id, record_tree_id
 from .nodes import _CANCELLED_REQUESTS, _REQUEST_LOCK, discard_node_work, node_metadata
 
@@ -347,10 +349,12 @@ def export_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
         ],
         "messages": [
             {
-                # Diagnostics and memory provenance are local state over this database.
+                # Diagnostics and memory provenance are local state over this database,
+                # and so are a step's references to stored complete tool results.
                 **message.model_dump(
                     exclude={"created_at", "document_ids", "diagnostics", "sources"}
                 ),
+                "steps": portable_steps(message.steps),
                 **({"document_ids": message.document_ids or []} if documents else {}),
             }
             for message in messages
@@ -457,6 +461,7 @@ def delete_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
                 _CANCELLED_REQUESTS.pop(key, None)
         for message in session.exec(select(Message).where(Message.node_id.in_(ids))).all():
             session.delete(message)
+        session.execute(delete(ToolResult).where(ToolResult.node_id.in_(ids)))
         for memory in session.exec(
             select(Memory).where((Memory.tree_id == tree_id) | Memory.source_node_id.in_(ids))
         ).all():

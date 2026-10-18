@@ -85,6 +85,25 @@ describe('stream recovery boundaries', () => {
     expect(received.mock.calls).toEqual([[sources]]);
     expect(result).not.toHaveProperty('sources');
   });
+  it('hands tool results their stored-result reference from the event and its envelope', async () => {
+    const events = [
+      { started: true, node_id: 9, request_id: 'r1' },
+      { tool_start: { name: 'web_search', args: { query: 'x' } }, seq: 1, node_id: 9, request_id: 'r1' },
+      { tool_end: { name: 'web_search', result: 'preview', call_index: 1, truncated: true }, seq: 2, node_id: 9, request_id: 'r1' },
+      { tool_end: { name: 'fetch', result: 'short', truncated: false }, seq: 3, node_id: 9, request_id: 'r1' },
+      { delta: '回答' },
+      { done: true, node_id: 9 },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(stream(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')))));
+    const starts = vi.fn(); const ends = vi.fn();
+    const result = await api.ask(1, { question: '问题', config_id: 1 }, { onDelta() {}, onToolStart: starts, onToolEnd: ends });
+    expect(starts.mock.calls).toEqual([['web_search', { query: 'x' }]]);
+    expect(ends.mock.calls).toEqual([
+      ['web_search', 'preview', { call_index: 1, truncated: true, request_id: 'r1', node_id: 9 }],
+      ['fetch', 'short', { truncated: false }],
+    ]);
+    expect(result).not.toHaveProperty('tool_end');
+  });
   it('does not mistake context readiness for terminal success', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(stream('data: {"context_status":"summarizing"}\n\ndata: {"context_status":"ready"}\n\n'))));
     const contextStatus = vi.fn();

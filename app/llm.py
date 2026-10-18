@@ -13,6 +13,7 @@ without an API key.
 
 import inspect
 import json
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from typing import Literal
@@ -20,7 +21,7 @@ from typing import Literal
 from openai import OpenAI
 
 from . import anthropic_provider, model_catalog
-from .context_budget import ContextPolicy, fit_request
+from .context_budget import ContextPolicy, estimate_request_tokens, fit_request
 from .tool_catalog import SEARCH_TOOL_NAME, ToolCatalog
 
 MOCK_ANSWER = (
@@ -344,6 +345,11 @@ def _chat_once(spec: LLMSpec, convo: list[dict], tools: list[dict], deep: bool =
     return _openai_turn(spec, convo, tools)
 
 
+def _tool_message_cost(message: dict) -> int:
+    """Estimated request tokens one tool-result message adds, as request fitting counts it."""
+    return estimate_request_tokens("", [message]) - estimate_request_tokens("", [])
+
+
 def run_agent(
     spec: LLMSpec,
     system: str,
@@ -357,6 +363,8 @@ def run_agent(
     protected_system: str | None = None,
     diagnostics: dict | None = None,
     cache_prefix: str | None = None,
+    time_limit_seconds: float | None = None,
+    tool_token_budget: int | None = None,
 ) -> Iterator[dict]:
     """Yield events: {"type":"tool_start"|"tool_end"|"reasoning"|"delta", ...}.
 
@@ -369,6 +377,14 @@ def run_agent(
     execute(name, args): caller-provided router for direct built-in calls or MCP forwarding.
     diagnostics, when given, collects per-round estimates, usage and the tool-round count.
     cache_prefix is the stable head of `system` that a native cache may mark.
+    Every round but the final no-tool one advertises tool_defs unchanged (or the
+    catalog's snapshot, which changes only when a search loads tools), so the cached
+    request prefix of a provider, which starts with the tool definitions, stays valid
+    from one round to the next.
+    time_limit_seconds and tool_token_budget end the tool rounds early: once the loop has
+    run that long, or its tool results reach that many estimated tokens, the next round
+    is the final no-tool round. They are checked between rounds, so a call in progress
+    is never interrupted; diagnostics["tool_budget_stop"] names the budget that stopped.
     """
     if _is_mock(spec):
         # A demo must never launch a real process or invoke a selected external tool.
@@ -382,8 +398,11 @@ def run_agent(
     # The prefix travels on a request copy so adapters and doubles keep their signatures.
     turn_spec = replace(spec, cache_prefix=cache_prefix) if cache_prefix else spec
 
+    started = time.monotonic()
+    tool_tokens = 0
+    budget_stop: str | None = None
     for round_index in range(max_rounds + 1):
-        final = round_index == max_rounds
+        final = round_index == max_rounds or budget_stop is not None
         current_tools = [] if final else tool_catalog.definitions if tool_catalog else tool_defs
         closing = (
             "\n工具调用已达本轮上限。请根据已取得的资料回答用户问题，明确未核实的部分；"
@@ -459,7 +478,18 @@ def run_agent(
                 else:
                     result = execute(tc["name"], tc["args"])
                 yield {"type": "tool_end", "name": tc["name"], "result": result}
-                convo.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+                tool_message = {"role": "tool", "tool_call_id": tc["id"], "content": result}
+                convo.append(tool_message)
+                tool_tokens += _tool_message_cost(tool_message)
+            # Budgets apply between rounds; only an otherwise-allowed tool round is skipped.
+            if round_index + 1 < max_rounds:
+                elapsed = time.monotonic() - started
+                if time_limit_seconds is not None and elapsed >= time_limit_seconds:
+                    budget_stop = "time"
+                elif tool_token_budget is not None and tool_tokens >= tool_token_budget:
+                    budget_stop = "tokens"
+                if budget_stop and diagnostics is not None:
+                    diagnostics["tool_budget_stop"] = budget_stop
             if streamed and r.get("content"):
                 # Narration streamed before these calls; keep it a paragraph apart
                 # from the text of the next round.

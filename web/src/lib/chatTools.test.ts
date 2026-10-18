@@ -6,7 +6,8 @@ const web: McpServer = {
   id: 3, label: "联网搜索", command: "/usr/bin/python3",
   args: ["/work/My Project/integrations/mcp/launch.py", "web-research"], enabled: true,
 };
-const files: McpServer = { ...web, id: 4, label: "学习资料", args: [web.args[0], "filesystem"] };
+const launcher = "/work/My Project/integrations/mcp/launch.py";
+const files: McpServer = { ...web, id: 4, label: "学习资料", args: [launcher, "filesystem"] };
 const builtins = { useSearch: true, useFetch: true, selectedMcp: [] };
 
 describe("chat tool authorization", () => {
@@ -15,9 +16,17 @@ describe("chat tool authorization", () => {
     expect(hasManagedWebSearch([{ ...web, label: "My research" }])).toBe(true);
     expect(hasManagedWebSearch([{ ...web, enabled: false }])).toBe(false);
     expect(hasManagedWebSearch([{ ...web, args: ["/custom/server.py", "web-research"] }])).toBe(false);
-    expect(hasManagedWebSearch([{ ...web, args: [web.args[0], "fetch"] }])).toBe(false);
+    expect(hasManagedWebSearch([{ ...web, args: [launcher, "fetch"] }])).toBe(false);
     expect(hasManagedWebSearch([{ ...web, args: [] }])).toBe(false);
     expect(managedMcpPreset({ ...web, args: ["C:\\Learning Tree\\integrations\\mcp\\launch.py", "web-research"] })).toBe("web-research");
+  });
+
+  it("never treats a remote server or one without arguments as a managed preset", () => {
+    const { args: _omitted, ...withoutArgs } = web;
+    expect(managedMcpPreset(withoutArgs)).toBeUndefined();
+    expect(managedMcpPreset({ ...web, transport: "http", url: "https://docs.example/mcp" })).toBeUndefined();
+    expect(hasManagedWebSearch([{ ...web, transport: "http" }])).toBe(false);
+    expect(selectedChatTools([{ ...web, id: 5, transport: "http", args: [] }], { ...builtins, selectedMcp: [5] })).toEqual(["web_search", "fetch", "mcp_server_5"]);
   });
 
   it("suppresses stale builtin selections without automatically selecting the combined MCP", () => {

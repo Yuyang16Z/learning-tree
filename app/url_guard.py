@@ -23,6 +23,22 @@ class BlockedURL(ValueError):
     """The URL points somewhere a model-chosen request must not reach."""
 
 
+class UnresolvedHost(BlockedURL):
+    """The host name has no address; distinct from a refused private address."""
+
+
+def validate_url(url: str):
+    """Check the scheme, host and absence of credentials without resolving anything."""
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        raise BlockedURL("只允许 http 或 https 链接")
+    if not parts.hostname:
+        raise BlockedURL("链接缺少主机名")
+    if parts.username or parts.password:
+        raise BlockedURL("链接不能包含用户名或密码")
+    return parts
+
+
 def _check_address(address: str) -> None:
     ip = ipaddress.ip_address(address.split("%", 1)[0])  # Drop an IPv6 zone index.
     if ip.version == 6 and ip.ipv4_mapped is not None:
@@ -35,21 +51,15 @@ def _check_address(address: str) -> None:
 
 def resolve_public(url: str, resolver: Resolver = socket.getaddrinfo) -> str:
     """Return one checked address for the URL's host; every resolved address must be public."""
-    parts = urlsplit(url)
-    if parts.scheme not in ("http", "https"):
-        raise BlockedURL("只允许 http 或 https 链接")
-    if not parts.hostname:
-        raise BlockedURL("链接缺少主机名")
-    if parts.username or parts.password:
-        raise BlockedURL("链接不能包含用户名或密码")
+    parts = validate_url(url)
     try:
         port = parts.port or (443 if parts.scheme == "https" else 80)
         infos = resolver(parts.hostname, port, type=socket.SOCK_STREAM)
     except (socket.gaierror, ValueError) as exc:
-        raise BlockedURL(f"无法解析主机名：{exc}") from exc
+        raise UnresolvedHost(f"无法解析主机名：{exc}") from exc
     addresses = sorted({info[4][0] for info in infos})
     if not addresses:
-        raise BlockedURL("无法解析主机名")
+        raise UnresolvedHost("无法解析主机名")
     for address in addresses:
         _check_address(address)
     return addresses[0]

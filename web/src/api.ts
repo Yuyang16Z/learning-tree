@@ -1,4 +1,6 @@
 import { readSSE } from "./lib/sse";
+import { toolReference, type ToolReference } from "./lib/toolSteps";
+import { reportPairingRequired } from "./lib/phonePairing";
 import { getLocale, translate } from "./i18n";
 import { localizeError } from "./i18n/workspace";
 import type {
@@ -24,6 +26,7 @@ import type {
   ReturnSummary,
   SearchHit,
   ThreadNode,
+  ToolResultPage,
   Tree,
   TreeNode,
   SourceAnchor,
@@ -35,6 +38,8 @@ import type {
 const API = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
 
 async function requestError(res: Response): Promise<Error> {
+  // Another device whose pairing is missing or was rotated: ask it to scan again.
+  reportPairingRequired(res.status, globalThis.location?.hostname);
   let detail: any;
   try { const data = await res.json(); detail = data.detail ?? data; } catch { detail = null; }
   const message = typeof detail === 'string' ? detail : detail?.message;
@@ -99,7 +104,7 @@ async function relay(res: Response, on: AskHandlers, start: AskMeta, signal?: Ab
       if (typeof obj.reasoning === 'string') on.onReasoning?.(obj.reasoning);
       if (obj.context_status === 'summarizing' || obj.context_status === 'ready') on.onContextStatus?.(obj.context_status);
       if (obj.tool_start) on.onToolStart?.(obj.tool_start.name, obj.tool_start.args);
-      if (obj.tool_end) on.onToolEnd?.(obj.tool_end.name, obj.tool_end.result);
+      if (obj.tool_end) on.onToolEnd?.(obj.tool_end.name, obj.tool_end.result, toolReference(obj.tool_end, obj));
       if (obj.diagnostics && typeof obj.diagnostics === 'object' && !Array.isArray(obj.diagnostics)) on.onDiagnostics?.(obj.diagnostics as AnswerDiagnostics);
       // Memory provenance is dispatched, never merged into the completion metadata.
       if (Array.isArray(obj.sources)) on.onSources?.(obj.sources as AnswerSource[]);
@@ -135,7 +140,8 @@ export interface AskHandlers {
   onReasoning?: (s: string) => void;
   onContextStatus?: (status: ContextStatus) => void;
   onToolStart?: (name: string, args: unknown) => void;
-  onToolEnd?: (name: string, result: string) => void;
+  /** `reference` points at the call's stored complete result when the preview is shorter. */
+  onToolEnd?: (name: string, result: string, reference: ToolReference) => void;
   /** Numeric request/usage/timing summary, sent once before the answer ends. */
   onDiagnostics?: (diagnostics: AnswerDiagnostics) => void;
   onSources?: (sources: AnswerSource[]) => void;
@@ -238,6 +244,9 @@ export const api = {
   deleteTree: (id: number) => fetch(`${API}/trees/${id}`, { method: "DELETE" }).then(j<unknown>),
 
   getNode: (id: number) => fetch(`${API}/nodes/${id}`).then(j<NodeDetail>),
+  // One page of a tool call's stored complete result (the step shows a preview).
+  toolResult: (nodeId: number, callIndex: number, requestId: string, start = 0, signal?: AbortSignal) =>
+    fetch(`${API}/nodes/${nodeId}/tool-results/${callIndex}?${new URLSearchParams({ request_id: requestId, start: String(start), max_chars: "20000" })}`, { signal }).then(j<ToolResultPage>),
   getThread: (id: number) =>
     fetch(`${API}/nodes/${id}/thread`).then(j<{ nodes: ThreadNode[] }>).then((r) => r.nodes),
   // Explicit deletion only. Editing creates a separate version through ask(mode=revise).
@@ -264,6 +273,8 @@ export const api = {
   }).then(j<unknown>),
 
   phoneAccess: (signal?: AbortSignal) => fetch(`${API}/phone-access`, { signal, cache: "no-store" }).then(j<PhoneAccess>),
+  // Only this computer may rotate; every paired phone must scan the new QR code.
+  rotatePhoneAccess: () => jsonPost(`${API}/phone-access/rotate`, {}).then(j<PhoneAccess>),
 
   changes: (since: string, signal?: AbortSignal) =>
     fetch(`${API}/changes?${new URLSearchParams({ since })}`, { signal, cache: "no-store" }).then(j<ChangeNotice>),

@@ -22,6 +22,7 @@ from app.models import ContextSummary, KnowledgeTree, Message, ModelConfig, Node
 from app.routers import nodes, trees
 from app.search_index import HISTORY_TOOL_NAME
 from app.tool_catalog import SEARCH_TOOL_NAME, tool_definition_cost
+from app.tool_results import TOOL_RESULT_TOOL_NAME
 
 
 @pytest.fixture
@@ -1069,7 +1070,11 @@ def test_widened_recall_offers_history_search_without_other_tools(api, monkeypat
     readbacks = []
 
     def agent(spec, system, messages, tools, execute, **kwargs):
-        assert [item["function"]["name"] for item in tools] == [HISTORY_TOOL_NAME]
+        # Any tool round also offers the reader of this answer's complete tool results.
+        assert [item["function"]["name"] for item in tools] == [
+            HISTORY_TOOL_NAME,
+            TOOL_RESULT_TOOL_NAME,
+        ]
         readbacks.append(
             json.loads(execute(HISTORY_TOOL_NAME, {"query": "SYNTHETIC", "scope": "tree"}))
         )
@@ -1086,7 +1091,7 @@ def test_widened_recall_offers_history_search_without_other_tools(api, monkeypat
     assert readbacks[1]["error"] == "scope_not_enabled"
 
 
-def test_compaction_without_tools_offers_both_readers(api, monkeypatch):
+def test_compaction_without_tools_offers_the_readers(api, monkeypatch):
     client, engine, calls = api
     make_history_long(engine)
     seen = []
@@ -1098,7 +1103,7 @@ def test_compaction_without_tools_offers_both_readers(api, monkeypatch):
     monkeypatch.setattr(nodes, "run_agent", agent)
     events = ask(client)
     assert events[-1]["done"], events
-    assert seen == [[SOURCE_TOOL_NAME, HISTORY_TOOL_NAME]]
+    assert seen == [[SOURCE_TOOL_NAME, HISTORY_TOOL_NAME, TOOL_RESULT_TOOL_NAME]]
 
 
 def test_history_search_stays_pinned_in_a_tool_catalog(api, monkeypatch):

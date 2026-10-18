@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { localizeError, mcpDisplayName } from "./workspace";
 import type { McpServer } from "../types";
 
-const server: McpServer = { id: 1, label: "学习资料", command: "/usr/bin/python3", args: ["/work/My Project/integrations/mcp/launch.py", "filesystem"], enabled: true };
+const launcher = "/work/My Project/integrations/mcp/launch.py";
+const server: McpServer = { id: 1, label: "学习资料", command: "/usr/bin/python3", args: [launcher, "filesystem"], enabled: true };
 
 describe("localized application diagnostics", () => {
   it("localizes known backend errors, test status, and HTTP diagnostics", () => {
@@ -27,6 +28,10 @@ describe("localized application diagnostics", () => {
       "服务商未提供该模型的上下文长度；以下为内置目录的近似值，请核对后保存。",
       "演示模型没有可检测的上下文窗口。",
       "检索范围设置已在其他窗口更新，请重新载入。",
+      "MCP 远程服务拒绝访问，请检查请求头中的凭据。", "新的请求头需要填写值。",
+      "MCP 远程地址指向本机或内网；如果是本机开发服务，请在配置中允许内网地址。",
+      "工具结果不存在或已删除。", "需要重新配对：请在电脑上打开「设置 → 手机访问」，用手机扫描二维码。",
+      "配对链接无效或已更换，请在电脑上重新扫描二维码。", "无法保存手机访问令牌，请检查令牌文件所在目录的权限。",
     ]) {
       const english = localizeError(original, "en");
       expect(english).not.toBe(original);
@@ -44,7 +49,7 @@ describe("localized application diagnostics", () => {
 
 describe("managed MCP display labels", () => {
   it("localizes either web-search default while preserving custom and unmanaged labels", () => {
-    const search = { ...server, args: [server.args[0], "web-research"] };
+    const search = { ...server, args: [launcher, "web-research"] };
     for (const label of ["联网搜索", "Web search"]) {
       expect(mcpDisplayName({ ...search, label }, "zh-CN")).toBe("联网搜索");
       expect(mcpDisplayName({ ...search, label }, "en")).toBe("Web search");
@@ -52,6 +57,7 @@ describe("managed MCP display labels", () => {
     expect(mcpDisplayName({ ...search, label: "我的研究助手" }, "en")).toBe("我的研究助手");
     expect(mcpDisplayName({ ...search, label: "My research" }, "zh-CN")).toBe("My research");
     expect(mcpDisplayName({ ...search, label: "Web search", args: ["/custom/server.py", "web-research"] }, "zh-CN")).toBe("Web search");
+    expect(mcpDisplayName({ ...search, label: "联网搜索", transport: "http", url: "https://docs.example/mcp" }, "en")).toBe("联网搜索");
   });
 
   it("localizes only the unchanged defaults of recognized managed servers", () => {
@@ -59,6 +65,6 @@ describe("managed MCP display labels", () => {
     expect(mcpDisplayName(server, "zh-CN")).toBe("学习资料");
     expect(mcpDisplayName({ ...server, label: "我的资料" }, "en")).toBe("我的资料");
     expect(mcpDisplayName({ ...server, args: ["/another/server.py", "filesystem"] }, "en")).toBe("学习资料");
-    expect(mcpDisplayName({ ...server, args: [server.args[0], "custom"] }, "en")).toBe("学习资料");
+    expect(mcpDisplayName({ ...server, args: [launcher, "custom"] }, "en")).toBe("学习资料");
   });
 });

@@ -35,9 +35,13 @@ An OpenAI-compatible model's **Answer reserve** is only a local planning allowan
 
 ## Many selected tools
 
-One checked MCP server can expose many functions. When their combined definitions exceed the schema allowance (normally one third of the input budget, adjusted for mandatory input and internal readers), LearningTree switches to a request-local tool catalog. It initially sends discovery, source readers and a small relevant set: the built-in web search/fetch tools and the managed web-research MCP's `web_search`/`read_webpage` (under their `mcp_<id>_` names), plus up to three definitions matching the question. The model uses `search_available_tools` to find selected functions by name or description, then receives their complete native schemas on its next request. Searching does not execute the functions or enable unselected servers.
+One checked MCP server can expose many functions. When their combined definitions exceed the schema allowance (normally one third of the input budget, adjusted for mandatory input and internal readers), LearningTree switches to a request-local tool catalog. It initially sends discovery, source readers, the answer's `read_tool_result` reader and a small relevant set: the built-in web search/fetch tools and the managed web-research MCP's `web_search`/`read_webpage` (under their `mcp_<id>_` names), plus up to three definitions matching the question. The model uses `search_available_tools` to find selected functions by name or description, then receives their complete native schemas on its next request. Searching does not execute the functions or enable unselected servers.
 
 The initial context reserves room for later schema loading as well as tool results. Newly requested definitions can replace older ones within that allowance. An individual definition too large to fit is reported as unavailable through discovery; its required arguments are never silently removed. Small tool sets keep the direct path. Catalog mode allows six tool rounds, followed when necessary by one answer-only request to synthesize the collected evidence.
+
+## Agent budgets
+
+Besides the round cap, two budgets end an answer's tool rounds early: `AGENT_TIME_LIMIT_SECONDS` (default 180) measured from the first tool-capable request, and `AGENT_TOOL_TOKEN_BUDGET` (default 60,000) counted with the same request estimator over every tool-result message the answer has gathered. Both are read from the environment or `.env`. They are checked between rounds: a round that has started runs all of its calls, and a call in progress is never interrupted, so a slow tool can overrun the time limit by its own duration. Once either budget is exceeded, the next request is the existing final round without tools, with the same closing instruction to answer from the collected evidence and mark what was not verified. The answer's diagnostics record `tool_budget_stop` (`time`, `tokens`, or empty when only the round cap or the model ended the rounds), shown in the collapsed block under the answer. Token counts are local estimates, not provider counts.
 
 ## What the estimator counts
 
@@ -118,5 +122,7 @@ See [local operation and backups](operations.md), [architecture](architecture.md
 摘要只用于当前学习路径，不混入兄弟分支，不写入长期记忆，也不改写聊天原文。编辑笔记后相关摘要失效；修改问题生成的新版本独立处理；删除节点或整棵树会同步删除依赖它们的摘要，尚未返回的摘要不能把已删除内容写回来。摘要可能遗漏或误解细节，不能宣称无损压缩；需要精确信息时仍应回读原文。
 
 勾选一组 MCP 可能展开成很多函数。工具定义较多时改为按需发现与加载，选中的工具仍可检索，完整参数定义在下一轮发给模型；检索本身不会执行工具。系统同时预留后续加载和结果所需空间。单个定义仍过大时会明确告知，不会擅自删减参数。
+
+除轮数上限外，还有两项 Agent 预算：`AGENT_TIME_LIMIT_SECONDS`（默认 180 秒，从第一次可调用工具的请求开始计时）和 `AGENT_TOOL_TOKEN_BUDGET`（默认 60,000，用同一请求估算器累计本次回答收到的全部工具结果）。两者在轮与轮之间检查：已开始的一轮会执行完它的全部调用，正在执行的调用不会被中断，所以慢工具可能让实际耗时略超上限。任一预算用完后，下一次请求就是原有的最后一轮无工具请求，沿用相同的收尾指令，根据已取得的资料作答。回答诊断中的 `tool_budget_stop` 记录是哪项预算提前结束了工具轮（`time`、`tokens`，或在仅由轮数上限或模型自行结束时为空），显示在回答下方的折叠块中。token 数是本地估算，不是服务商的计数。
 
 首次上下文已压缩，或用户选中了可能继续产生较长结果的工具时，会启用 `read_learning_source`，供 Agent 分页回读当前学习路径原文，执行时重新核对来源范围。短且未选工具的问答保留普通流式路径。回读不会把兄弟分支、其他知识树或任意文件开放给模型。后续工具调用增长时先省略较早问答，再回收可选历史、记忆和文档摘录；仍不够时，超长工具结果标记只保留首尾，不能为补读而重放有副作用的操作。当前问题、引用、图片、学习笔记及原始存档会保留；必要输入仍超预算时提示调整输入或模型配置。

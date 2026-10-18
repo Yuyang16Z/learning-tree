@@ -30,7 +30,19 @@ export interface TreeNode extends LearningFields {
   id: number; tree_id: number; parent_id: number | null; title: string;
   seed_text: string | null; has_summary: boolean;
 }
-export interface ToolStep { tool: string; result: string | null }
+/**
+ * One tool call of an answer and a preview of its result. A truncated preview may point at
+ * the stored complete text: `call_index` within `request_id`, on the step's or the row's node.
+ */
+export interface ToolStep {
+  tool: string; result: string | null;
+  call_index?: number; truncated?: boolean; request_id?: string; node_id?: number;
+}
+/** One page of a stored complete tool result. */
+export interface ToolResultPage {
+  node_id: number; request_id: string; call_index: number; tool: string; truncated: boolean;
+  text: string; start: number; end: number; total_chars: number; next_start: number | null;
+}
 /** Numbers only: how an answer's request was budgeted, what the provider reported and how long each phase took. */
 export interface AnswerDiagnostics {
   estimated_input_tokens: number;
@@ -39,6 +51,8 @@ export interface AnswerDiagnostics {
   output_tokens: number | null;
   compacted: boolean;
   tool_rounds: number;
+  /** The agent budget that ended the tool rounds early (time limit or tool-result size); null when none did. */
+  tool_budget_stop?: 'time' | 'tokens' | null;
   calibration_ratio: number;
   timings_ms: { retrieval: number; tools: number; summary: number; model: number; total: number };
 }
@@ -107,8 +121,17 @@ export interface ModelDiscovery {
   context_window: number | null; max_output_tokens: number | null;
   source: 'provider' | 'catalog' | 'unknown'; note: string;
 }
-export interface McpServer { id: number; label: string; command: string; args: string[]; enabled: boolean }
-export interface McpInput { label: string; command: string; args: string[]; enabled: boolean }
+export type McpTransport = 'stdio' | 'http';
+/** A configured MCP server. Remote (http) servers list their header names only, never values. */
+export interface McpServer {
+  id: number; label: string; command: string; args?: string[]; enabled: boolean;
+  transport?: McpTransport; url?: string | null; header_names?: string[]; allow_private?: boolean;
+}
+/** A blank header value keeps the stored value of that header; omitted headers keep every stored one. */
+export interface McpInput {
+  label: string; command: string; args: string[]; enabled: boolean;
+  transport?: McpTransport; url?: string; headers?: Record<string, string>; allow_private?: boolean;
+}
 export interface Memory { id: number; kind: string; content: string; tree_id: number | null }
 export interface PreferenceProfile { content: string; revision: string; managed: boolean }
 export interface PreferenceLearning { enabled: boolean; revision: string }
@@ -156,6 +179,16 @@ export interface PhoneAccess {
   url?: string;
   host?: string | null;
   command?: string;
+  /** The address plus "#token=…", given to this computer only; the QR code encodes it. */
+  access_url?: string;
+  /** Fixed message when the token cannot be stored. */
+  access_error?: string;
+  /** This computer manages the token (ACCESS_TOKEN_MODE=required), in any state. */
+  can_rotate?: boolean;
+  /** For pairing links to other addresses; this computer only, never while public. */
+  pairing_token?: string;
+  /** ALLOWED_HOSTS names, the only other hosts such a link may use besides *.ts.net. */
+  pairing_hosts?: string[];
 }
 export interface MemoryRetrievalStatus {
   state: 'ready' | 'preparing' | 'degraded' | 'disabled' | 'not_installed';

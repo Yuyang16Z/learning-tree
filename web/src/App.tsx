@@ -26,6 +26,8 @@ import { mergePendingTitles, pollPendingTitles } from "./lib/titlePolling";
 import { resumeAnswer } from "./lib/answerStream";
 import { keepIfSame, planRefresh, watchChanges } from "./lib/changeFeed";
 import { restoreUnderstanding, withUnderstanding } from "./lib/understanding";
+import { finishToolStep, startToolStep } from "./lib/toolSteps";
+import { onPairingRequired } from "./lib/phonePairing";
 import { SettingsModal } from "./components/SettingsModal";
 import { NewTreeModal } from "./components/NewTreeModal";
 import { AddModelModal } from "./components/AddModelModal";
@@ -78,6 +80,9 @@ export default function App() {
   const streamTargetRef = useRef<number | null>(null);
   const requestRef = useRef<{ from: number; origin: number; tree: number; requestId: string } | null>(null);
   const [notice, setNoticeState] = useState<{ message: string } | null>(null);
+  // Set when this phone's pairing is missing or was rotated on the computer.
+  const [pairingRequired, setPairingRequired] = useState(false);
+  useEffect(() => onPairingRequired(() => setPairingRequired(true)), []);
   function setNotice(message: string | null) {
     // A new event restarts the timer even when its wording is unchanged.
     setNoticeState(message === null ? null : { message });
@@ -439,13 +444,8 @@ export default function App() {
         if (abortRef.current === ctrl && contextStatusRequestRef.current === requestId && !ctrl.signal.aborted)
           setContextStatus(status);
       },
-      onToolStart: name => setLiveSteps(s => [...s, { tool: name, result: null }]),
-      onToolEnd: (name, result) => setLiveSteps(s => {
-        const copy = [...s];
-        const index = copy.map(x => x.result === null).lastIndexOf(true);
-        if (index >= 0) copy[index] = { tool: name, result };
-        return copy;
-      }),
+      onToolStart: name => setLiveSteps(s => startToolStep(s, name)),
+      onToolEnd: (name, result, reference) => setLiveSteps(s => finishToolStep(s, name, result, reference)),
       onDiagnostics: setLiveDiagnostics,
       onSources: sources => setLiveSources(sources),
     };
@@ -680,6 +680,7 @@ export default function App() {
         onImport={() => importRef.current?.click()}
       />
       <div className="workspace-main">
+      {pairingRequired && <div className="pairing-required" role="alert">{t("这台设备需要重新配对：请在电脑上打开「设置 → 手机访问」，用手机扫描二维码。", "This device needs to be paired again: open Settings → Phone access on the computer and scan the QR code with your phone.")}</div>}
       {notice && <div className="notice" role="status"><span>{localizeError(notice.message, locale)}</span><button onClick={() => setNotice(null)} aria-label={t("关闭提示", "Dismiss notification")}>×</button></div>}
       {busyNavigation && <div className="loading-line" aria-label={t("正在加载", "Loading")} />}
       <ChatPane

@@ -325,7 +325,7 @@ from pathlib import Path
 from sqlalchemy.engine import make_url
 from sqlmodel import Session
 from app.db import engine
-from app.models import KnowledgeTree, Memory, MemoryEmbedding, Message, Node
+from app.models import KnowledgeTree, Memory, MemoryEmbedding, Message, Node, ToolResult
 from app.documents import DocumentAttachment
 payload = json.load(sys.stdin)
 database = Path(make_url(os.environ['DATABASE_URL']).database).resolve()
@@ -347,8 +347,12 @@ with Session(engine) as session:
     session.add(survivor)
     session.flush()
     session.add(MemoryEmbedding(memory_id=memory.id, model_key='synthetic-test', content_hash='synthetic', vector=[1.0, 0.0]))
+    output = ToolResult(node_id=payload['branch'], request_id='synthetic-topic-delete', call_index=1, tool_name='fixture', content='Synthetic TOPIC-DELETE-417 tool output.')
+    kept_output = ToolResult(node_id=payload['peer_node'], request_id='synthetic-topic-keep', call_index=1, tool_name='fixture', content='Synthetic TOPIC-SURVIVES-418 tool output.')
+    session.add(output)
+    session.add(kept_output)
     session.commit()
-    print(json.dumps({'memory': memory.id, 'survivor': survivor.id}))
+    print(json.dumps({'memory': memory.id, 'survivor': survivor.id, 'tool_result': output.id, 'kept_tool_result': kept_output.id}))
 `], {
       cwd: path.resolve(__dirname, '..'), encoding: 'utf8',
       input: JSON.stringify({ tree: topic.id, peer: peerTopic.id, peer_node: peerTopic.root_node_id, document: document.id, message: originalRoot.messages[0].id, branch: branch.id }),
@@ -442,7 +446,7 @@ from pathlib import Path
 from sqlalchemy.engine import make_url
 from sqlmodel import Session, select
 from app.db import engine
-from app.models import KnowledgeTree, Memory, MemoryEmbedding, Message, Node
+from app.models import KnowledgeTree, Memory, MemoryEmbedding, Message, Node, ToolResult
 from app.documents import DocumentAttachment
 payload = json.load(sys.stdin)
 database = Path(make_url(os.environ['DATABASE_URL']).database).resolve()
@@ -456,6 +460,10 @@ with Session(engine) as session:
     assert session.get(Memory, payload['memory']) is None
     assert not session.exec(select(MemoryEmbedding).where(MemoryEmbedding.memory_id == payload['memory'])).all()
     assert session.get(Memory, payload['survivor']) is not None
+    # Stored complete tool results belong to their node and leave with the topic.
+    assert session.get(ToolResult, payload['tool_result']) is None
+    assert not session.exec(select(ToolResult).where(ToolResult.node_id.in_(payload['nodes']))).all()
+    assert session.get(ToolResult, payload['kept_tool_result']) is not None
 with engine.connect() as connection:
     if connection.exec_driver_sql("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'search_index'").first():
         # The full-text index is derived data: triggers drop the deleted topic's rows.
@@ -470,7 +478,7 @@ with engine.connect() as connection:
     await sidebar.waitFor();
     assert(await page.evaluate(keys => keys.every(key => localStorage.getItem(key) === null), deletedKeys), 'Pagehide and reload cannot recreate deleted drafts');
     assert.equal(await page.evaluate(() => localStorage.getItem('bl-recovery')), null);
-    checks.push('Confirmed deletion removes the tree, nodes, messages, attachments, memories, vector cache and owned browser state without a hidden backup; other topics survive');
+    checks.push('Confirmed deletion removes the tree, nodes, messages, attachments, memories, vector cache, stored tool results and owned browser state without a hidden backup; other topics survive');
 
     // A fresh topic covers the last-active archive path without restoring deletion.
     const lastTitle = 'Topic UI check · Last active topic';

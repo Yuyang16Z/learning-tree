@@ -10,7 +10,7 @@ from .db import engine
 from .llm import FACT_TYPES, LLMSpec, extract_memories
 from .memory_preferences import begin_memory_write
 from .models import KnowledgeTree, McpServer, Memory, Message, ModelConfig, Node, PreferenceProfile
-from .tools import TOOL_DEFS, execute_tool, mcp_tool_def
+from .tools import TOOL_DEFS, ToolText, execute_tool, mcp_tool_def
 
 
 def mask_key(key: str) -> str:
@@ -92,7 +92,7 @@ def assemble_tools(session: Session, requested: list[str]) -> tuple[list[dict], 
             srv = session.get(McpServer, sid)
             if not srv or not srv.enabled:
                 continue
-            spec = mcp_client.server_spec(srv.command, srv.args)
+            spec = mcp_client.server_spec_for(srv)
             try:
                 for t in mcp_client.list_tools(spec):
                     oai = f"mcp_{sid}_{t['name']}"
@@ -114,7 +114,10 @@ def make_executor(router: dict) -> Callable[[str, dict], str]:
             return f"未知工具：{name}"
         if r[0] == "builtin":
             return execute_tool(name, args)
-        return mcp_client.call_tool(r[1], r[2], args)  # ("mcp", spec, real_name)
+        complete: list[str] = []
+        text = mcp_client.call_tool(r[1], r[2], args, complete)  # ("mcp", spec, real_name)
+        # The model gets the bounded text; the complete text rides along for storage.
+        return ToolText(text, complete[0] if complete else None)
 
     return execute
 

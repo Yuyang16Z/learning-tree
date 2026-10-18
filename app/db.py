@@ -104,6 +104,12 @@ _ADDED_COLUMNS = {
         "superseded_by": "INTEGER",
         "updated_at": "DATETIME",
     },
+    "mcpserver": {
+        "transport": "TEXT NOT NULL DEFAULT 'stdio'",
+        "url": "TEXT",
+        "headers": "JSON",
+        "allow_private": "BOOLEAN NOT NULL DEFAULT 0",
+    },
 }
 
 

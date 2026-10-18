@@ -24,10 +24,13 @@ def test_dev_overrides_production_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "sqlite:///personal.db")
     monkeypatch.setenv("DEFAULT_API_KEY", "private-provider-key")
     monkeypatch.setenv("VITE_API_BASE", "http://127.0.0.1:8099/api")
+    monkeypatch.setenv("ACCESS_TOKEN_FILE", "/private/real/phone-access-token")
     env = manage.isolated_env(tmp_path / "dev.db")
     assert env["DATABASE_URL"] == f"sqlite:///{(tmp_path / 'dev.db').as_posix()}"
     assert env["DEFAULT_API_KEY"] == "mock"
     assert env["VITE_API_BASE"] == "/api"
+    # The phone-access token stays beside the isolated database.
+    assert env["ACCESS_TOKEN_FILE"] == (tmp_path / "phone-access-token").resolve().as_posix()
 
 
 def test_basic_dependency_manifest_excludes_local_model_runtime():

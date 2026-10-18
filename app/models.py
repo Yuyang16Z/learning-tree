@@ -135,14 +135,25 @@ class PreferenceExtraction(SQLModel, table=True):
 
 
 class McpServer(SQLModel, table=True):
-    """A user-configured stdio MCP server whose tools are available to agent turns when enabled."""
+    """A user-configured MCP server whose tools are available to agent turns when enabled.
+
+    stdio servers are local programs (command/args); http servers are remote Streamable
+    HTTP endpoints (url/headers). Header values are credentials: they stay in this table
+    and are never returned by the API, logged or exported."""
 
     id: int | None = Field(default=None, primary_key=True)
     label: str  # Display name, e.g. "fetch" or "filesystem".
-    command: str  # Launch command, e.g. "uvx", "npx" or "python".
+    command: str  # Launch command, e.g. "uvx", "npx" or "python"; empty for http servers.
     args: list | None = Field(default=None, sa_column=Column(JSON))  # E.g. ["mcp-server-fetch"].
     enabled: bool = True
     created_at: datetime = Field(default_factory=_now)
+    transport: Literal["stdio", "http"] = Field(
+        default="stdio", sa_column=Column(String, nullable=False, default="stdio")
+    )
+    url: str | None = None  # Streamable HTTP endpoint, e.g. "https://example.com/mcp".
+    headers: dict | None = Field(default=None, sa_column=Column(JSON))  # Name -> value.
+    # Opt-in for loopback, private, link-local and CGNAT addresses (a local dev server).
+    allow_private: bool = False
 
 
 class KnowledgeTree(SQLModel, table=True):
@@ -203,13 +214,33 @@ class Message(SQLModel, table=True):
     document_ids: list[str] | None = Field(default=None, sa_column=Column(JSON))
     # Deep thinking: assistant reasoning from the model's reasoning_content field.
     reasoning: str | None = None
-    # Tool steps: [{"tool":..,"args":..,"result":..}] for collapsible frontend display.
+    # Tool steps for collapsible display: [{"tool", "result" (a 3,000-character preview),
+    # "truncated", "call_index", "request_id"}]; the last two locate the ToolResult row.
     steps: list | None = Field(default=None, sa_column=Column(JSON))
-    # Per-answer numbers only (token estimates, usage, timings); never prompt text.
+    # Per-answer numbers (token estimates, usage, timings) and fixed labels such as the
+    # budget that stopped tool rounds; never prompt text.
     diagnostics: dict | None = Field(default=None, sa_column=Column(JSON))
     # Memory records the answer was given: [{memory_id, source_node_id, tree_id,
     # tree_title, scope}]. Local provenance only; excluded from exports.
     sources: list | None = Field(default=None, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=_now)
+
+
+class ToolResult(SQLModel, table=True):
+    """The complete text one tool call returned during an answer, for paging.
+
+    Bound to the node and request that produced it; `call_index` counts the answer's
+    tool calls from 1. Side data outside the change feed: deleted with its node or
+    topic and never exported. `truncated` marks text cut at the storage limit."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    node_id: int = Field(foreign_key="node.id", index=True)
+    request_id: str = Field(index=True)
+    call_index: int
+    tool_name: str
+    arguments: dict | None = Field(default=None, sa_column=Column(JSON))
+    content: str
+    truncated: bool = False
     created_at: datetime = Field(default_factory=_now)
 
 
