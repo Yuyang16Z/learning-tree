@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import type { NavigationAnchor, SearchHit, TreeNode } from "../types";
 import { api } from "../api";
-import { createMapSearcher, currentHits, hitKindLabel, localMatches, MAP_SEARCH_CAP, MAP_SEARCH_MAX_QUERY, mergeSearchResults, plainSnippet, searchAnchor, searchPending, type RemoteHits } from "../lib/mapSearch";
+import { createMapSearcher, currentHits, hitKindLabel, localMatches, MAP_SEARCH_CAP, MAP_SEARCH_MAX_QUERY, mergeSearchResults, plainSnippet, searchAnchor, searchFailed, searchPending, searchStatusText, type RemoteHits } from "../lib/mapSearch";
 import { groupAncestorIds, groupTopics, layoutTopics, TOPIC_CARD } from "../lib/topicLayout";
 import { navigateMapView } from "../lib/mapCamera";
 import { cardUnderstanding, UNDERSTANDING_TEXT, unresolvedNodes } from "../lib/understanding";
@@ -261,10 +261,8 @@ export function LearningMap({ nodes, activeId, onSelect, onDelete, onCollapse, w
   const results = useMemo(() => localMatches(nodes, query), [nodes, query]);
   const hits = useMemo(() => currentHits(remote, treeId, query), [remote, treeId, query]);
   const merged = useMemo(() => mergeSearchResults(results, hits, nodes), [results, hits, nodes]);
-  const resultCount = merged.local.length + merged.remote.length;
-  const resultStatus = resultCount
-    ? merged.more ? t("{count}+ 个结果", "{count}+ results", { count: resultCount }) : t("{count} 个结果", "{count} results", { count: resultCount })
-    : searchPending(remote, treeId, query) ? t("正在搜索…", "Searching…") : t("没有找到相关问题", "No matching questions");
+  const history = searchPending(remote, treeId, query) ? "pending" : searchFailed(remote, treeId, query) ? "failed" : "answered";
+  const resultStatus = searchStatusText({ count: merged.local.length + merged.remote.length, more: merged.more }, history, t);
   const activeGroupId = activeId == null ? undefined : tree.nodeToGroup.get(activeId);
   const nodeStyle = (x: number, y: number, height: number): CSSProperties => ({ left: x, top: y, width: TOPIC_CARD.width, height });
 

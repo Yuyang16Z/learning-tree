@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { formatMessage, type MessageParams } from "../i18n/locale";
 import type { SearchHit, TreeNode } from "../types";
-import { createMapSearcher, currentHits, hitKindLabel, localMatches, mergeSearchResults, plainSnippet, searchAnchor, searchPending, type RemoteHits } from "./mapSearch";
+import { createMapSearcher, currentHits, hitKindLabel, localMatches, mergeSearchResults, plainSnippet, searchAnchor, searchFailed, searchPending, searchStatusText, type RemoteHits } from "./mapSearch";
 
 function node(id: number, title: string, seed_text: string | null = null): TreeNode {
   return { id, parent_id: id === 1 ? null : 1, tree_id: 7, title, seed_text, has_summary: false };
@@ -188,12 +189,16 @@ describe("debounced topic search", () => {
     await vi.advanceTimersByTimeAsync(10);
     expect(searchPending(remote, 7, " pivot ")).toBe(false);
     expect(searchPending(remote, 7, "pivots")).toBe(true);
+    expect(searchFailed(remote, 7, "pivot")).toBe(false);
     fail = true;
     run(7, "pivots");
     await vi.advanceTimersByTimeAsync(10);
     expect(failures).toEqual(["pivots"]);
     expect(searchPending(remote, 7, "pivots")).toBe(false);
     expect(currentHits(remote, 7, "pivots")).toEqual([]);
+    // The failure belongs to that topic and query only.
+    expect(searchFailed(remote, 7, " pivots ")).toBe(true);
+    expect([searchFailed(remote, 7, "pivot"), searchFailed(remote, 8, "pivots"), searchFailed(null, 7, "pivots")]).toEqual([false, false, false]);
     // A request that was cancelled or superseded reports nothing.
     run(7, "pivot again");
     await vi.advanceTimersByTimeAsync(5);
@@ -201,6 +206,22 @@ describe("debounced topic search", () => {
     searcher.cancel();
     await vi.advanceTimersByTimeAsync(20);
     expect(failures).toEqual(["pivots"]);
+  });
+
+  it("claims no matches only after the history search answered, and names a failed one", () => {
+    const en = (zh: string, text: string, params?: MessageParams) => formatMessage("en", zh, text, params);
+    const zh = (text: string, english: string, params?: MessageParams) => formatMessage("zh-CN", text, english, params);
+    const none = { count: 0, more: false };
+    expect(searchStatusText(none, "pending", en)).toBe("Searching…");
+    expect(searchStatusText(none, "failed", en)).toBe("History search failed");
+    expect(searchStatusText(none, "failed", zh)).toBe("历史记录搜索失败");
+    expect(searchStatusText(none, "answered", en)).toBe("No matching questions");
+    expect(searchStatusText(none, "answered", zh)).toBe("没有找到相关问题");
+    // Instant matches are counted at once; a failed history search is still named beside them.
+    expect(searchStatusText({ count: 2, more: false }, "pending", en)).toBe("2 results");
+    expect(searchStatusText({ count: 2, more: false }, "failed", en)).toBe("2 results · History search failed");
+    expect(searchStatusText({ count: 30, more: true }, "failed", zh)).toBe("30+ 个结果 · 历史记录搜索失败");
+    expect(searchStatusText({ count: 30, more: true }, "answered", en)).toBe("30+ results");
   });
 
   it("ignores blank queries and failed requests", async () => {

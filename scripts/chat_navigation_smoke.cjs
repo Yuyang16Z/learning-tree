@@ -484,11 +484,14 @@ async function poll(callback, label) {
     await poll(async () => releaseSearch !== undefined, 'the next search was sent');
     assert.equal(await searchStatus.innerText(), 'Searching…', 'An unanswered search is not reported as finding nothing');
     releaseSearch();
-    await poll(async () => await searchStatus.innerText() === 'No matching questions', 'a failed search ends the wait');
+    // A search that never reached the history is not reported as finding nothing.
+    await poll(async () => await searchStatus.innerText() === 'History search failed', 'a failed search ends the wait and says so');
     assert.equal(await historyGroup.count(), 0, 'A failed search leaves no stale hits behind');
     await page.unroute(searchRoute);
+    await searchBox.fill('keeps the pivot stable');
+    await poll(async () => await searchStatus.innerText() === '1 results', 'the next search reaches the history again');
     await searchBox.press('Escape');
-    checks.push('Map search shows history hits only for the current query, says it is searching until the server answers, and drops stale hits when a request fails');
+    checks.push('Map search shows history hits only for the current query, says it is searching until the server answers, says when the history search failed and drops stale hits then');
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ ok: true, checks }, null, 2));
   } finally {

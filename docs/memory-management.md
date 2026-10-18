@@ -157,7 +157,10 @@ Pending or interrupted answers and superseded facts are never listed. Results
 are capped at thirty, and the count reads “30+” (or “N+”) when more matches
 exist than are shown; queries stop at 300 characters. Until the server answers,
 a search with no instant matches says **Searching…** rather than reporting no
-results. History hits are shown only for the query and topic they answer:
+results. When the history search fails (offline, or a server error), the line
+says **History search failed**, also beside instant matches, so a search that
+never reached the history is not mistaken for one that found nothing. History
+hits are shown only for the query and topic they answer:
 changing either hides them at once, and a search that fails or returns after you
 switched topics adds nothing.
 
@@ -242,7 +245,8 @@ idempotent; database backups include them, learning-tree exports exclude
   笔记还是记忆（片段去掉 Markdown 标记）；选择问题或回答结果会跳转到匹配文字并高亮，加粗、
   列表、代码和链接等格式化回答中也能定位。记录中的匹配只对应当前查询和主题：修改查询或切换主题
   会立即隐藏旧结果，失败的搜索不会留下旧结果；查询最长 300 个字符。结果最多显示 30 个，还有更多时
-  计数显示为「30+ 个结果」；服务端尚未返回时显示「正在搜索…」，而不是「没有找到相关问题」。
+  计数显示为「30+ 个结果」；服务端尚未返回时显示「正在搜索…」，而不是「没有找到相关问题」；
+  记录搜索失败（离线或服务端出错）时显示「历史记录搜索失败」，有即时匹配时也会在计数后注明。
   索引由 SQLite FTS5（三元组分词）和触发器维护，启动时缺失或计数不符会自动重建；短于
   3 个字符的查询或不支持 FTS5 的 SQLite 使用 LIKE 扫描。
 - 模型可用的只读工具 `search_learning_history` 受同一组开关约束：默认只查当前路径，

@@ -7,7 +7,7 @@ export const MAP_SEARCH_CAP = 30;
 /** The search API rejects longer queries. */
 export const MAP_SEARCH_MAX_QUERY = 300;
 
-/** Server hits as delivered for one topic and trimmed query; a failed search delivers none. */
+/** Server hits as delivered for one topic and trimmed query; a failed search delivers none and says so. */
 export interface RemoteHits { treeId: number; query: string; hits: SearchHit[]; failed?: boolean }
 
 const answers = (remote: RemoteHits | null, treeId: number | null, query: string) =>
@@ -21,6 +21,28 @@ export function currentHits(remote: RemoteHits | null, treeId: number | null, qu
 /** The server has not yet answered (or failed) the search for the topic and query now shown. */
 export function searchPending(remote: RemoteHits | null, treeId: number | null, query: string): boolean {
   return !!query.trim() && treeId !== null && !answers(remote, treeId, query);
+}
+
+/** The search for the topic and query now shown failed (offline, a server error): history was not searched. */
+export function searchFailed(remote: RemoteHits | null, treeId: number | null, query: string): boolean {
+  return answers(remote, treeId, query) && !!remote!.failed;
+}
+
+type Format = (zh: string, en: string, params?: Record<string, string | number>) => string;
+
+/**
+ * The result line, a live status region. It claims that nothing matched only once the history
+ * search has answered: until then it says it is searching, and after a failure it says so,
+ * also beside instant matches, since the history group is missing for that reason.
+ */
+export function searchStatusText(shown: { count: number; more: boolean }, history: "pending" | "failed" | "answered", t: Format): string {
+  const failed = history === "failed" ? t("历史记录搜索失败", "History search failed") : null;
+  if (shown.count) {
+    const count = shown.more ? t("{count}+ 个结果", "{count}+ results", { count: shown.count }) : t("{count} 个结果", "{count} results", { count: shown.count });
+    return failed ? `${count} · ${failed}` : count;
+  }
+  if (history === "pending") return t("正在搜索…", "Searching…");
+  return failed ?? t("没有找到相关问题", "No matching questions");
 }
 
 /** Instant client-side title/quote matches; the first result group. */
