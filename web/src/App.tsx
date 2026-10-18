@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, isStreamLost, type AskHandlers, type AskMeta, type ChangeNotice, type ContextStatus } from "./api";
 import { useI18n } from "./i18n";
 import { localizeError } from "./i18n/workspace";
@@ -27,6 +27,7 @@ import { resumeAnswer } from "./lib/answerStream";
 import { keepIfSame, planRefresh, watchChanges } from "./lib/changeFeed";
 import { restoreUnderstanding, withUnderstanding } from "./lib/understanding";
 import { finishToolStep, startToolStep } from "./lib/toolSteps";
+import { locateSource } from "./lib/sourceLinks";
 import { onPairingRequired } from "./lib/phonePairing";
 import { SettingsModal } from "./components/SettingsModal";
 import { NewTreeModal } from "./components/NewTreeModal";
@@ -187,7 +188,8 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function selectTree(id: number, list?: Tree[]) {
+  /** Open a topic at `focus` when it exists there, else at its saved or first node. */
+  async function selectTree(id: number, list?: Tree[], focus?: number) {
     const ticket = navigation.current.next();
     const mapTicket = ++mapRevision.current;
     treeRef.current = id;
@@ -210,7 +212,7 @@ export default function App() {
       const tr = (list ?? trees).find(t => t.id === id);
       const saved = readSaved<number | null>(`bl-node:${id}`, null);
       const root = tr?.root_node_id ?? nodes.find(n => n.parent_id == null)?.id;
-      const selected = nodes.find(n => n.id === saved)?.id ?? root ?? nodes[0]?.id;
+      const selected = nodes.find(n => n.id === focus)?.id ?? nodes.find(n => n.id === saved)?.id ?? root ?? nodes[0]?.id;
       if (selected) await selectNode(selected);
     } catch (e) {
       if (navigation.current.current(ticket)) setErr(String((e as Error).message ?? e));
@@ -630,9 +632,18 @@ export default function App() {
     await loadMcp();
   }
 
+  // Stored provenance can outlive its source: check it before leaving this view, and stay put if it is gone.
   async function openMemorySource(treeId: number, nodeId: number | null) {
-    await selectTree(treeId);
-    if (nodeId !== null && treeRef.current === treeId) await selectNode(nodeId);
+    const ticket = navigation.current.peek();
+    const sameTopic = treeId === treeRef.current;
+    let found: "found" | "deleted";
+    try { found = await locateSource({ treeId, nodeId }, id => sameTopic ? refreshTree(id) : api.getTree(id)); }
+    catch (e) { if (navigation.current.current(ticket)) setErr(String((e as Error).message ?? e)); return; }
+    // The learner went elsewhere meanwhile.
+    if (!navigation.current.current(ticket)) return;
+    if (found === "deleted") { setNotice(t("这条来源已删除。", "This source was deleted.")); return; }
+    if (!sameTopic) await selectTree(treeId, undefined, nodeId ?? undefined);
+    else if (nodeId !== null) await selectNode(nodeId);
   }
 
   function startResize(e: React.MouseEvent) {
@@ -657,6 +668,8 @@ export default function App() {
 
   const activeTree = trees.find((t) => t.id === activeTreeId) ?? null;
   const focused = thread[thread.length - 1];
+  const topicIds = useMemo(() => new Set(trees.map(tree => tree.id)), [trees]);
+  const mapNodeIds = useMemo(() => new Set(treeNodes.map(node => node.id)), [treeNodes]);
 
   return (
     <div className={`app${sidebarOpen ? ' sidebar-visible' : ''}`}>
@@ -700,6 +713,8 @@ export default function App() {
         liveDiagnostics={liveDiagnostics}
         liveSources={liveSources}
         onOpenSource={(treeId, nodeId) => void openMemorySource(treeId, nodeId)}
+        topicIds={topicIds}
+        mapNodeIds={mapNodeIds}
         contextStatus={contextStatus}
         reconnecting={reconnecting}
         pendingQuestion={pendingQuestion}

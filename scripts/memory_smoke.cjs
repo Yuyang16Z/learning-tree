@@ -327,6 +327,45 @@ with Session(engine) as session:
     assert.equal(await page.getByRole('dialog').count(), 0);
     assert.equal((await api('/memories/preferences')).content, storedProfile.content);
     checks.push('An AI addition opens its original source topic and leaves core preferences unchanged');
+
+    // Stored provenance can outlive its source: a deleted topic or node must not empty the workspace.
+    const goneTopic = await api('/trees', { title: 'Memory UI check · Deleted source' });
+    const goneNode = (await api(`/trees/${goneTopic.id}`))[0].id;
+    assert((await fetch(`${base}/api/trees/${goneTopic.id}`, { method: 'DELETE' })).ok);
+    const ownRoot = roots[0][0].id;
+    const peerRoot = roots[1][0].id;
+    const referenced = [
+      { memory_id: 901, source_node_id: goneNode, tree_id: goneTopic.id, tree_title: goneTopic.title, scope: 'other' },
+      { memory_id: 902, source_node_id: 999902, tree_id: trees[0].id, tree_title: trees[0].title, scope: 'tree' },
+      { memory_id: 903, source_node_id: 999903, tree_id: trees[1].id, tree_title: trees[1].title, scope: 'other' },
+      { memory_id: 904, source_node_id: peerRoot, tree_id: trees[1].id, tree_title: trees[1].title, scope: 'other' },
+    ];
+    await page.route(`**/api/nodes/${ownRoot}/thread`, async route => {
+      const response = await route.fetch();
+      const body = await response.json();
+      body.nodes = body.nodes.map(row => row.node_id === ownRoot
+        ? { ...row, question: 'Which memories shaped this answer?', answer: 'A synthetic answer with stored provenance.', status: 'complete', sources: referenced }
+        : row);
+      await route.fulfill({ response, json: body });
+    });
+    await page.reload();
+    await page.getByRole('heading', { name: trees[0].title, exact: true, level: 1 }).waitFor();
+    const chips = page.locator('.chat-sources .chat-source-link');
+    await poll(async () => await chips.count() === 4, 'stored sources render as chips');
+    for (const index of [0, 1]) {
+      assert(await chips.nth(index).isDisabled(), 'A chip whose topic or node no longer exists cannot be opened');
+      assert.equal(await chips.nth(index).getAttribute('title'), 'Source deleted');
+    }
+    assert(await chips.nth(2).isEnabled() && await chips.nth(3).isEnabled());
+    await chips.nth(2).click();
+    await page.locator('.notice').filter({ hasText: 'This source was deleted.' }).waitFor();
+    assert.equal(await page.getByRole('heading', { level: 1 }).innerText(), trees[0].title, 'A missing source node leaves the current topic open');
+    assert.equal(await page.evaluate(() => localStorage.getItem('bl-tree')), JSON.stringify(trees[0].id));
+    assert.equal(await chips.count(), 4, 'The conversation stays in place');
+    await chips.nth(3).click();
+    await page.getByRole('heading', { name: trees[1].title, exact: true, level: 1 }).waitFor();
+    await page.unroute(`**/api/nodes/${ownRoot}/thread`);
+    checks.push('Referenced chips whose topic or node was deleted are disabled or report the deletion and keep the current topic; live sources still open');
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ ok: true, checks }, null, 2));
   } finally {
