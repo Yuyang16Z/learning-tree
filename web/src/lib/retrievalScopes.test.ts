@@ -41,6 +41,9 @@ describe("retrieval scope switches in Settings", () => {
     latest.resolve(elsewhere);
     await pending;
     expect(store.get()).toEqual({ settings: elsewhere, saving: false, conflict: "reloaded", error: null });
+    // Reading again when the tab is shown keeps saying the change was not saved.
+    await store.load();
+    expect(store.get()).toEqual({ settings: elsewhere, saving: false, conflict: "reloaded", error: null });
   });
 
   it("reports a reload that fails after a conflict", async () => {
@@ -52,6 +55,38 @@ describe("retrieval scope switches in Settings", () => {
     await store.load();
     await store.update({ include_siblings: true });
     expect(store.get()).toEqual({ settings: initial, saving: false, conflict: null, error: "Failed to fetch" });
+  });
+
+  it("reads the switches again when shown: a failed read is retried, a failed save's message stays", async () => {
+    let loads = 0;
+    const store = createScopeStore({
+      load: async () => { if (++loads === 1) throw new TypeError("Failed to fetch"); return loads === 2 ? initial : elsewhere; },
+      save: async () => { throw failure(500, "请求失败（500），请重试。"); },
+    });
+    await store.load();
+    expect(store.get()).toEqual({ settings: null, saving: false, conflict: null, error: "Failed to fetch" });
+    await store.load();
+    expect(store.get()).toEqual({ settings: initial, saving: false, conflict: null, error: null });
+    await store.update({ include_siblings: true });
+    expect(store.get()).toEqual({ settings: initial, saving: false, conflict: null, error: "请求失败（500），请重试。" });
+    // Shown again: the latest settings replace the old ones, and the save is still reported as failed.
+    await store.load();
+    expect(store.get()).toEqual({ settings: elsewhere, saving: false, conflict: null, error: "请求失败（500），请重试。" });
+  });
+
+  it("never lets a read that was running when a change started undo the saved change", async () => {
+    const reread = deferred<RetrievalSettings>();
+    let loads = 0;
+    const store = createScopeStore({
+      load: () => (++loads === 1 ? Promise.resolve(initial) : reread.promise),
+      save: async settings => ({ ...settings, revision: "r3" }),
+    });
+    await store.load();
+    const showing = store.load();
+    await store.update({ include_other_trees: true });
+    reread.resolve(initial);
+    await showing;
+    expect(store.get()).toEqual({ settings: { ...initial, include_other_trees: true, revision: "r3" }, saving: false, conflict: null, error: null });
   });
 
   it("ignores changes before the switches load and while a save is running", async () => {

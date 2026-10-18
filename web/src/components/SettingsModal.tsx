@@ -160,9 +160,13 @@ export function SettingsModal(props: Props) {
     if (!memoryVisited) return;
     const store = createScopeStore({ load: api.getRetrievalSettings, save: api.saveRetrievalSettings });
     setScopeStore(store);
-    void store.load();
     return () => store.close();
   }, [memoryVisited]);
+  // Read the switches each time the Memory tab is shown, as the panel did when it remounted: a
+  // failed read is retried and a change from another device appears. A running save is left alone.
+  useEffect(() => {
+    if (tab === "memory" && scopeStore) void scopeStore.load();
+  }, [tab, scopeStore]);
   const scopes = useSyncExternalStore(scopeStore?.subscribe ?? noScopeChanges, scopeStore?.get ?? noScopes);
   // A save or the reload after a conflict is still running: closing would hide its outcome.
   const busy = memoryBusy || scopes.saving;

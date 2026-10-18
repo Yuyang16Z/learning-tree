@@ -9,16 +9,22 @@ export interface ScopeState {
   saving: boolean;
   /** After a save conflicted: "reloading" until the latest settings arrive, then "reloaded". */
   conflict: "reloading" | "reloaded" | null;
-  /** The last failed load or save, as the server or browser reported it. */
+  /**
+   * The last failed load or save, as the server or browser reported it. A later successful read
+   * clears a failed read; a failed save stays reported until the next change.
+   */
   error: string | null;
 }
 
 export interface ScopeStore {
   get(): ScopeState;
   subscribe(listener: () => void): () => void;
-  /** Read the saved switches. */
+  /** Read the saved switches (again); ignored while a save or its conflict reload is running. */
   load(): Promise<void>;
-  /** Save one change with the known revision; ignored before the switches load or while saving. */
+  /**
+   * Save one change with the known revision; ignored before the switches load or while saving.
+   * A read still running is dropped, so it cannot replace the saved result with older settings.
+   */
   update(change: ScopeChange): Promise<void>;
   /** Settings closed: nothing still in flight changes the state any more. */
   close(): void;
@@ -39,6 +45,8 @@ export function createScopeStore({ load, save }: StoreOptions): ScopeStore {
   let state: ScopeState = { settings: null, saving: false, conflict: null, error: null };
   const listeners = new Set<() => void>();
   let reading: AbortController | null = null;
+  // The error shown came from a read, so the next successful read replaces it.
+  let readFailed = false;
   let closed = false;
   const set = (change: Partial<ScopeState>) => {
     if (closed) return;
@@ -52,10 +60,13 @@ export function createScopeStore({ load, save }: StoreOptions): ScopeStore {
     try {
       const settings = await load(controller.signal);
       if (controller.signal.aborted) return false;
-      set({ settings, error: null });
+      set(readFailed ? { settings, error: null } : { settings });
+      readFailed = false;
       return true;
     } catch (error) {
-      if (!controller.signal.aborted) set({ error: messageOf(error) });
+      if (controller.signal.aborted) return false;
+      readFailed = true;
+      set({ error: messageOf(error) });
       return false;
     }
   }
@@ -71,6 +82,8 @@ export function createScopeStore({ load, save }: StoreOptions): ScopeStore {
     async update(change) {
       const current = state.settings;
       if (!current || state.saving || closed) return;
+      reading?.abort();
+      readFailed = false;
       set({ saving: true, conflict: null, error: null });
       try {
         set({ settings: await save({ ...current, ...change }), saving: false });

@@ -100,6 +100,16 @@ async function poll(callback) {
       await route.fulfill({ json: { state: 'preparing', embedding_ready: false, reranker_ready: false } });
       retrievalFixture = { state: 'ready', embedding_ready: true, reranker_ready: true };
     });
+    // The first read of the scope switches fails (a server restart, a phone on a flaky link).
+    const scopeRoute = '**/api/memories/retrieval/settings';
+    let scopeReads = 0;
+    await page.route(scopeRoute, route => {
+      if (route.request().method() !== 'GET') return route.continue();
+      scopeReads += 1;
+      if (scopeReads === 1) return route.fulfill({ status: 502, body: '' });
+      if (scopeReads === 2) return route.fulfill({ json: { include_siblings: true, include_other_trees: false, revision: 'changed-elsewhere' } });
+      return route.continue();
+    });
     await page.getByRole('button', { name: '⚙ Settings', exact: true }).click();
     const memoryDialog = page.getByRole('dialog');
     await memoryDialog.getByRole('button', { name: 'Memory', exact: true }).click();
@@ -111,18 +121,32 @@ async function poll(callback) {
     assert.equal(await memoryDialog.getByRole('link', { name: 'Installation and resource requirements', exact: true }).getAttribute('href'), 'https://github.com/Yuyang16Z/learning-tree/blob/main/docs/operations.md');
     assert.equal(prepareCalls, 0, 'A basic install must not request a model download');
     checks.push('Basic installation explains optional retrieval setup without an ineffective model download action');
+    const pathScope = retrievalPanel.getByRole('checkbox', { name: 'Current learning path (always)', exact: true });
+    const siblingScope = retrievalPanel.getByRole('checkbox', { name: 'Other branches of this topic', exact: true });
+    const otherScope = retrievalPanel.getByRole('checkbox', { name: 'Other learning topics (except archived ones)', exact: true });
+    const showMemoryTabAgain = async () => {
+      await memoryDialog.getByRole('button', { name: 'Appearance', exact: true }).click();
+      await memoryDialog.getByRole('button', { name: 'Memory', exact: true }).click();
+    };
+    await retrievalPanel.getByRole('alert').filter({ hasText: 'Request failed (502)' }).waitFor();
+    assert(await siblingScope.isDisabled() && await otherScope.isDisabled(), 'Switches that could not be read cannot be changed');
+    // Showing the Memory tab again reads them again: the failure is retried, and a change made on
+    // another device appears instead of a stale value that would end in a conflict.
+    await showMemoryTabAgain();
+    await poll(async () => await siblingScope.isEnabled() && await siblingScope.isChecked());
+    assert.equal(await retrievalPanel.getByRole('alert').count(), 0, 'A successful read clears the failed one');
+    await showMemoryTabAgain();
+    await poll(async () => scopeReads === 3 && !(await siblingScope.isChecked()));
+    await page.unroute(scopeRoute);
+    checks.push('The memory scope switches are read again whenever the Memory tab is shown, so a failed read is retried and changes from another device appear');
     // Wider memory scopes are opt-in toggles saved with a revision; the path stays always on.
     const scopeSaves = [];
-    const scopeRoute = '**/api/memories/retrieval/settings';
     await page.route(scopeRoute, async route => {
       if (route.request().method() !== 'PUT') return route.continue();
       const body = route.request().postDataJSON();
       scopeSaves.push(body);
       await route.fulfill({ json: { ...body, revision: 'saved-revision' } });
     });
-    const pathScope = retrievalPanel.getByRole('checkbox', { name: 'Current learning path (always)', exact: true });
-    const siblingScope = retrievalPanel.getByRole('checkbox', { name: 'Other branches of this topic', exact: true });
-    const otherScope = retrievalPanel.getByRole('checkbox', { name: 'Other learning topics (except archived ones)', exact: true });
     await poll(async () => await siblingScope.isEnabled());
     assert(await pathScope.isChecked() && await pathScope.isDisabled(), 'The current path is always searched');
     assert(!(await siblingScope.isChecked()) && !(await otherScope.isChecked()), 'Wider scopes start off');
