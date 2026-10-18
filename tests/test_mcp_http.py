@@ -40,8 +40,8 @@ from mcp.server.fastmcp import Context, FastMCP
 
 server = FastMCP("http-test")
 count = 0
-stats = {"sessions": 0, "posts": 0, "mutations": 0}
-control = {"expire_next": False, "lose_next_answer": False}
+stats = {"sessions": 0, "posts": 0, "mutations": 0, "attempts": 0}
+control = {"expire_next": False, "lose_next_answer": False, "fail_next_session": False}
 
 @server.tool()
 def increment() -> int:
@@ -97,6 +97,11 @@ async def app(scope, receive, send):
         if path == "/control/lose-next-answer":
             control["lose_next_answer"] = True
             return await respond(send, 200)
+        if path == "/control/fail-next-session":
+            control["fail_next_session"] = True
+            return await respond(send, 200)
+        if scope["method"] == "POST":
+            stats["attempts"] += 1  # Every POST, including refused ones.
         if path == "/moved":
             return await respond(send, 307, headers=[(b"location", b"/mcp")])
         if headers.get(b"authorization") != b"Bearer synthetic-token":
@@ -105,6 +110,9 @@ async def app(scope, receive, send):
             stats["posts"] += 1
             if b"mcp-session-id" not in headers:
                 stats["sessions"] += 1
+                if control["fail_next_session"]:
+                    control["fail_next_session"] = False
+                    return await respond(send, 502, b"bad gateway")
             elif control["expire_next"]:
                 control["expire_next"] = False
                 return await respond(send, 404)
@@ -179,9 +187,11 @@ def test_remote_session_lists_calls_and_keeps_state(remote_spec):
 
 def test_headers_reach_the_server_and_never_the_error_text(remote, remote_spec):
     wrong = {**remote_spec, "headers": {"Authorization": f"Bearer {SECRET}"}}
+    before = stats(remote)["attempts"]
     with pytest.raises(mcp_client.MCPRemoteStatusError) as raised:
         mcp_client.list_tools(wrong)
     assert raised.value.status_code == 401
+    assert stats(remote)["attempts"] == before + 1  # Refused credentials are not resent.
     message = mcp_client.describe_error(raised.value, wrong)
     assert message == mcp_client.REMOTE_DENIED and SECRET not in message
     failure = mcp_client.call_tool(wrong, "increment", {})
@@ -265,6 +275,28 @@ def test_redirects_are_not_followed(remote, remote_spec):
         mcp_client.list_tools(moved)
     assert raised.value.status_code == 307
     assert mcp_client.describe_error(raised.value, moved) == mcp_client.REMOTE_REDIRECT
+
+
+def test_a_missing_endpoint_is_reported_as_not_found_without_a_retry(remote, remote_spec):
+    missing = {**remote_spec, "url": f"{remote}/missing"}
+    before = stats(remote)
+    with pytest.raises(mcp_client.MCPRemoteStatusError) as raised:
+        mcp_client.list_tools(missing)
+    assert raised.value.status_code == 404
+    assert mcp_client.describe_error(raised.value, missing) == mcp_client.REMOTE_NOT_FOUND
+    # One initialize request: a URL without an MCP endpoint is not worth a reconnect.
+    assert stats(remote)["sessions"] == before["sessions"] + 1
+    failure = mcp_client.call_tool(missing, "increment", {})
+    assert mcp_client.REMOTE_NOT_FOUND in failure and "执行结果未确认" not in failure
+    assert remote not in failure and "synthetic-token" not in failure
+
+
+def test_a_server_error_while_connecting_is_retried_once(remote, remote_spec):
+    # A gateway's 502 can pass; a 3xx or 4xx answer to a new connection is final.
+    before = stats(remote)["sessions"]
+    httpx.get(f"{remote}/control/fail-next-session", timeout=5).raise_for_status()
+    assert {tool["name"] for tool in mcp_client.list_tools(remote_spec)} >= {"increment"}
+    assert stats(remote)["sessions"] == before + 2
 
 
 def test_private_address_needs_the_explicit_opt_in(remote, remote_spec):

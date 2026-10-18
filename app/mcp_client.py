@@ -48,7 +48,8 @@ MAX_PENDING_REQUESTS = 32
 TOOLS_CACHE_SECONDS = 60.0
 # Remote servers: 30 s to connect and write, five minutes between streamed events.
 HTTP_TIMEOUT = httpx.Timeout(30.0, read=300.0)
-# The SDK reports a POST answered 404 (an expired server session) with this code.
+# The SDK reports a POST answered 404 with this code: an expired server session, or,
+# for initialize, which carries no session ID yet, a URL without an MCP endpoint.
 SESSION_TERMINATED = 32600
 # Looked up at call time so tests can substitute a resolver.
 RESOLVER = socket.getaddrinfo
@@ -136,7 +137,9 @@ class MCPCommandNotFound(FileNotFoundError):
 
 class MCPRemoteStatusError(MCPConnectionError):
     """A remote server answered with an HTTP error status. Only the status is kept: the
-    original exception text names the URL and could grow to include more."""
+    original exception text names the URL and could grow to include more. Mid-session it
+    can mean the session is gone, so discovery reconnects once; a 3xx or 4xx answer to a
+    new connection is final."""
 
     def __init__(self, status_code: int):
         self.status_code = status_code
@@ -352,6 +355,8 @@ def _http_status(exc: BaseException) -> int | None:
             (status for child in exc.exceptions if (status := _http_status(child)) is not None),
             None,
         )
+    if isinstance(exc, MCPRemoteStatusError):
+        return exc.status_code
     return exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
 
 
@@ -386,6 +391,8 @@ class _SessionWorker:
         self.cancel_sent = False
         self.error: BaseException | None = None
         self.active: _Request | None = None
+        # Set once the session is initialized; failures before then are connection setup.
+        self.connected = False
         # Tool-list cache, owned by the actor. The session's message handler only sets
         # the stale flag (on this loop), never touching the registry lock.
         self.tools: list[dict] | None = None
@@ -444,7 +451,18 @@ class _SessionWorker:
                         message_handler=self._on_message,
                     )
                 )
-                await session.initialize()
+                try:
+                    await session.initialize()
+                except McpError as exc:
+                    # The SDK reports any 404 as "Session terminated", but initialize
+                    # carries no session ID yet: the URL has no MCP endpoint.
+                    if (
+                        exc.error.code == SESSION_TERMINATED
+                        and self.spec.get("transport") == "http"
+                    ):
+                        raise MCPRemoteStatusError(404) from None
+                    raise
+                self.connected = True
             while self.accepting:
                 request = await self.queue.get()
                 if not request.future.set_running_or_notify_cancel():
@@ -590,13 +608,16 @@ def _worker(spec: dict) -> _SessionWorker:
 def list_tools(spec: dict, *, refresh: bool = False) -> list[dict]:
     """Read every page; reconnect once after transport loss, never replay tools.
 
-    The worker reuses its last list for TOOLS_CACHE_SECONDS unless the server announced
-    a change; refresh=True (a connection test) always lists again."""
+    A 3xx or 4xx answer to a new connection (wrong URL or credentials, a redirect) is
+    final and not retried. The worker reuses its last list for TOOLS_CACHE_SECONDS unless
+    the server announced a change; refresh=True (a connection test) always lists again."""
     worker = _worker(spec)
     try:
         return worker.submit("list", args={"refresh": refresh})
-    except MCPConnectionError:
+    except MCPConnectionError as exc:
         invalidate(spec, _expected=worker)
+        if isinstance(exc, MCPRemoteStatusError) and exc.status_code < 500 and not worker.connected:
+            raise  # The server's answer to a new connection; asking again changes nothing.
         return _worker(spec).submit("list", args={"refresh": refresh})
 
 
