@@ -1401,6 +1401,42 @@ def test_openai_tool_fragments_survive_shifted_reused_or_missing_indexes(
     assert results == [call_id for call_id, _ in expected]
 
 
+@pytest.mark.parametrize("arguments", ["null", "[]", '"text"', "3"])
+def test_tool_arguments_that_are_not_objects_never_execute(monkeypatch, arguments):
+    monkeypatch.setattr(llm, "_STREAM_OPTIONS_UNSUPPORTED", set())
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 1:
+            return openai_stream(tool_call_fragments([(0, "call_a", "mcp_1_lookup", arguments)]))
+        return openai_stream(
+            [({"role": "assistant", "content": "已按定义重试"}, None), ({}, "stop")]
+        )
+
+    monkeypatch.setattr(llm, "_client", openai_client(handler))
+    spec = LLMSpec("兼容", "https://provider.test/v1", "custom-model", "synthetic-key")
+    events = list(
+        llm.run_agent(
+            spec,
+            "系统",
+            [{"role": "user", "content": "查"}],
+            TOOLS,
+            lambda *args: pytest.fail("non-object arguments must not execute"),
+        )
+    )
+    assert [event["type"] for event in events] == ["tool_start", "tool_end", "delta"]
+    assert events[0]["args"] == json.loads(arguments)
+    # The model gets a fixed error it can recover from instead of a failed answer.
+    assert json.loads(events[1]["result"])["error"] == "invalid_arguments"
+    assert bodies[1]["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "call_a",
+        "content": events[1]["result"],
+    }
+    assert events[-1]["text"] == "已按定义重试"
+
+
 REASONING_REJECTION = "The `reasoning_content` in the thinking mode must be passed back to the API."
 
 

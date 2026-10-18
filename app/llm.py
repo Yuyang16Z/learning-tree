@@ -555,6 +555,16 @@ def run_agent(
                         },
                         ensure_ascii=False,
                     )
+                elif not isinstance(tc["args"], dict):
+                    # Every tool takes a JSON object; null, lists and scalars never run,
+                    # and the model can call again with valid arguments.
+                    result = json.dumps(
+                        {
+                            "error": "invalid_arguments",
+                            "message": "工具参数必须是 JSON 对象；请按工具定义重新调用。",
+                        },
+                        ensure_ascii=False,
+                    )
                 elif tool_catalog and tc["name"] == SEARCH_TOOL_NAME:
                     result = tool_catalog.search(tc["args"])
                 else:
