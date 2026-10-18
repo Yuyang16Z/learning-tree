@@ -31,6 +31,7 @@ SECRET = "synthetic-header-secret-417"
 CREDENTIAL_URL = "https://user" + ":secret@docs.example/mcp"
 
 SERVER = """
+import asyncio
 import json
 import socket
 import sys
@@ -39,8 +40,8 @@ from mcp.server.fastmcp import Context, FastMCP
 
 server = FastMCP("http-test")
 count = 0
-stats = {"sessions": 0, "posts": 0}
-control = {"expire_next": False}
+stats = {"sessions": 0, "posts": 0, "mutations": 0}
+control = {"expire_next": False, "lose_next_answer": False}
 
 @server.tool()
 def increment() -> int:
@@ -61,12 +62,27 @@ async def announce(ctx: Context) -> str:
     await ctx.session.send_tool_list_changed()
     return "announced"
 
+@server.tool()
+async def slow_mutation() -> str:
+    stats["mutations"] += 1
+    await asyncio.sleep(3)
+    return "finished"
+
+@server.tool()
+def mutation() -> str:
+    stats["mutations"] += 1
+    return "mutated"
+
 inner = server.streamable_http_app()
 
 
 async def respond(send, status, body=b"", headers=()):
     await send({"type": "http.response.start", "status": status, "headers": list(headers)})
     await send({"type": "http.response.body", "body": body})
+
+
+async def discard(message):
+    pass
 
 
 async def app(scope, receive, send):
@@ -77,6 +93,9 @@ async def app(scope, receive, send):
             return await respond(send, 200, json.dumps(stats).encode())
         if path == "/control/expire":
             control["expire_next"] = True
+            return await respond(send, 200)
+        if path == "/control/lose-next-answer":
+            control["lose_next_answer"] = True
             return await respond(send, 200)
         if path == "/moved":
             return await respond(send, 307, headers=[(b"location", b"/mcp")])
@@ -89,6 +108,12 @@ async def app(scope, receive, send):
             elif control["expire_next"]:
                 control["expire_next"] = False
                 return await respond(send, 404)
+            elif control["lose_next_answer"]:
+                # A gateway that loses the answer: the server runs the request, and the
+                # client sees only an error status.
+                control["lose_next_answer"] = False
+                await inner(scope, receive, discard)
+                return await respond(send, 502, b"bad gateway")
     await inner(scope, receive, send)
 
 
@@ -161,6 +186,77 @@ def test_headers_reach_the_server_and_never_the_error_text(remote, remote_spec):
     assert message == mcp_client.REMOTE_DENIED and SECRET not in message
     failure = mcp_client.call_tool(wrong, "increment", {})
     assert "调用失败" in failure and SECRET not in failure and remote not in failure
+    # Refused while connecting, so nothing was sent: no unknown outcome to report.
+    assert mcp_client.REMOTE_DENIED in failure and "执行结果未确认" not in failure
+
+
+def assert_unknown_outcome(text, remote):
+    # A call that may have run is never reported as a refused connection, which would
+    # invite the model to call a tool with side effects again.
+    assert "调用失败" in text and "执行结果未确认" in text
+    assert mcp_client.REMOTE_TIMEOUT not in text and mcp_client.REMOTE_UNREACHABLE not in text
+    assert remote not in text and "127.0.0.1" not in text and "synthetic-token" not in text
+
+
+def test_remote_call_past_its_deadline_reports_an_unknown_outcome(remote, remote_spec, monkeypatch):
+    assert mcp_client.list_tools(remote_spec)
+    before = stats(remote)["mutations"]
+    monkeypatch.setattr(mcp_client, "CALL_TIMEOUT", 1.0)
+    started = time.monotonic()
+    text = mcp_client.call_tool(remote_spec, "slow_mutation", {})
+    assert time.monotonic() - started < 2.5  # The tool sleeps for 3 seconds.
+    assert_unknown_outcome(text, remote)
+    assert mcp_client.CALL_TIMED_OUT in text
+    assert stats(remote)["mutations"] == before + 1  # The server did run it.
+
+
+@pytest.mark.parametrize(
+    ("control", "executed"),
+    [
+        # A gateway that loses the answer after the server ran the call.
+        ("lose-next-answer", 1),
+        # The server no longer knows the session (404), which the SDK reports as
+        # "Session terminated": the session is lost in the middle of a call.
+        ("expire", 0),
+    ],
+)
+def test_remote_call_without_an_answer_reports_an_unknown_outcome(
+    remote, remote_spec, control, executed
+):
+    assert mcp_client.list_tools(remote_spec)
+    before = stats(remote)["mutations"]
+    httpx.get(f"{remote}/control/{control}", timeout=5).raise_for_status()
+    text = mcp_client.call_tool(remote_spec, "mutation", {})
+    assert_unknown_outcome(text, remote)
+    assert stats(remote)["mutations"] == before + executed  # Never replayed.
+    # The next call opens a new session and runs exactly once.
+    assert mcp_client.call_tool(remote_spec, "mutation", {}) == "mutated"
+    assert stats(remote)["mutations"] == before + executed + 1
+
+
+def test_call_failures_keep_unknown_outcomes_apart_from_connection_failures():
+    spec = mcp_client.server_spec(
+        transport="http",
+        url="https://mcp.example/mcp",
+        headers={"Authorization": f"Bearer {SECRET}"},
+    )
+    for message in mcp_client.OUTCOME_UNKNOWN:
+        for error in (mcp_client.MCPTimeoutError(message), mcp_client.MCPConnectionError(message)):
+            assert mcp_client.describe_call_error(error, spec) == message
+            # Listing and connection tests are read-only and keep the connection wording.
+            assert mcp_client.describe_error(error, spec) in {
+                mcp_client.REMOTE_TIMEOUT,
+                mcp_client.REMOTE_UNREACHABLE,
+            }
+    # Failures before anything was sent read like any failed connection.
+    for error, expected in (
+        (mcp_client.MCPRemoteStatusError(401), mcp_client.REMOTE_DENIED),
+        (mcp_client.MCPConnectionError("MCP 连接已关闭"), mcp_client.REMOTE_UNREACHABLE),
+        (mcp_client.MCPTimeoutError("MCP 连接启动超时"), mcp_client.REMOTE_TIMEOUT),
+        (mcp_client.MCPConfigError(mcp_client.REMOTE_URL_PRIVATE), mcp_client.REMOTE_URL_PRIVATE),
+        (RuntimeError(f"echoed Authorization: Bearer {SECRET}"), mcp_client.CONNECTION_FAILED),
+    ):
+        assert mcp_client.describe_call_error(error, spec) == expected
 
 
 def test_redirects_are_not_followed(remote, remote_spec):

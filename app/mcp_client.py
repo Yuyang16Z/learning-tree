@@ -64,6 +64,13 @@ REMOTE_NOT_FOUND = "MCP 远程地址不存在或不是 MCP 服务，请检查服
 REMOTE_REDIRECT = "MCP 远程服务要求重定向；为安全起见不会跟随，请填写最终地址。"
 REMOTE_FAILED = "MCP 远程服务返回错误，请稍后重试。"
 CONNECTION_FAILED = "MCP 连接失败，请检查配置后重试。"
+# A request was sent, or may have been, and no answer arrived: the server may have run
+# it, so a tool with side effects must be checked before it is called again.
+CALL_TIMED_OUT = "MCP 请求超时；执行结果未确认，请先检查状态再决定是否重试。"
+CALL_CLOSED = "MCP 连接已关闭；执行结果未确认。"
+CALL_INTERRUPTED = "MCP 连接中断；执行结果未确认。"
+WAIT_TIMED_OUT = "MCP 等待超时；执行结果未确认，请检查状态后再重试。"
+OUTCOME_UNKNOWN = frozenset({CALL_TIMED_OUT, CALL_CLOSED, CALL_INTERRUPTED, WAIT_TIMED_OUT})
 
 
 def server_spec(
@@ -456,25 +463,19 @@ class _SessionWorker:
                             result = _result_texts(response)
                     _finish(request.future, value=result)
                 except TimeoutError:
-                    self.error = MCPTimeoutError(
-                        "MCP 请求超时；执行结果未确认，请先检查状态再决定是否重试。"
-                    )
+                    self.error = MCPTimeoutError(CALL_TIMED_OUT)
                     self.accepting = False
                     _finish(request.future, error=self.error)
                 except asyncio.CancelledError:
-                    _finish(
-                        request.future, error=MCPConnectionError("MCP 连接已关闭；执行结果未确认。")
-                    )
+                    _finish(request.future, error=MCPConnectionError(CALL_CLOSED))
                     raise
                 except Exception as exc:
                     if _timeout_error(exc):
-                        self.error = MCPTimeoutError(
-                            "MCP 请求超时；执行结果未确认，请先检查状态再决定是否重试。"
-                        )
+                        self.error = MCPTimeoutError(CALL_TIMED_OUT)
                         self.accepting = False
                         _finish(request.future, error=self.error)
                     elif _transport_error(exc):
-                        self.error = MCPConnectionError("MCP 连接中断；执行结果未确认。")
+                        self.error = MCPConnectionError(CALL_INTERRUPTED)
                         self.accepting = False
                         _finish(request.future, error=self.error)
                     else:
@@ -551,7 +552,7 @@ class _SessionWorker:
                 raise
             # A queued request must not execute after its caller timed out.
             future.cancel()
-            raise MCPTimeoutError("MCP 等待超时；执行结果未确认，请检查状态后再重试。") from None
+            raise MCPTimeoutError(WAIT_TIMED_OUT) from None
 
     def stop(self, *, wait: bool = True) -> None:
         was_accepting = self.accepting
@@ -609,7 +610,7 @@ def call_tool(spec: dict, name: str, args: dict, full: list[str] | None = None) 
     except Exception as exc:
         if spec.get("transport") == "http":
             # Remote failures carry no exception text: it could echo request details.
-            text = f"MCP 工具 {name} 调用失败：{describe_error(exc, spec)}"
+            text = f"MCP 工具 {name} 调用失败：{describe_call_error(exc, spec)}"
         else:
             text = _bounded(f"MCP 工具 {name} 调用失败：{type(exc).__name__}: {exc}", 1600)
         complete = text
@@ -622,14 +623,11 @@ _FIXED_MESSAGES = frozenset(
     {
         "MCP 连接超时，请检查启动命令和服务状态后重试。",
         "MCP 连接已关闭",
-        "MCP 请求超时；执行结果未确认，请先检查状态再决定是否重试。",
-        "MCP 连接已关闭；执行结果未确认。",
-        "MCP 连接中断；执行结果未确认。",
         "MCP 工具清单返回了重复的分页游标",
         "MCP 工具清单超过 100 页",
         "MCP 连接启动超时",
         "该 MCP 正忙，请稍后再试",
-        "MCP 等待超时；执行结果未确认，请检查状态后再重试。",
+        *OUTCOME_UNKNOWN,
     }
 )
 
@@ -645,6 +643,19 @@ def describe_error(exc: BaseException, spec: dict) -> str:
             return REMOTE_UNREACHABLE
     message = str(exc)
     return message if message in _FIXED_MESSAGES else CONNECTION_FAILED
+
+
+def describe_call_error(exc: BaseException, spec: dict) -> str:
+    """A fixed, credential-free message for a failed tool call.
+
+    A call that was sent, or may have been, and got no answer keeps its outcome-unknown
+    wording: the server may have run it, and a retryable connection message would invite
+    the model to run a tool with side effects again. A call that failed before anything
+    was sent reads like any other failed connection."""
+    message = str(exc)
+    if isinstance(exc, (MCPTimeoutError, MCPConnectionError)) and message in OUTCOME_UNKNOWN:
+        return message
+    return describe_error(exc, spec)
 
 
 def invalidate(spec: dict, *, _expected: _SessionWorker | None = None) -> None:
