@@ -13,6 +13,7 @@ Run commands from the repository root with uv and Node.js 24 installed.
 | `uv run python scripts/manage.py check` | Lint, format, unit/regression tests and frontend build; temporary test database and lexical retrieval. |
 | `uv run python scripts/manage.py e2e` | UI checks with a temporary database, random local port and lexical retrieval. |
 | `uv run python scripts/prepare_retrieval.py --smoke` | With optional dependencies installed, prepare/download weights and verify real inference on synthetic Chinese/English examples; fails if dependencies or models are unavailable. |
+| `uv run python scripts/evaluate_retrieval.py --database branch_learning.db` | Measure the token estimator, memory retrieval and topic search on a temporary copy of the database; never changes the original, calls no model and downloads nothing. Writes ids, counts, proxy scores and timings to `artifacts/`; `--synthetic` uses a built-in fixture. See [offline retrieval evaluation](retrieval-evaluation.md). |
 
 An occupied port is not forcibly freed. Ctrl+C stops the app. Use one backend per database; the standard launcher guards its port, but cannot police custom commands on other ports.
 
