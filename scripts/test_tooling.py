@@ -455,7 +455,16 @@ def test_retrieval_evaluation_runs_the_synthetic_fixture_end_to_end(tmp_path):
     assert small["would_compact"] == {"utf8_bytes": 2, "estimate": 1}
     assert large["would_compact"] == {"utf8_bytes": 0, "estimate": 0}
     search = report["full_text_search"]
-    assert search["queries"] == 17 and search["node_found_share"] == 1.0
+    # Every key term is cut from its question, so the question's own message always
+    # matches; that match is counted apart. Only the English questions' terms also
+    # occur in their node's answer, facts or note; the Chinese terms are whole questions.
+    assert search["queries"] == search["own_question_found"] == 17
+    assert search["node_found"] == 6 and search["node_found_share"] == round(6 / 17, 4)
+    found = {case["node_id"] for case in search["cases"] if case["node_found"]}
+    assert found == {21, 22, 23, 24, 25}
+    for case in search["cases"]:
+        assert case["own_question_rank"] is not None
+        assert (case["node_rank"] is not None) is case["node_found"]
     scopes = report["memory_retrieval"]["scopes"]
     assert scopes["path"]["returned"]["tree"] == scopes["path"]["returned"]["other"] == 0
     assert scopes["tree"]["returned"]["tree"] > 0 and scopes["tree"]["returned"]["other"] == 0
@@ -958,6 +967,10 @@ def test_retrieval_evaluation_request_estimates_match_the_app(tmp_path):
         ("快速排序的平均时间复杂度是多少？", "快速排序的平均时间复杂度是多少"),
         ("What is overfitting in machine learning?", "overfitting"),
         ("What does 过拟合 mean?", "过拟合"),
+        # A CJK character weighs as two letters: a short CJK run loses to a long word.
+        ("请解释 Transformer 的 attention 机制", "Transformer"),
+        ("harness 是什么？", "harness"),
+        ("What is the CAP theorem 在分布式系统里怎么用？", "在分布式系统里怎么用"),
         ("为何？ok", None),
     ],
 )

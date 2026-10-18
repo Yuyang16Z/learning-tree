@@ -930,12 +930,20 @@ def measure_estimator(snapshot: _Snapshot, compaction_ratio: float) -> dict:
 
 
 def key_term(question: str) -> str | None:
-    """The longest CJK run, otherwise the longest ASCII word, of at least three characters."""
-    for pattern in (_CJK_RUN, _WORD):
-        candidates = [run for run in pattern.findall(question) if len(run) >= MIN_TERM_CHARS]
-        if candidates:
-            return max(candidates, key=len)[:MAX_TERM_CHARS]
-    return None
+    """The question's longest CJK run or ASCII word of at least three characters.
+
+    A CJK character weighs as two letters, so "请解释 Transformer" gives "Transformer"
+    while "What does 过拟合 mean?" keeps "过拟合"; on a tie the CJK run wins.
+    """
+    candidates = [
+        (len(run) * weight, run)
+        for pattern, weight in ((_CJK_RUN, 2), (_WORD, 1))
+        for run in pattern.findall(question)
+        if len(run) >= MIN_TERM_CHARS
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda candidate: candidate[0])[1][:MAX_TERM_CHARS]
 
 
 def _index_ready(engine) -> bool:
@@ -963,7 +971,19 @@ def measure_search(engine, snapshot: _Snapshot, include_text: bool) -> dict:
             started = time.perf_counter()
             hits = search_text(session, term, tree_id=question.tree_id, limit=SEARCH_LIMIT)
             elapsed = (time.perf_counter() - started) * 1000
-        rank = next((hit.rank for hit in hits if hit.node_id == question.node_id), None)
+        # The question's own message contains the term by construction; count it apart.
+        own = next(
+            (
+                hit.rank
+                for hit in hits
+                if (hit.kind, hit.ref_id) == ("message", question.message_id)
+            ),
+            None,
+        )
+        rank = next(
+            (hit.rank for hit in hits if hit.node_id == question.node_id and hit.rank != own),
+            None,
+        )
         case_ = {
             "question_message_id": question.message_id,
             "node_id": question.node_id,
@@ -971,6 +991,7 @@ def measure_search(engine, snapshot: _Snapshot, include_text: bool) -> dict:
             "term_chars": len(term),
             "hits": len(hits),
             "by_kind": dict(Counter(hit.kind for hit in hits)),
+            "own_question_rank": own,
             "node_found": rank is not None,
             "node_rank": rank,
             "latency_ms": round(elapsed, 3),
@@ -982,15 +1003,19 @@ def measure_search(engine, snapshot: _Snapshot, include_text: bool) -> dict:
     return {
         "definition": (
             "For each completed question, the full-text part of the map search (search_text, "
-            f"limit {SEARCH_LIMIT}) runs in the question's topic with its key term: the longest "
-            f"CJK run, otherwise the longest ASCII word, of at least {MIN_TERM_CHARS} "
-            "characters. node_found says whether any hit belongs to the question's own node."
+            f"limit {SEARCH_LIMIT}) runs in the question's topic with a key term cut from the "
+            f"question itself: its longest CJK run or ASCII word of at least {MIN_TERM_CHARS} "
+            "characters, a CJK character weighing as two letters. The question's own message "
+            "contains the term, so own_question_found counts the queries that matched it; "
+            "node_found and node_rank only count other hits on the question's node (its "
+            "answers, facts, note or other turns)."
         ),
         "index": "fts5" if _index_ready(engine) else "like",
         "queries": len(cases),
         "skipped_without_term": skipped,
         "hits": summarize((case_["hits"] for case_ in cases), 1),
         "by_kind": dict(sum((Counter(case_["by_kind"]) for case_ in cases), Counter())),
+        "own_question_found": sum(case_["own_question_rank"] is not None for case_ in cases),
         "node_found": found,
         "node_found_share": _share(found, len(cases)),
         "node_rank": summarize(

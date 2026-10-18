@@ -3,8 +3,9 @@
 `scripts/evaluate_retrieval.py` measures, on a temporary copy of your own
 database, how the local token estimator compares with the earlier UTF-8 byte
 count, what memory retrieval returns for the questions you actually asked, and
-how topic search finds them. It never changes your database, calls no model API
-and downloads nothing. A deterministic synthetic fixture exercises the same code
+whether topic search finds their nodes through text other than the question
+itself. It never changes your database, calls no model API and downloads
+nothing. A deterministic synthetic fixture exercises the same code
 for tests and for trying the script without personal data.
 
 ## Running it
@@ -107,11 +108,17 @@ min(k, label size); `hit_rate_at_k` is the share of cases with at least one of
 them in the top k; `mrr_at_k` is the mean reciprocal rank of the first one
 within the top k. Questions without such facts are not counted.
 
-**Topic search.** For each completed question, the longest run of Chinese,
-Japanese or Korean characters in it, or otherwise its longest word, of at least
-three characters, is searched in its topic with the full-text query of the map
-search (twenty results). The report records hit counts by kind, latency and
-whether, and at which rank, a hit belongs to the question's own node.
+**Topic search.** For each completed question, a key term is cut from the
+question itself: its longest run of Chinese, Japanese or Korean characters or
+its longest word, of at least three characters, where one such character weighs
+as much as two letters (so `请解释 Transformer` gives `Transformer`). The term is
+searched in the question's topic with the full-text query of the map search
+(twenty results). The question's own message is indexed and contains the term,
+so that match is counted separately (`own_question_found`); `node_found` and
+`node_rank` only count other hits on the question's node: its answers, facts,
+note or other turns. The report also records hit counts by kind and latency.
+The figures depend on the term rule as much as on search, so compare them only
+between runs on the same data.
 
 **Timing.** Retrieval latency per scope and search latency are reported as
 count, minimum, p50, p90, p95, p99, maximum and mean in milliseconds
@@ -194,8 +201,12 @@ UTF-8 字节计数、回放真实问题的记忆检索、检查主题全文搜�
   标签按与检索去重相同的规范化文本比较：文本相同的事实只计一次；文本已包含在问题的引用或学习笔记
   中的事实不计入标签，因为检索不会返回提示中已有的内容，报告用 `in_prompt`（每个计分标签）和
   `facts_in_prompt`（每个范围）记录这类事实的数量。
-- **主题搜索**：取每个问题中最长的中日韩字符串、否则最长的单词（至少 3 个字符），用地图搜索的
-  全文查询在其主题内检索，记录命中数、耗时以及是否命中问题本身所在节点。
+- **主题搜索**：检索词取自问题本身：问题中最长的中日韩字符串或最长的单词（至少 3 个字符；
+  比较时一个中日韩字符按两个字母计，例如 `请解释 Transformer` 取 `Transformer`），用地图搜索的
+  全文查询在其主题内检索（20 条结果）。问题本身的消息已被索引且必然包含检索词，这类命中单独记为
+  `own_question_found`；`node_found` 和 `node_rank` 只统计命中该节点其他内容（回答、事实、笔记或
+  其他轮次）的情况。报告还记录各类命中数和耗时。结果同样取决于检索词规则，只在同一数据的多次运行
+  之间比较。
 - **耗时**：检索（分范围）和搜索给出 p50/p90/p95/p99 等毫秒分位数；每个范围先做一次不计时的
   预热。结果依赖机器和数据规模，只在同一台机器上比较。
 - **局限**：代理标签假设同一追问链或父节点的事实与后续问题相关，这常常成立但并不总是成立；其他
