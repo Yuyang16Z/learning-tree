@@ -16,6 +16,7 @@ import type {
   SourceAnchor,
   NavigationAnchor,
   DocumentSummary,
+  Understanding,
 } from "./types";
 import { Sidebar } from "./components/Sidebar";
 import { ChatPane } from "./components/ChatPane";
@@ -24,6 +25,7 @@ import { NavigationGate, readSaved, saveValue, clearLegacyRecovery, removeWorksp
 import { mergePendingTitles, pollPendingTitles } from "./lib/titlePolling";
 import { resumeAnswer } from "./lib/answerStream";
 import { keepIfSame, planRefresh, watchChanges } from "./lib/changeFeed";
+import { restoreUnderstanding, withUnderstanding } from "./lib/understanding";
 import { SettingsModal } from "./components/SettingsModal";
 import { NewTreeModal } from "./components/NewTreeModal";
 import { AddModelModal } from "./components/AddModelModal";
@@ -293,6 +295,21 @@ export default function App() {
     catch (e) { if ((e as { status?: number }).status === 404) return; throw e; }
     if (navigation.current.current(ticket) && focusRef.current === nodeId && treeRef.current === treeId && !abortRef.current)
       setThread(keepIfSame(rows));
+  }
+
+  // Show the learner's mark at once in the conversation and the map; restore it if the save fails.
+  async function changeUnderstanding(nodeId: number, value: Understanding | null) {
+    const previous = (thread.find(row => row.node_id === nodeId) ?? treeNodes.find(node => node.id === nodeId))?.understanding ?? null;
+    const isRow = (row: ThreadNode) => row.node_id === nodeId;
+    const isNode = (node: TreeNode) => node.id === nodeId;
+    setThread(rows => withUnderstanding(rows, isRow, value));
+    setTreeNodes(nodes => withUnderstanding(nodes, isNode, value));
+    try { await api.setUnderstanding(nodeId, value); }
+    catch (error) {
+      setThread(rows => restoreUnderstanding(rows, isRow, value, previous));
+      setTreeNodes(nodes => restoreUnderstanding(nodes, isNode, value, previous));
+      throw error;
+    }
   }
 
   // Stop an answer started in another window or on another device.
@@ -698,6 +715,7 @@ export default function App() {
         onAsk={onAsk}
         onStop={onStop}
         onStopNode={nodeId => void stopNode(nodeId)}
+        onUnderstandingChange={changeUnderstanding}
         onBranch={onBranch}
         onDeleteNode={onDeleteNode}
         rightOpen={rightOpen}

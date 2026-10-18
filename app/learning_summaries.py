@@ -42,7 +42,14 @@ def _hash(value) -> str:
     return hashlib.sha256(_json(value).encode()).hexdigest()
 
 
+# Learner marks are not source content. Leaving them out keeps summary keys stable,
+# so marking a node never forces a new (billable) summary or rejects one in flight.
+_NODE_MARKS = frozenset({"understanding"})
+
+
 def _snapshot(record) -> dict:
+    if isinstance(record, Node):
+        return record.model_dump(mode="json", exclude=set(_NODE_MARKS))
     return record.model_dump(mode="json")
 
 

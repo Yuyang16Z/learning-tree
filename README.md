@@ -24,6 +24,8 @@ The images use synthetic content and the offline demo model. They demonstrate th
 - Select text to copy it, request a quick explanation or create a branch from an answer. Return to the exact source passage when you finish.
 - Branch titles summarize the first question you ask, rather than copying the source answer. A new empty branch shows “New branch”.
 - Save your understanding and bring it into the main conversation as an editable draft.
+- Mark the open question **Not yet**, **Roughly** or **Can explain** in the bar above the conversation, beside **Back to source** in a branch. The map colours topic cards by your marks, and **Not understood** in the map header lists the questions still marked Not yet.
+- Returning from a branch shows a short recap above the composer: sentences picked locally from the branch's answers (corrections, conditions, definitions and open questions first), your reflection and your mark. It is an extract, not an AI summary, and it is never stored.
 - Edit a question as a new version, retry interrupted answers, and keep the original record.
 - Answers keep generating on the server when a page closes or a connection drops, and the page reconnects on its own. Other open windows see new questions, branches, settings and running answers within a few seconds.
 - Open the same workspace on your phone through a private Tailscale network: **Settings → Phone access** shows the one-time setup command and a QR code. On touch screens, selection actions dock at the bottom and text fields avoid iOS focus zoom. See [phone access](docs/operations.md#phone-access).

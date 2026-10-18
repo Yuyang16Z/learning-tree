@@ -37,7 +37,8 @@ from ..models import (
     PreferenceSupplement,
 )
 from ..retrieval import read_retrieval_settings
-from ..schemas import AskIn, BranchIn, ExplainIn, NodePatch, StopIn, TitleIn
+from ..return_summary import build_return_summary
+from ..schemas import UNDERSTANDING_LEVELS, AskIn, BranchIn, ExplainIn, NodePatch, StopIn, TitleIn
 from ..search_index import HISTORY_TOOL_DEF, HISTORY_TOOL_NAME, make_history_search
 from ..service import (
     assemble_tools,
@@ -240,6 +241,10 @@ def node_metadata(
         "source_start": node.source_start,
         "source_end": node.source_end,
         "learning_note": node.learning_note,
+        # Unknown stored values read as "not marked" rather than failing a listing.
+        "understanding": (
+            node.understanding if node.understanding in UNDERSTANDING_LEVELS else None
+        ),
         "revision_of": node.revision_of,
         "request_id": node.request_id,
     }
@@ -345,13 +350,28 @@ def get_thread_route(node_id: int, session: Session = Depends(get_session)) -> d
     }
 
 
+@router.get("/{node_id}/return-summary")
+def get_return_summary(node_id: int, session: Session = Depends(get_session)) -> dict:
+    """Local excerpts of what the branch around this node added; no model call, no writes."""
+    summary = build_return_summary(session, _get(session, node_id))
+    if summary is None:
+        raise HTTPException(404, "这个节点不在分支中")
+    return summary
+
+
 @router.patch("/{node_id}")
 def patch_node(node_id: int, body: NodePatch, session: Session = Depends(get_session)) -> dict:
     with _REQUEST_LOCK:
         node = _get(session, node_id)
-        if "learning_note" in body.model_fields_set:
+        fields = body.model_fields_set
+        if "learning_note" in fields:
             invalidate_summaries(session, node_ids={node_id})
             node.learning_note = body.learning_note.strip() if body.learning_note else None
+        if "understanding" in fields:
+            # A learner's mark, not source content: summaries, titles and request
+            # state stay as they are. The ORM update still reaches the change feed.
+            node.understanding = body.understanding
+        if fields & {"learning_note", "understanding"}:
             session.add(node)
             session.commit()
     return get_node(node_id, session)

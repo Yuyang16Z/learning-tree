@@ -1,6 +1,8 @@
 export interface Tree { id: number; title: string; root_node_id: number; archived: boolean }
 export type NodeStatus = 'idle' | 'pending' | 'complete' | 'error' | 'interrupted';
 export type TitleState = 'legacy' | 'manual' | 'empty' | 'pending' | 'ai' | 'fallback';
+/** The learner's own mark on a node: not yet / roughly / can explain. Absent or null = not marked. */
+export type Understanding = 'open' | 'partial' | 'clear';
 export interface SourceAnchor {
   source_message_id?: number;
   source_start?: number;
@@ -20,6 +22,7 @@ export interface LearningFields {
   source_start?: number | null;
   source_end?: number | null;
   learning_note?: string | null;
+  understanding?: Understanding | null;
   revision_of?: number | null;
   request_id?: string | null;
 }
@@ -56,6 +59,16 @@ export interface SearchHit {
   rank: number;
 }
 export interface RetrievalSettings { include_siblings: boolean; include_other_trees: boolean; revision: string }
+export type ReturnExcerptCategory = 'correction' | 'condition' | 'definition' | 'question' | 'explanation';
+/** What a branch added, extracted locally from its stored answers when returning to the source. */
+export interface ReturnSummary {
+  branch_node_id: number;
+  branch_title: string;
+  understanding: Understanding | null;
+  note: string | null;
+  excerpts: { category: ReturnExcerptCategory; text: string; node_id: number; message_id: number | null }[];
+  source: { node_id: number; message_id: number | null; start: number | null; end: number | null; text: string | null };
+}
 export interface DocumentSummary {
   id: string; name: string; media_type: string; size: number; characters: number; warnings: string[];
 }

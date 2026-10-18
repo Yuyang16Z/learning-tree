@@ -181,6 +181,9 @@ class Node(SQLModel, table=True):
     source_start: int | None = None
     source_end: int | None = None
     learning_note: str | None = None
+    # The learner's own mark for this node: open | partial | clear; NULL = not marked.
+    # Not source content: it never changes answers, titles, summaries or request state.
+    understanding: str | None = None
     revision_of: int | None = None
     request_id: str | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_now)

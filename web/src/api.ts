@@ -21,6 +21,7 @@ import type {
   ModelInput,
   NodeDetail,
   RetrievalSettings,
+  ReturnSummary,
   SearchHit,
   ThreadNode,
   Tree,
@@ -28,6 +29,7 @@ import type {
   SourceAnchor,
   DocumentSummary,
   DocumentDetail,
+  Understanding,
 } from "./types";
 
 const API = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
@@ -252,6 +254,13 @@ export const api = {
     jsonPost(`${API}/nodes/${id}/explain`, { text, config_id, source_message_id, locale: getLocale() }).then(j<{ explanation: string }>),
   saveNote: (id: number, learning_note: string) => fetch(`${API}/nodes/${id}`, {
     method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ learning_note }),
+  }).then(j<unknown>),
+  // Local excerpts of the branch being left; no model call. 404 outside a branch.
+  returnSummary: (id: number, signal?: AbortSignal) =>
+    fetch(`${API}/nodes/${id}/return-summary`, { signal }).then(j<ReturnSummary>),
+  // Sends only the mark, so the learning note is left as it is; null clears the mark.
+  setUnderstanding: (id: number, understanding: Understanding | null) => fetch(`${API}/nodes/${id}`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ understanding }),
   }).then(j<unknown>),
 
   phoneAccess: (signal?: AbortSignal) => fetch(`${API}/phone-access`, { signal, cache: "no-store" }).then(j<PhoneAccess>),
