@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 
 # (pattern over the lower-cased model id, context window). Order matters: the
-# first match wins, so specific families precede broad ones.
+# first match wins, so specific families and releases precede broad ones.
 _PATTERNS: tuple[tuple[str, int], ...] = (
     (r"deepseek-(?:v4|flash)", 1_048_576),
     (r"deepseek-(?:chat|reasoner)", 131_072),
@@ -24,6 +24,9 @@ _PATTERNS: tuple[tuple[str, int], ...] = (
     (r"gpt-5", 272_000),
     (r"o[34](?:-|$)", 200_000),
     (r"qwen", 131_072),
+    # The July 2025 Kimi K2 weights have 128K; later K2 releases have 256K.
+    (r"kimi-k2-0711", 131_072),
+    (r"kimi-k2-instruct$", 131_072),
     (r"kimi-k2", 262_144),
     (r"glm-4\.6", 204_800),
     (r"glm-4\.5", 131_072),

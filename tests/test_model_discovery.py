@@ -54,6 +54,13 @@ from app.models import ModelConfig
         ("o4-mini", 200_000),
         ("qwen3-235b-a22b", 131_072),
         ("kimi-k2-0905", 262_144),
+        ("kimi-k2-0905-preview", 262_144),
+        ("kimi-k2-turbo-preview", 262_144),
+        ("kimi-k2-thinking", 262_144),
+        ("moonshotai/Kimi-K2-Instruct-0905", 262_144),
+        # The July 2025 weights have a 128K window.
+        ("kimi-k2-0711-preview", 131_072),
+        ("moonshotai/Kimi-K2-Instruct", 131_072),
         ("glm-4.6", 204_800),
         ("glm-4.5-air", 131_072),
         ("gemini-2.5-pro", 1_048_576),
