@@ -121,8 +121,11 @@ reloads the latest settings instead of overwriting them.
 The same switches govern the answer model's read-only `search_learning_history`
 tool. It searches completed answers, notes and current facts of the current path
 by default; the `tree` and `all` scopes are refused unless the matching switch
-was on when the answer started. The tool never writes, never embeds and is not
-offered in demo mode.
+was on when the answer started. The switches stay independent there too: `all`
+adds other topics to the current path and includes this topic's other branches
+only when **Other branches of this topic** is also on. The topic being answered
+in stays searchable under `all` even when it is archived. The tool never writes,
+never embeds and is not offered in demo mode.
 
 ### Referenced memories
 
@@ -220,7 +223,9 @@ idempotent; database backups include them, learning-tree exports exclude
   索引由 SQLite FTS5（三元组分词）和触发器维护，启动时缺失或计数不符会自动重建；短于
   3 个字符的查询或不支持 FTS5 的 SQLite 使用 LIKE 扫描。
 - 模型可用的只读工具 `search_learning_history` 受同一组开关约束：默认只查当前路径，
-  `tree`/`all` 范围需在回答开始时已经启用；它不写入数据库，演示模式不会提供。
+  `tree`/`all` 范围需在回答开始时已经启用；两个开关互相独立，`all` 在当前路径之外加入
+  其他主题，只有「同主题的其他分支」也开启时才包含当前主题的其他分支；当前主题即使已归档，
+  `all` 也能查到它的路径。它不写入数据库，演示模式不会提供。
 - **离线评估**：运行 `uv run python scripts/evaluate_retrieval.py --database branch_learning.db`，
   在临时副本上查看检索范围和主题搜索在自己数据上的表现，原数据库不会改变；报告写入
   `artifacts/`，详见[离线检索评估](retrieval-evaluation.md)。这条命令使用关键词检索，不经过

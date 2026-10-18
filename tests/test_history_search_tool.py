@@ -159,6 +159,50 @@ def test_wider_scopes_require_the_snapshot_taken_at_generation_start(engine):
     assert "ARCHIVED" not in json.dumps(result, ensure_ascii=False)
 
 
+@pytest.mark.parametrize("fts", [True, False])
+def test_all_scope_keeps_the_current_topic_to_the_path_without_the_sibling_switch(
+    engine, monkeypatch, fts
+):
+    if not fts:
+        monkeypatch.setattr(search_index, "fts5_available", lambda connection: False)
+    with Session(engine) as session:
+        sibling = session.get(Node, 3)
+        sibling.learning_note = "SYNTHETIC_SIBLING_NOTE quicksort"
+        session.add(sibling)
+        session.commit()
+    allowed = {
+        ("message", 1, 12),
+        ("note", 2, None),
+        ("memory", 1, None),
+        ("message", 4, 41),
+        ("memory", 4, None),
+    }
+    others_only = make_history_search(engine, 1, [1, 2], {"include_other_trees": True})
+    assert call(others_only, query="quicksort", scope="tree")["error"] == "scope_not_enabled"
+    result = call(others_only, query="quicksort", scope="all", limit=8)
+    assert found(result) == allowed
+    raw = json.dumps(result, ensure_ascii=False)
+    assert "SIBLING" not in raw and "sibling" not in raw and "兄弟分支" not in raw
+    # The sibling rows are excluded by the search itself, so they never use up the limit.
+    assert found(call(others_only, query="quicksort", scope="all", limit=5)) == allowed
+
+    both = make_history_search(engine, 1, [1, 2], WIDE)
+    assert found(call(both, query="quicksort", scope="all", limit=8)) >= {
+        ("message", 3, 31),
+        ("memory", 3, None),
+        ("note", 3, None),
+    }
+
+    # Answering inside an archived topic keeps its own path searchable under "all".
+    with Session(engine) as session:
+        current = session.get(KnowledgeTree, 1)
+        current.archived = True
+        session.add(current)
+        session.commit()
+    assert found(call(others_only, query="quicksort", scope="all", limit=8)) == allowed
+    assert "ARCHIVED" not in json.dumps(call(both, query="quicksort", scope="all", limit=8))
+
+
 def test_results_are_rechecked_against_current_records(engine):
     search = make_history_search(engine, 1, [1, 2], OFF)
     assert found(call(search, query="quicksort")) == {
