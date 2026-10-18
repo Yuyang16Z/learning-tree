@@ -1,14 +1,15 @@
 """Trigger-maintained SQLite FTS5 index over completed answers, current facts and notes.
 
 The index is derived data: SQLite triggers keep it in step with the source rows,
-start-up rebuilds it when its row count disagrees with the sources, and every
-reader degrades to a LIKE scan when FTS5 is unavailable. Nothing in this module
-writes to the source tables.
+start-up rebuilds it when its row count disagrees with the sources or its triggers
+come from another layout, and every reader degrades to a LIKE scan when FTS5 is
+unavailable. Nothing in this module writes to the source tables.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -22,9 +23,13 @@ logger = logging.getLogger(__name__)
 
 INDEX_TABLE = "search_index"
 KINDS = ("message", "memory", "note")
+# Every index row has a rowid derived from its source row (source id * 4 + offset),
+# so the triggers find it by rowid. FTS5 cannot use an index for UNINDEXED columns:
+# a filter on kind, ref_id or node_id scans the whole table for each changed row.
+ROWID_OFFSETS = {"message": 1, "memory": 2, "note": 3}
 # Trigram tokens need three characters; shorter queries use LIKE instead.
 MIN_FTS_QUERY_CHARS = 3
-_COLUMNS = "kind, ref_id, tree_id, node_id, content"
+_COLUMNS = "rowid, kind, ref_id, tree_id, node_id, content"
 # Trigger bodies are only resolved when they fire, so a trigger created against a
 # legacy table that still lacks a column would break every later write.
 _REQUIRED_COLUMNS = {
@@ -33,58 +38,74 @@ _REQUIRED_COLUMNS = {
     "node": {"id", "tree_id", "learning_note"},
 }
 
+
+def _rowid(kind: str, source_id: str) -> str:
+    return f"{source_id} * 4 + {ROWID_OFFSETS[kind]}"
+
+
+def _drop_row(kind: str) -> str:
+    return f"DELETE FROM {INDEX_TABLE} WHERE rowid = {_rowid(kind, 'OLD.id')}"
+
+
 _CREATE_TABLE = (
     f"CREATE VIRTUAL TABLE IF NOT EXISTS {INDEX_TABLE} USING fts5("
     "kind UNINDEXED, ref_id UNINDEXED, tree_id UNINDEXED, node_id UNINDEXED, content, "
     "tokenize='trigram remove_diacritics 1')"
 )
+# REPLACE keeps a source write working even if a stale row still holds its rowid.
+_INSERT = f"INSERT OR REPLACE INTO {INDEX_TABLE}({_COLUMNS}) "
 _MESSAGE_ROW = (
-    f"INSERT INTO {INDEX_TABLE}({_COLUMNS}) "
-    "SELECT 'message', NEW.id, node.tree_id, NEW.node_id, NEW.content "
-    "FROM node WHERE node.id = NEW.node_id"
+    f"{_INSERT}SELECT {_rowid('message', 'NEW.id')}, 'message', NEW.id, node.tree_id, "
+    "NEW.node_id, NEW.content FROM node WHERE node.id = NEW.node_id"
 )
 _MEMORY_ROW = (
-    f"INSERT INTO {INDEX_TABLE}({_COLUMNS}) "
-    "SELECT 'memory', NEW.id, NEW.tree_id, NEW.source_node_id, NEW.content "
-    "WHERE NEW.kind = 'fact' AND NEW.superseded_by IS NULL"
+    f"{_INSERT}SELECT {_rowid('memory', 'NEW.id')}, 'memory', NEW.id, NEW.tree_id, "
+    "NEW.source_node_id, NEW.content WHERE NEW.kind = 'fact' AND NEW.superseded_by IS NULL"
 )
 _NOTE_ROW = (
-    f"INSERT INTO {INDEX_TABLE}({_COLUMNS}) "
-    "SELECT 'note', NEW.id, NEW.tree_id, NEW.id, NEW.learning_note "
-    "WHERE NEW.learning_note IS NOT NULL AND NEW.learning_note <> ''"
+    f"{_INSERT}SELECT {_rowid('note', 'NEW.id')}, 'note', NEW.id, NEW.tree_id, NEW.id, "
+    "NEW.learning_note WHERE NEW.learning_note IS NOT NULL AND NEW.learning_note <> ''"
 )
 _TRIGGERS = (
     "CREATE TRIGGER IF NOT EXISTS search_message_ai AFTER INSERT ON message "
     f"WHEN NEW.status = 'complete' BEGIN {_MESSAGE_ROW}; END",
+    # Checkpoints of a streaming answer (pending to pending) leave the index alone.
     "CREATE TRIGGER IF NOT EXISTS search_message_au "
-    "AFTER UPDATE OF content, status, node_id ON message BEGIN "
-    f"DELETE FROM {INDEX_TABLE} WHERE kind = 'message' AND ref_id = OLD.id; "
-    f"{_MESSAGE_ROW} AND NEW.status = 'complete'; END",
+    "AFTER UPDATE OF content, status, node_id ON message "
+    "WHEN OLD.status = 'complete' OR NEW.status = 'complete' BEGIN "
+    f"{_drop_row('message')}; {_MESSAGE_ROW} AND NEW.status = 'complete'; END",
     "CREATE TRIGGER IF NOT EXISTS search_message_ad AFTER DELETE ON message BEGIN "
-    f"DELETE FROM {INDEX_TABLE} WHERE kind = 'message' AND ref_id = OLD.id; END",
+    f"{_drop_row('message')}; END",
     "CREATE TRIGGER IF NOT EXISTS search_memory_ai AFTER INSERT ON memory "
     f"WHEN NEW.kind = 'fact' AND NEW.superseded_by IS NULL BEGIN {_MEMORY_ROW}; END",
     "CREATE TRIGGER IF NOT EXISTS search_memory_au "
     "AFTER UPDATE OF kind, content, tree_id, source_node_id, superseded_by ON memory BEGIN "
-    f"DELETE FROM {INDEX_TABLE} WHERE kind = 'memory' AND ref_id = OLD.id; {_MEMORY_ROW}; END",
+    f"{_drop_row('memory')}; {_MEMORY_ROW}; END",
     "CREATE TRIGGER IF NOT EXISTS search_memory_ad AFTER DELETE ON memory BEGIN "
-    f"DELETE FROM {INDEX_TABLE} WHERE kind = 'memory' AND ref_id = OLD.id; END",
+    f"{_drop_row('memory')}; END",
     "CREATE TRIGGER IF NOT EXISTS search_note_ai AFTER INSERT ON node "
     f"WHEN NEW.learning_note IS NOT NULL AND NEW.learning_note <> '' BEGIN {_NOTE_ROW}; END",
     # One flush may write a child message before its node; index those messages now.
     "CREATE TRIGGER IF NOT EXISTS search_node_messages_ai AFTER INSERT ON node BEGIN "
-    f"INSERT INTO {INDEX_TABLE}({_COLUMNS}) "
-    "SELECT 'message', m.id, NEW.tree_id, m.node_id, m.content FROM message m "
-    "WHERE m.node_id = NEW.id AND m.status = 'complete' AND NOT EXISTS "
-    f"(SELECT 1 FROM {INDEX_TABLE} s WHERE s.kind = 'message' AND s.ref_id = m.id); END",
-    "CREATE TRIGGER IF NOT EXISTS search_note_au AFTER UPDATE OF learning_note ON node BEGIN "
-    f"DELETE FROM {INDEX_TABLE} WHERE kind = 'note' AND ref_id = OLD.id; {_NOTE_ROW}; END",
-    "CREATE TRIGGER IF NOT EXISTS search_node_tree_au AFTER UPDATE OF tree_id ON node BEGIN "
-    f"UPDATE {INDEX_TABLE} SET tree_id = NEW.tree_id WHERE node_id = NEW.id; END",
-    "CREATE TRIGGER IF NOT EXISTS search_node_ad AFTER DELETE ON node BEGIN "
-    f"DELETE FROM {INDEX_TABLE} WHERE node_id = OLD.id OR (kind = 'note' AND ref_id = OLD.id); "
+    f"{_INSERT}SELECT {_rowid('message', 'm.id')}, 'message', m.id, NEW.tree_id, m.node_id, "
+    "m.content FROM message m WHERE m.node_id = NEW.id AND m.status = 'complete' "
+    f"AND NOT EXISTS (SELECT 1 FROM {INDEX_TABLE} s WHERE s.rowid = {_rowid('message', 'm.id')}); "
     "END",
+    "CREATE TRIGGER IF NOT EXISTS search_note_au AFTER UPDATE OF learning_note ON node BEGIN "
+    f"{_drop_row('note')}; {_NOTE_ROW}; END",
+    # Nodes never move between topics in the app; this rare repair may scan the index.
+    "CREATE TRIGGER IF NOT EXISTS search_node_tree_au AFTER UPDATE OF tree_id ON node "
+    "WHEN OLD.tree_id IS NOT NEW.tree_id BEGIN "
+    f"UPDATE {INDEX_TABLE} SET tree_id = NEW.tree_id WHERE node_id = NEW.id; END",
+    # The index mirrors its source tables row for row: a node's messages and facts
+    # leave through their own triggers, as every deletion path deletes them too.
+    "CREATE TRIGGER IF NOT EXISTS search_node_ad AFTER DELETE ON node BEGIN "
+    f"{_drop_row('note')}; END",
 )
+_TRIGGER_SQL = {
+    re.match(r"CREATE TRIGGER IF NOT EXISTS (\w+)", statement).group(1): statement
+    for statement in _TRIGGERS
+}
 _SOURCE_COUNT = (
     "SELECT (SELECT COUNT(*) FROM message m JOIN node n ON n.id = m.node_id "
     "WHERE m.status = 'complete')"
@@ -93,14 +114,11 @@ _SOURCE_COUNT = (
 )
 _REBUILD = (
     f"DELETE FROM {INDEX_TABLE}",
-    f"INSERT INTO {INDEX_TABLE}({_COLUMNS}) "
-    "SELECT 'message', m.id, n.tree_id, m.node_id, m.content "
-    "FROM message m JOIN node n ON n.id = m.node_id WHERE m.status = 'complete'",
-    f"INSERT INTO {INDEX_TABLE}({_COLUMNS}) "
-    "SELECT 'memory', id, tree_id, source_node_id, content "
+    f"{_INSERT}SELECT {_rowid('message', 'm.id')}, 'message', m.id, n.tree_id, m.node_id, "
+    "m.content FROM message m JOIN node n ON n.id = m.node_id WHERE m.status = 'complete'",
+    f"{_INSERT}SELECT {_rowid('memory', 'id')}, 'memory', id, tree_id, source_node_id, content "
     "FROM memory WHERE kind = 'fact' AND superseded_by IS NULL",
-    f"INSERT INTO {INDEX_TABLE}({_COLUMNS}) "
-    "SELECT 'note', id, tree_id, id, learning_note "
+    f"{_INSERT}SELECT {_rowid('note', 'id')}, 'note', id, tree_id, id, learning_note "
     "FROM node WHERE learning_note IS NOT NULL AND learning_note <> ''",
 )
 
@@ -126,10 +144,35 @@ def _schema_ready(connection) -> bool:
     return True
 
 
-def _create(connection) -> None:
-    connection.exec_driver_sql(_CREATE_TABLE)
+def _normal_sql(statement: str) -> str:
+    # sqlite_master keeps each CREATE statement without its IF NOT EXISTS clause.
+    return " ".join(statement.replace(" IF NOT EXISTS ", " ", 1).split())
+
+
+def _stored_triggers(connection) -> dict[str, str]:
+    return dict(
+        connection.exec_driver_sql(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' "
+            "AND substr(name, 1, 7) = 'search_' AND tbl_name IN ('message', 'memory', 'node')"
+        ).all()
+    )
+
+
+def _drop_triggers(connection, names) -> None:
+    for name in names:
+        connection.exec_driver_sql(f'DROP TRIGGER IF EXISTS "{name}"')
+
+
+def _install_triggers(connection) -> bool:
+    """Install this version's triggers; True when stored ones were missing or differed."""
+    stored = _stored_triggers(connection)
+    expected = {name: _normal_sql(sql) for name, sql in _TRIGGER_SQL.items()}
+    if {name: _normal_sql(sql or "") for name, sql in stored.items()} == expected:
+        return False
+    _drop_triggers(connection, stored)
     for statement in _TRIGGERS:
         connection.exec_driver_sql(statement)
+    return True
 
 
 def _rebuild(connection) -> None:
@@ -152,8 +195,12 @@ def _ensure(connection, *, rebuild: bool) -> bool:
     if not _schema_ready(connection):
         # Legacy tables gain their columns in init_db before the index is retried.
         return False
-    _create(connection)
-    if rebuild and index_count(connection) != source_count(connection):
+    existed = _index_exists(connection)
+    connection.exec_driver_sql(_CREATE_TABLE)
+    replaced = _install_triggers(connection)
+    # Rows kept by missing triggers or placed by another layout cannot be trusted
+    # even when the counts agree, so an existing index is then rebuilt once.
+    if (existed and replaced) or (rebuild and index_count(connection) != source_count(connection)):
         logger.info("Rebuilding the search index from stored records")
         _rebuild(connection)
     return True

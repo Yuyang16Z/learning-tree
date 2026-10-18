@@ -148,9 +148,12 @@ when you switch topics before it returns.
 
 Search uses a SQLite FTS5 trigram index (`search_index`) maintained by database
 triggers, so it follows every edit, completion, supersession and deletion
-immediately. Start-up creates the index when it is missing and rebuilds it when
-its row count disagrees with the stored records; it is derived data that a
-restored backup rebuilds on first start. Queries shorter than three characters,
+immediately. Index rows are found by a rowid derived from their source record,
+so deleting a large topic or saving a streaming answer does not slow down as the
+index grows. Start-up creates the index when it is missing and rebuilds it when
+its row count disagrees with the stored records or its triggers come from
+another version; it is derived data that a restored backup rebuilds on first
+start. Queries shorter than three characters,
 or a SQLite build without FTS5, use a case-insensitive LIKE scan instead.
 
 The source conversation can still appear in ordinary chat context after its
@@ -220,8 +223,9 @@ idempotent; database backups include them, learning-tree exports exclude
   学习树导出。
 - **主题内全文搜索**：学习树搜索框除了即时匹配标题和引用，还会向服务端查询已完成回答、
   学习笔记和当前事实中的原文片段，作为第二组结果展示；选择回答结果会跳转并高亮对应段落。
-  索引由 SQLite FTS5（三元组分词）和触发器维护，启动时缺失或计数不符会自动重建；短于
-  3 个字符的查询或不支持 FTS5 的 SQLite 使用 LIKE 扫描。
+  索引由 SQLite FTS5（三元组分词）和触发器维护，触发器按由来源记录推算的 rowid 定位索引行，
+  删除大主题或保存流式回答不会随索引增大而变慢；启动时索引缺失、计数不符或触发器来自其他
+  版本会自动重建；短于 3 个字符的查询或不支持 FTS5 的 SQLite 使用 LIKE 扫描。
 - 模型可用的只读工具 `search_learning_history` 受同一组开关约束：默认只查当前路径，
   `tree`/`all` 范围需在回答开始时已经启用；两个开关互相独立，`all` 在当前路径之外加入
   其他主题，只有「同主题的其他分支」也开启时才包含当前主题的其他分支；当前主题即使已归档，

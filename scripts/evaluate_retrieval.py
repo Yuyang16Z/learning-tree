@@ -1037,10 +1037,10 @@ class FactTimeline:
     retrieval skips; restore() writes the original values back. Questions must be
     visited in time order after reset().
 
-    Every superseded_by write would fire the search index's memory triggers, which find
-    the fact's index row through unindexed columns and so scan the whole index: each
-    pass would cost facts x index rows. Retrieval never reads the index, so the triggers
-    are suspended from construction until restore(), which recreates them once every
+    Every superseded_by write would fire the search index's memory triggers, which drop
+    and re-index the fact each time (on an index built before rowid lookups, each firing
+    scanned the whole index). Retrieval never reads the index, so the triggers are
+    suspended from construction until restore(), which recreates them once every
     original value is back; the index then matches the restored rows again.
     """
 
