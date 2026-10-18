@@ -1041,6 +1041,37 @@ def test_memory_sources_are_announced_once_persisted_and_kept_out_of_exports(api
     assert client.get(f"/nodes/{follow_up}/thread").json()["nodes"][-1]["sources"] is None
 
 
+def test_memory_recall_and_history_search_share_one_scope_snapshot(api, monkeypatch):
+    client, engine, calls = api
+    with Session(engine) as session:
+        session.add(RetrievalSettings(include_siblings=True, include_other_trees=True))
+        session.commit()
+    read = nodes.read_retrieval_settings
+
+    def read_then_concurrent_save(session):
+        scopes = read(session)
+        with Session(engine) as writer:  # A save from another window lands now.
+            row = writer.get(RetrievalSettings, 1)
+            row.include_other_trees = False
+            writer.add(row)
+            writer.commit()
+        return scopes
+
+    monkeypatch.setattr(nodes, "read_retrieval_settings", read_then_concurrent_save)
+    snapshots = []
+    make = nodes.make_history_search
+
+    def capture(engine_, tree_id, path, snapshot, **kwargs):
+        snapshots.append(dict(snapshot))
+        return make(engine_, tree_id, path, snapshot, **kwargs)
+
+    monkeypatch.setattr(nodes, "make_history_search", capture)
+    events = ask(client)
+    assert events[-1]["done"], events
+    assert snapshots == [{"include_siblings": True, "include_other_trees": True}]
+    assert calls["memory"][-1]["scopes"] == snapshots[0], "recall used the same snapshot"
+
+
 def _synthetic_tool(name="synthetic_tool", padding=0):
     return {
         "type": "function",

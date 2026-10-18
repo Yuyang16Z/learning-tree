@@ -1195,6 +1195,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                         quoted_text=memory_quote,
                         # These sources are mandatory even after compaction.
                         existing_text=memory_quote + "\n" + (context_target.learning_note or ""),
+                        # The same snapshot binds the history tool below.
+                        scopes=scope_snapshot,
                     )
                 timings["retrieval"] = time.monotonic() - retrieval_started
             # Test doubles return plain strings; provenance is optional.

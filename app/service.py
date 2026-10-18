@@ -143,17 +143,28 @@ def fetch_memory_note(
     query: str = "",
     quoted_text: str = "",
     existing_text: str = "",
+    *,
+    scopes=None,
 ) -> MemoryNote:
     """Choose relevant memories within the allowed source path, independently of preferences.
 
     Sibling branches and other topics only join in after the user enabled them in
-    Settings; those hits stay labelled with their origin in the rendered note."""
+    Settings; those hits stay labelled with their origin in the rendered note.
+    `scopes` is the caller's snapshot of the two switches (a dict or the settings
+    read); an answer passes the one its history tool also uses, so a save landing
+    meanwhile cannot give the two different scopes. Without it, the settings are read."""
     from .retrieval import RetrievalConfig, read_retrieval_settings, retrieve_memory
 
-    scopes = read_retrieval_settings(session)
+    if scopes is None:
+        scopes = read_retrieval_settings(session)
+
+    def flag(name: str) -> bool:
+        value = scopes.get(name) if isinstance(scopes, dict) else getattr(scopes, name, False)
+        return bool(value)
+
     config = RetrievalConfig(
-        include_siblings=scopes.include_siblings,
-        include_other_trees=scopes.include_other_trees,
+        include_siblings=flag("include_siblings"),
+        include_other_trees=flag("include_other_trees"),
     )
     result = retrieve_memory(
         session, tree_id, source_node_ids, query, quoted_text, existing_text, config=config

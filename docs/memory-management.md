@@ -130,12 +130,14 @@ reloads the latest settings instead of overwriting them.
 
 The same switches govern the answer model's read-only `search_learning_history`
 tool. It searches completed answers, notes and current facts of the current path
-by default, never questions (including the one being answered); the `tree` and `all` scopes are refused unless the matching switch
-was on when the answer started. The switches stay independent there too: `all`
-adds other topics to the current path and includes this topic's other branches
-only when **Other branches of this topic** is also on. The topic being answered
-in stays searchable under `all` even when it is archived. The tool never writes,
-never embeds and is not offered in demo mode.
+by default, never questions (including the one being answered); the `tree` and
+`all` scopes are refused unless the matching switch was on when the answer
+started, and the answer's memory note uses that same reading of the switches.
+The switches stay independent there too: `all` adds other topics to the current
+path and includes this topic's other branches only when **Other branches of this
+topic** is also on. The topic being answered in stays searchable under `all`
+even when it is archived. The tool never writes, never embeds and is not offered
+in demo mode.
 
 Offering the tool turns an answer into a tool-capable request, which keeps room
 for tool results: with a 32,768-token window, history is compacted 15–20%
