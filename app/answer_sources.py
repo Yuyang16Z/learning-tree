@@ -4,8 +4,10 @@ An answer records which memory records reached its prompt as
 `{memory_id, source_node_id, tree_id, scope}`. The provenance is derived data: it is
 shown with topic titles read from the live topic, entries whose memory, source node or
 topic no longer exists are dropped when read, and every deletion path removes the
-entries that point at what it deleted. Titles are never stored, so a deleted topic's
-title cannot stay behind inside other topics.
+entries that point at what it deleted. Titles are never stored, so provenance cannot
+keep a deleted topic's title. Text an answer or its tool steps already quoted (such as a
+history-search result naming another topic) is the answer's own record and is not
+rewritten here.
 """
 
 from __future__ import annotations

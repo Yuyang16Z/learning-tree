@@ -164,9 +164,10 @@ The stored list holds only record ids and their scope. Topic names are read when
 the answer is shown, so a renamed topic shows its new name, and entries whose
 fact, source node or topic no longer exists are left out. Deleting a topic, a
 branch or facts also removes the entries that pointed at them from the answers
-that kept them, so a deleted topic leaves neither its name nor its ids behind
-in other topics. Text that an answer or its tool steps already quoted (for
-example a history-search result) belongs to that answer and is not rewritten.
+that kept them, so no Referenced entry keeps a deleted topic's name or ids.
+Text that an answer or its tool steps already quoted (for example a
+history-search result, which names the topic it came from) belongs to that
+answer: it stays in the answer and its export and is not rewritten.
 
 ## Topic search
 
@@ -262,8 +263,9 @@ backups include them, learning-tree exports exclude `sources`.
 - **参考了哪些记忆**：每条回答下方列出实际进入提示的记忆编号及来源节点，来自其他分支或
   主题的会标注；点击可跳到来源节点。被压缩掉的记忆不会列出。该列表随回答保存，但不随
   学习树导出。保存的只有记录编号和范围，主题名称在显示时读取；记忆、来源节点或主题已删除
-  的条目不再显示。删除主题、分支或记忆时，其他回答中指向它们的条目会一并移除，已删除主题
-  的名称和编号不会留在其他主题里；回答正文或工具步骤中已经引用的文字属于该回答本身，不会被改写。
+  的条目不再显示。删除主题、分支或记忆时，其他回答中指向它们的条目会一并移除，「参考了」列表
+  不会再保留已删除主题的名称和编号；回答正文或工具步骤中已经引用的文字（例如历史检索结果里的
+  主题名称）属于该回答本身，会留在回答和导出中，不会被改写。
 - **主题内全文搜索**：学习树搜索框除了即时匹配标题和引用，还会向服务端查询提问、已完成
   回答、学习笔记和当前事实中的原文片段，作为第二组结果展示；选择回答结果会跳转并高亮对应段落。
   索引由 SQLite FTS5（三元组分词）和触发器维护，触发器按由来源记录推算的 rowid 定位索引行，

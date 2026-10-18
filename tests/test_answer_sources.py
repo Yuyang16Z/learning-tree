@@ -14,8 +14,9 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 import app.db as database
 import app.service as service
-from app.models import Memory, Message, ModelConfig, Node
+from app.models import Memory, Message, ModelConfig, Node, RetrievalSettings
 from app.routers import memory_router, nodes, trees
+from app.search_index import HISTORY_TOOL_NAME
 
 SECRET = "PRIVATE_TOPIC_B_TITLE"
 
@@ -281,3 +282,37 @@ def test_clearing_memories_reloads_other_windows_only_when_answers_kept_provenan
     cursor = feed.since("")["cursor"]
     assert client.delete("/memories").status_code == 200
     assert feed.since(cursor)["reload"] and stored(engine) == []
+
+
+def test_tool_steps_keep_what_they_quoted_from_a_topic_deleted_later(setup, monkeypatch):
+    """Deletion removes provenance entries, never an answer's own record of its tool calls.
+
+    A history-search result naming another topic is text the answer received, stored like
+    the answer itself (rule 2: originals are not rewritten), so it stays in the answer and
+    its export after that topic is deleted, as docs/memory-management.md says."""
+    client, engine = setup
+    ids = build(client, engine)
+    with Session(engine) as session:
+        session.add(RetrievalSettings(id=1, include_other_trees=True))
+        session.commit()
+
+    def agent(spec, system, messages, tools, execute, **kwargs):
+        args = {"query": "B 的事实", "scope": "all"}
+        yield {"type": "tool_start", "name": HISTORY_TOOL_NAME, "args": args}
+        result = execute(HISTORY_TOOL_NAME, args)
+        yield {"type": "tool_end", "name": HISTORY_TOOL_NAME, "result": result}
+        yield {"type": "delta", "text": "合成回答。"}
+
+    monkeypatch.setattr(nodes, "run_agent", agent)
+    answer(client, monkeypatch, ids["a_root"], [entry(ids, "foreign", "other")])
+    assert client.delete(f"/trees/{ids['b']}").status_code == 200
+    assert shown(client, ids["a_root"]) is None and stored(engine) == []
+    with engine.connect() as connection:
+        rows = connection.exec_driver_sql("SELECT sources, steps FROM message").all()
+    assert not any(SECRET in (sources or "") for sources, _ in rows)
+    (steps,) = [json.loads(steps) for _, steps in rows if steps and steps != "null"]
+    (step,) = steps
+    found = json.loads(step["result"])["results"]
+    assert [(hit["tree_id"], hit["tree_title"]) for hit in found] == [(ids["b"], SECRET)]
+    exported = client.get(f"/trees/{ids['a']}/export").json()["messages"]
+    assert [m["steps"][0]["result"] for m in exported if m["steps"]] == [step["result"]]
