@@ -169,7 +169,28 @@ async function poll(callback) {
     assert.equal(discoverBodies[0].protocol, 'anthropic');
     assert.equal(discoverBodies[0].api_key, '', 'A blank key means the stored key is used server-side');
     await page.unroute(discoverRoute);
+    // Detection clears an earlier error, holds the field and Save until it answers, and never fills
+    // in a window the form would reject (a 4,096-token vLLM max_model_len, say).
+    await contextWindow.fill('8192');
+    await modelForm.getByRole('spinbutton', { name: 'Max output tokens', exact: true }).fill('7168');
+    await modelForm.getByRole('button', { name: 'Save', exact: true }).click();
+    await modelForm.getByRole('alert').waitFor();
+    let releaseDetection;
+    await page.route(discoverRoute, async route => {
+      await new Promise(resolve => { releaseDetection = resolve; });
+      await route.fulfill({ json: { context_window: 4096, max_output_tokens: null, source: 'provider', note: '已从服务商获取该模型的上限。' } });
+    });
+    await modelForm.getByRole('button', { name: 'Detect', exact: true }).click();
+    assert.equal(await modelForm.getByRole('alert').count(), 0, 'Detecting clears an earlier validation message');
+    await poll(async () => releaseDetection !== undefined);
+    assert(await contextWindow.isDisabled(), 'The field cannot be edited while a detection would overwrite it');
+    assert(await modelForm.getByRole('button', { name: 'Save', exact: true }).isDisabled(), 'Saving waits for the detection');
+    releaseDetection();
+    await modelForm.getByRole('status').filter({ hasText: 'outside the accepted range' }).waitFor();
+    assert.equal(await contextWindow.inputValue(), '8192', 'An out-of-range detection leaves the field unchanged');
+    await page.unroute(discoverRoute);
     await modelForm.getByLabel('API format', { exact: true }).selectOption('openai');
+    assert.equal(await modelForm.getByRole('status').count(), 0, 'A detection note never describes another model');
     const answerReserve = modelForm.getByRole('spinbutton', { name: 'Answer reserve (tokens)', exact: true });
     await contextWindow.fill('8192');
     await answerReserve.fill('7168');
