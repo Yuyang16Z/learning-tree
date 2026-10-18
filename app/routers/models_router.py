@@ -52,6 +52,12 @@ def _endpoint(protocol: str, url: str) -> str | None:
         return None
 
 
+def _identity(cfg: ModelConfig) -> tuple:
+    """What a calibration ratio is learned for: the protocol, address and model name.
+    Label, key, window and answer reserve edits keep the ratio."""
+    return (cfg.protocol, _endpoint(cfg.protocol, cfg.base_url), cfg.llm_model.strip())
+
+
 @router.post("/discover", response_model=ModelDiscoverOut)
 def discover_model(
     body: ModelDiscoverIn, session: Session = Depends(get_session)
@@ -103,10 +109,14 @@ def update_model(
         for other in session.exec(select(ModelConfig).where(ModelConfig.is_default == True)):  # noqa: E712
             other.is_default = False
             session.add(other)
+    identity = _identity(cfg)
     for name, value in body.model_dump().items():
         if name == "api_key" and not value.strip():
             continue
         setattr(cfg, name, value)
+    if _identity(cfg) != identity:
+        # The learned ratio measured another model's tokenizer; this one starts afresh.
+        session.execute(delete(ModelCalibration).where(ModelCalibration.config_id == config_id))
     session.add(cfg)
     session.commit()
     session.refresh(cfg)

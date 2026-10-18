@@ -167,6 +167,18 @@ def _report_foreign_key_violations() -> None:
         logger.warning("%d row(s) reference missing parents in: %s", len(rows), ", ".join(tables))
 
 
+def _drop_orphan_calibration() -> None:
+    """Calibration is derived from its model: drop ratios whose model is gone.
+
+    Before calibration writes checked for the model, an answer finishing after its
+    model was deleted could leave one, which a new model reusing the id inherited.
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text("DELETE FROM modelcalibration WHERE config_id NOT IN (SELECT id FROM modelconfig)")
+        )
+
+
 def init_db() -> None:
     from . import documents  # noqa: F401 -- register the additive document table
 
@@ -175,6 +187,7 @@ def init_db() -> None:
     SQLModel.metadata.create_all(engine)
     _ensure_columns()
     _ensure_indexes()
+    _drop_orphan_calibration()
     _report_foreign_key_violations()
     # After the additive columns exist: the FTS triggers reference them.
     search_index.ensure_search_index(engine)

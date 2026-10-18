@@ -1477,7 +1477,10 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     # estimate with its own reported input; demo answers never learn.
                     sample = calibration_sample(usage.get("rounds") or [])
                     if sample:
-                        record_usage(engine, config_id, *sample)
+                        # Folded only into the model this answer used: not into a model
+                        # that was deleted or switched to another one meanwhile.
+                        identity = (spec.protocol, spec.base_url, spec.llm_model)
+                        record_usage(engine, config_id, *sample, model=identity)
             except Exception:
                 pass
             if stream and hasattr(stream, "close"):

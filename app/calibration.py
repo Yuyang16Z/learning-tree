@@ -2,17 +2,21 @@
 
 The ratio lives in its own table so that learning after every answer neither
 rewrites ``ModelConfig`` (which would notify every open window) nor is reset by
-editing a model. Only real answers are used, and of those only the provider
-requests whose own estimate is meaningful (see calibration_sample).
+editing a model's label, key, window or answer reserve; switching a configuration
+to another protocol, address or model name starts it uncalibrated. Only real
+answers are used, and of those only the provider requests whose own estimate is
+meaningful (see calibration_sample).
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from sqlalchemy import func, literal, select
+from sqlalchemy.dialects.sqlite import insert
 from sqlmodel import Session
 
-from .models import ModelCalibration
+from .models import ModelCalibration, ModelConfig
 
 MIN_ESTIMATED_UNITS = 2000  # Smaller requests (and test fixtures) carry too much noise.
 EMA_ALPHA = 0.3
@@ -59,24 +63,66 @@ def calibration_sample(rounds: list[dict]) -> tuple[int, int] | None:
     return (estimated, actual) if estimated else None
 
 
-def record_usage(engine, config_id: int | None, estimated: int, actual: int) -> float | None:
-    """Fold one real request into the model's ratio; returns the new ratio or None."""
+def record_usage(
+    engine,
+    config_id: int | None,
+    estimated: int,
+    actual: int,
+    *,
+    model: tuple[str, str, str] | None = None,
+) -> float | None:
+    """Fold one answer's sample into its model's ratio; returns the new ratio or None.
+
+    One atomic upsert, written only while the configuration exists and, given `model`
+    (protocol, base_url, llm_model of the answer's request), still names that model.
+    Concurrent answers therefore never lose a sample, and an answer that finishes after
+    its model was deleted or switched to another model writes nothing: SQLite reuses
+    the largest deleted id, and the next model must not inherit the old ratio.
+    """
     if config_id is None or estimated < MIN_ESTIMATED_UNITS or actual <= 0:
         return None
     sample = clamp_ratio(actual / estimated)
+    target = select(ModelConfig.id).where(ModelConfig.id == config_id)
+    if model is not None:
+        protocol, base_url, llm_model = model
+        target = target.where(
+            ModelConfig.protocol == protocol,
+            ModelConfig.base_url == base_url,
+            ModelConfig.llm_model == llm_model,
+        )
+    updated_at = ModelCalibration.__table__.c.updated_at.type
+    first = select(
+        literal(config_id),
+        literal(1),
+        literal(sample),
+        literal(int(estimated)),
+        literal(int(actual)),
+        literal(datetime.now(timezone.utc), updated_at),
+    ).where(target.exists())
+    statement = insert(ModelCalibration).from_select(
+        ["config_id", "samples", "ratio", "estimated_total", "actual_total", "updated_at"], first
+    )
+    statement = statement.on_conflict_do_update(
+        index_elements=["config_id"],
+        set_={
+            "ratio": func.max(
+                RATIO_MIN,
+                func.min(
+                    RATIO_MAX,
+                    ModelCalibration.ratio * (1 - EMA_ALPHA) + statement.excluded.ratio * EMA_ALPHA,
+                ),
+            ),
+            "samples": ModelCalibration.samples + 1,
+            "estimated_total": ModelCalibration.estimated_total
+            + statement.excluded.estimated_total,
+            "actual_total": ModelCalibration.actual_total + statement.excluded.actual_total,
+            "updated_at": statement.excluded.updated_at,
+        },
+    ).returning(ModelCalibration.ratio)
     try:
         with Session(engine) as session:
-            row = session.get(ModelCalibration, config_id)
-            if row is None:
-                row = ModelCalibration(config_id=config_id, ratio=sample)
-            else:
-                row.ratio = clamp_ratio(row.ratio * (1 - EMA_ALPHA) + sample * EMA_ALPHA)
-            row.samples += 1
-            row.estimated_total += int(estimated)
-            row.actual_total += int(actual)
-            row.updated_at = datetime.now(timezone.utc)
-            session.add(row)
+            ratio = session.execute(statement).scalar_one_or_none()
             session.commit()
-            return row.ratio
+            return None if ratio is None else float(ratio)
     except Exception:  # noqa: BLE001 - calibration is best-effort side data
         return None

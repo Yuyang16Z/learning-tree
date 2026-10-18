@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 
 os.environ["DATABASE_URL"] = "sqlite://"
 os.environ["DEFAULT_API_KEY"] = ""
@@ -26,7 +27,7 @@ from app.calibration import (
 )
 from app.context_budget import ContextPolicy, estimate_request_tokens, has_images
 from app.models import KnowledgeTree, Message, ModelCalibration, ModelConfig, Node
-from app.routers import nodes, trees
+from app.routers import models_router, nodes, trees
 from app.service import to_spec
 
 BASE_PROMPT = "你是帮助用户理解陌生知识的助教"
@@ -67,6 +68,7 @@ def workspace(tmp_path, monkeypatch):
     app = FastAPI()
     app.include_router(nodes.router)
     app.include_router(trees.router)
+    app.include_router(models_router.router)
 
     def session_override():
         with Session(engine) as session:
@@ -118,6 +120,18 @@ def leaves(value):
 def test_record_usage_gates_small_requests_clamps_and_averages(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'ratio.db'}")
     SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:  # Ratios are written only for existing models.
+        for config_id in (1, 2):
+            session.add(
+                ModelConfig(
+                    id=config_id,
+                    label="M",
+                    base_url="https://m.invalid",
+                    llm_model="m",
+                    api_key="k",
+                )
+            )
+        session.commit()
     assert record_usage(engine, 1, 1999, 4000) is None, "small estimates are too noisy"
     assert record_usage(engine, 1, 4000, 0) is None, "missing usage never learns"
     assert record_usage(engine, None, 4000, 4000) is None
@@ -379,3 +393,170 @@ def test_image_questions_never_move_the_learned_ratio(workspace):
     for _ in range(3):
         assert ask(client, question="图里是什么？", images=[image])[-1]["status"] == "complete"
     assert len(bodies) == 4 and calibration_rows(engine) == [(samples, ratio)]
+
+
+def test_calibration_is_written_only_for_an_existing_model(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'orphan.db'}")
+    SQLModel.metadata.create_all(engine)
+    assert record_usage(engine, 7, 4000, 6000) is None
+    with Session(engine) as session:
+        assert session.exec(select(ModelCalibration)).all() == []
+    engine.dispose()
+
+
+LATE_MODEL = {
+    "label": "Late",
+    "base_url": "https://late.invalid/v1",
+    "llm_model": "late",
+    "api_key": "late-key-never-sent",
+    "context_window": 16384,
+}
+
+
+@pytest.mark.parametrize("change", ["delete", "switch"])
+def test_an_answer_finishing_after_its_model_changed_leaves_no_ratio_to_inherit(workspace, change):
+    """A late answer writes nothing once its model was deleted (SQLite then reuses the id
+    for the next model) or switched to another model."""
+    client, engine, monkeypatch = workspace
+    with Session(engine) as session:
+        session.add(ModelConfig(id=3, **LATE_MODEL))
+        session.commit()
+    started, release = threading.Event(), threading.Event()
+
+    def stream(spec, system, messages, **kwargs):
+        yield "text", "开始，"
+        started.set()
+        assert release.wait(5)
+        kwargs["diagnostics"]["rounds"] = [
+            {
+                "estimated_input_tokens": 5000,
+                "input_tokens": 12000,
+                "cached_input_tokens": 0,
+                "output_tokens": 40,
+            }
+        ]
+        yield "text", "结束。"
+
+    monkeypatch.setattr(nodes, "stream_chat", stream)
+    events = []
+    worker = threading.Thread(target=lambda: events.extend(ask(client, config_id=3)))
+    worker.start()
+    try:
+        assert started.wait(5)
+        if change == "delete":
+            assert client.delete("/models/3").json() == {"deleted": 3}
+        else:
+            other = {**LATE_MODEL, "llm_model": "another-model", "api_key": ""}
+            assert client.put("/models/3", json=other).status_code == 200
+    finally:
+        release.set()
+        worker.join(10)
+    assert events and events[-1]["status"] == "complete", events
+    if change == "delete":
+        added = client.post("/models", json={**LATE_MODEL, "label": "Next"}).json()
+        assert added["id"] == 3, "SQLite reuses the deleted maximum id"
+    with Session(engine) as session:
+        assert session.exec(select(ModelCalibration)).all() == []
+        assert to_spec(session.get(ModelConfig, 3), session).calibration == 1.0
+
+
+def test_startup_drops_ratios_whose_model_is_gone(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'orphans.db'}")
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            ModelConfig(
+                id=1, label="Kept", base_url="https://k.invalid", llm_model="k", api_key="k"
+            )
+        )
+        session.add(ModelCalibration(config_id=1, samples=2, ratio=1.4))
+        session.add(ModelCalibration(config_id=9, samples=1, ratio=3.0))
+        session.commit()
+    monkeypatch.setattr(db, "engine", engine)
+    db.init_db()
+    db.init_db()
+    with Session(engine) as session:
+        assert [row.config_id for row in session.exec(select(ModelCalibration))] == [1]
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "change,kept",
+    [
+        ({"label": "Renamed", "context_window": 16384, "max_tokens": 2048}, True),
+        ({"api_key": "rotated-key-never-sent"}, True),
+        ({"base_url": "https://offline.invalid/v1/"}, True),
+        ({"llm_model": "another-model"}, False),
+        ({"base_url": "https://elsewhere.invalid/v1"}, False),
+        ({"protocol": "anthropic"}, False),
+    ],
+)
+def test_editing_a_model_resets_its_ratio_only_when_it_becomes_another_model(
+    workspace, change, kept
+):
+    client, engine, _ = workspace
+    assert record_usage(engine, 1, 4000, 8000) == 2.0
+    body = {
+        "label": "Real",
+        "base_url": "https://offline.invalid/v1",
+        "llm_model": "synthetic",
+        "api_key": "",
+        "context_window": 8192,
+        "max_tokens": 1024,
+        "is_default": True,
+        **change,
+    }
+    assert client.put("/models/1", json=body).status_code == 200
+    with Session(engine) as session:
+        assert load_calibration(session, 1) == (2.0 if kept else 1.0)
+
+
+@pytest.mark.parametrize("seeded", [True, False])
+def test_concurrent_answers_never_lose_a_calibration_sample(tmp_path, monkeypatch, seeded):
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'race.db'}", connect_args={"check_same_thread": False}
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            ModelConfig(
+                id=1, label="Real", base_url="https://r.invalid", llm_model="m", api_key="k"
+            )
+        )
+        if seeded:
+            session.add(
+                ModelCalibration(
+                    config_id=1, samples=1, ratio=1.0, estimated_total=4000, actual_total=4000
+                )
+            )
+        session.commit()
+    # Hold every row read until both writers have read: a read-modify-write in Python
+    # then loses one sample (or, on the first insert, fails on the primary key).
+    barrier = threading.Barrier(2, timeout=2)
+    original_get = Session.get
+
+    def get(self, *args, **kwargs):
+        row = original_get(self, *args, **kwargs)
+        try:
+            barrier.wait()
+        except threading.BrokenBarrierError:
+            pass
+        return row
+
+    monkeypatch.setattr(Session, "get", get)
+    threads = [
+        threading.Thread(target=record_usage, args=(engine, 1, 4000, 4000 * factor))
+        for factor in (2, 3)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    monkeypatch.setattr(Session, "get", original_get)
+    with Session(engine) as session:
+        row = session.get(ModelCalibration, 1)
+        before = 1 if seeded else 0
+        assert row.samples == before + 2
+        assert row.estimated_total == 4000 * (before + 2)
+        assert row.actual_total == 4000 * before + 8000 + 12000
+    engine.dispose()
