@@ -188,15 +188,37 @@ def source_count(connection) -> int:
     return int(connection.exec_driver_sql(_SOURCE_COUNT).scalar())
 
 
+def _opens(connection) -> bool:
+    """Whether this SQLite can open the stored index; preparing a query opens the table."""
+    try:
+        connection.exec_driver_sql(f"SELECT 1 FROM {INDEX_TABLE} LIMIT 0").all()
+    except OperationalError:
+        return False
+    return True
+
+
+def _disable(connection, reason: str) -> bool:
+    """Remove the triggers so writes to messages, facts and nodes keep working.
+
+    SQLite compiles a trigger body whenever the triggering statement is prepared,
+    so a trigger naming an index this SQLite cannot open makes every such write
+    fail. The index then goes stale; a later start that can open it finds the
+    triggers missing and rebuilds it."""
+    logger.warning("%s; search falls back to LIKE scans", reason)
+    _drop_triggers(connection, _stored_triggers(connection))
+    return False
+
+
 def _ensure(connection, *, rebuild: bool) -> bool:
     if not fts5_available(connection):
-        logger.warning("SQLite FTS5 is unavailable; search falls back to LIKE scans")
-        return False
+        return _disable(connection, "SQLite FTS5 is unavailable")
     if not _schema_ready(connection):
         # Legacy tables gain their columns in init_db before the index is retried.
         return False
     existed = _index_exists(connection)
     connection.exec_driver_sql(_CREATE_TABLE)
+    if not _opens(connection):
+        return _disable(connection, "This SQLite cannot open the stored search index")
     replaced = _install_triggers(connection)
     # Rows kept by missing triggers or placed by another layout cannot be trusted
     # even when the counts agree, so an existing index is then rebuilt once.
@@ -373,7 +395,11 @@ def search_text(
     filters = (tree_id, tree_ids, node_ids, selected, limit, tree_path)
     try:
         if len(needle) >= MIN_FTS_QUERY_CHARS and _fts_ready(session):
-            rows = _fts_rows(session, needle, *filters)
+            try:
+                rows = _fts_rows(session, needle, *filters)
+            except OperationalError:
+                # The index exists but this SQLite cannot open it: scan the records.
+                rows = _like_rows(session, needle, *filters)
         else:
             rows = _like_rows(session, needle, *filters)
     except OperationalError:

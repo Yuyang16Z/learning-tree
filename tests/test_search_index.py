@@ -285,6 +285,71 @@ def test_an_index_from_an_earlier_trigger_layout_is_replaced_and_rebuilt(engine)
         assert [hit.ref_id for hit in search_text(session, "SYNTHETIC_FOREIGN")] == [41]
 
 
+def _set_tokenizer(engine, old, new):
+    """Rewrite the stored table definition, as a database moved between SQLite builds."""
+    with engine.begin() as connection:
+        connection.exec_driver_sql("PRAGMA writable_schema = ON")
+        connection.exec_driver_sql(
+            "UPDATE sqlite_master SET sql = replace(sql, ?, ?) WHERE name = 'search_index'",
+            (old, new),
+        )
+        connection.exec_driver_sql("PRAGMA writable_schema = OFF")
+    engine.dispose()
+
+
+def _search_triggers(engine) -> list[str]:
+    with engine.connect() as connection:
+        return list(_trigger_statements(connection))
+
+
+@requires_fts5
+def test_an_index_this_sqlite_cannot_open_never_blocks_writes(engine):
+    _set_tokenizer(engine, "remove_diacritics 1", "remove_diacritics 9")
+    assert ensure_search_index(engine) is False
+    assert _search_triggers(engine) == []
+    with Session(engine) as session:
+        session.add(Message(node_id=2, role="assistant", content="partial", status="pending"))
+        session.add(Message(node_id=2, role="assistant", content="SYNTHETIC_UNINDEXED answer"))
+        session.add(Node(id=6, tree_id=1, parent_id=1, title="新节点", learning_note="新笔记"))
+        fact = session.get(Memory, 101)
+        fact.content = "快速排序在离线期间改写过。"
+        session.add(fact)
+        session.commit()
+        # Search falls back to a LIKE scan instead of returning nothing.
+        hits = search_text(session, "SYNTHETIC_UNINDEXED", tree_id=1)
+        assert [(hit.kind, hit.node_id) for hit in hits] == [("message", 2)]
+
+    # Back on an SQLite that opens the table: triggers return and the index is rebuilt,
+    # including the edit made meanwhile, although the row counts happen to agree.
+    _set_tokenizer(engine, "remove_diacritics 9", "remove_diacritics 1")
+    assert ensure_search_index(engine)
+    assert len(_search_triggers(engine)) == 11
+    with engine.connect() as connection:
+        assert search_index.index_count(connection) == search_index.source_count(connection)
+    with Session(engine) as session:
+        assert [hit.ref_id for hit in search_text(session, "离线期间改写", kinds=["memory"])] == [
+            101
+        ]
+        assert search_text(session, "SYNTHETIC_UNINDEXED", tree_id=1)[0].kind == "message"
+
+
+@requires_fts5
+def test_without_fts5_the_triggers_are_removed_and_restored_later(engine, monkeypatch):
+    monkeypatch.setattr(search_index, "fts5_available", lambda connection: False)
+    assert ensure_search_index(engine) is False
+    assert _search_triggers(engine) == []
+    with Session(engine) as session:
+        fact = session.get(Memory, 103)
+        fact.content = "foreign fact rewritten offline"
+        session.add(fact)
+        session.commit()
+    monkeypatch.undo()
+    assert ensure_search_index(engine)
+    assert len(_search_triggers(engine)) == 11
+    with Session(engine) as session:
+        assert [hit.ref_id for hit in search_text(session, "rewritten offline")] == [103]
+
+
 @requires_fts5
 def test_fts_queries_are_phrases_and_filters_bound_tree_and_nodes(engine):
     with Session(engine) as session:
