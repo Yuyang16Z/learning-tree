@@ -44,6 +44,9 @@ class LLMSpec:
     # Per-request stable head of the system prompt that native caching may mark;
     # prompt text, so it is kept out of reprs and set only on request copies.
     cache_prefix: str | None = field(default=None, repr=False, compare=False)
+    # Set only on the copy for a final tool-loop round that still advertises its tools:
+    # the provider must answer without calling any of them.
+    forbid_tool_calls: bool = field(default=False, repr=False, compare=False)
 
 
 # Base URLs whose provider answered HTTP 400 to stream_options; remembered per process.
@@ -434,10 +437,12 @@ def run_agent(
     execute(name, args): caller-provided router for direct built-in calls or MCP forwarding.
     diagnostics, when given, collects per-round estimates, usage and the tool-round count.
     cache_prefix is the stable head of `system` that a native cache may mark.
-    Every round but the final no-tool one advertises tool_defs unchanged (or the
-    catalog's snapshot, which changes only when a search loads tools), so the cached
-    request prefix of a provider, which starts with the tool definitions, stays valid
-    from one round to the next.
+    Every round advertises tool_defs unchanged (or the catalog's snapshot, which
+    changes only when a search loads tools), so the cached request prefix of a provider,
+    which starts with the tool definitions, stays valid from one round to the next. The
+    final round of an OpenAI-compatible loop sends no tools; after tool rounds the
+    Anthropic one keeps them with calls forbidden (spec.forbid_tool_calls), because
+    Anthropic rejects tool_use/tool_result history in a request that defines no tools.
     time_limit_seconds and tool_token_budget end the tool rounds early: once the loop has
     run that long, or its tool results reach that many estimated tokens, the next round
     is the final no-tool round. They are checked between rounds, so a call in progress
@@ -465,7 +470,11 @@ def run_agent(
     reasoning_endpoint = False
     for round_index in range(max_rounds + 1):
         final = round_index == max_rounds or budget_stop is not None
-        current_tools = [] if final else tool_catalog.definitions if tool_catalog else tool_defs
+        advertised = tool_catalog.definitions if tool_catalog else tool_defs
+        # Every earlier round ran tools, so a later final round carries tool history.
+        keep_tools = final and round_index > 0 and spec.protocol == "anthropic"
+        current_tools = [] if final and not keep_tools else advertised
+        request_spec = replace(turn_spec, forbid_tool_calls=True) if keep_tools else turn_spec
         closing = (
             "\n工具调用已达本轮上限。请根据已取得的资料回答用户问题，明确未核实的部分；"
             "不要继续调用工具，也不要声称完成未执行的操作。"
@@ -486,9 +495,9 @@ def run_agent(
         )
         request = [{"role": "system", "content": prepared.system}, *prepared.messages]
         turn = (
-            _chat_once(turn_spec, request, current_tools, deep=True)
+            _chat_once(request_spec, request, current_tools, deep=True)
             if deep
-            else _chat_once(turn_spec, request, current_tools)
+            else _chat_once(request_spec, request, current_tools)
         )
         streamed = inspect.isgenerator(turn)
         r = (yield from _relay_turn(turn, deep)) if streamed else turn

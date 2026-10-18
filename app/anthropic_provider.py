@@ -180,6 +180,9 @@ def _kwargs(spec, conversation: list[dict], tools: list[dict] | None = None) -> 
             }
             for item in tools
         ]
+        if getattr(spec, "forbid_tool_calls", False):
+            # A final round must answer; its tools only keep the tool history valid.
+            kwargs["tool_choice"] = {"type": "none"}
     return kwargs
 
 

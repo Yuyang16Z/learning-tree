@@ -932,7 +932,14 @@ def test_bounded_tool_rounds_synthesize_without_replaying_actions(
                     }
                 ],
             )
-        assert len(requests) == 3 and tools == []
+        assert len(requests) == 3
+        # No call may run in the final request. OpenAI-compatible providers accept the
+        # tool history without definitions; Anthropic rejects it, so its final request
+        # keeps the previous round's definitions and forbids calls instead.
+        if protocol == "anthropic":
+            assert tools == requests[1][1] and spec.forbid_tool_calls
+        else:
+            assert tools == [] and not spec.forbid_tool_calls
         assert conversation[-1]["tool_call_id"] == "execute_once"
         assert TOOL_OMISSION in conversation[-1]["content"]
         assert "EVIDENCE_START" in conversation[-1]["content"]

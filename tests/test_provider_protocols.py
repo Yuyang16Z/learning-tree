@@ -533,6 +533,64 @@ def test_parallel_tool_results_and_signed_blocks_are_preserved(monkeypatch):
     }
 
 
+TOOL_HISTORY_REJECTION = (
+    "Requests which include `tool_use` or `tool_result` blocks must define tools."
+)
+
+
+@pytest.mark.parametrize("deep", [False, True])
+def test_anthropic_final_round_keeps_tool_definitions_and_forbids_calls(monkeypatch, deep):
+    bodies = []
+    responses = [sse([TOOL_USE], stop="tool_use"), sse([{"type": "text", "text": "根据资料作答"}])]
+
+    def handler(request):
+        # Anthropic refuses tool blocks in a request that defines no tools.
+        body = json.loads(request.content)
+        bodies.append(body)
+        blocks = [
+            block
+            for message in body["messages"]
+            if isinstance(message["content"], list)
+            for block in message["content"]
+        ]
+        if not body.get("tools") and any(b["type"] in ("tool_use", "tool_result") for b in blocks):
+            error = {"type": "invalid_request_error", "message": TOOL_HISTORY_REJECTION}
+            return httpx.Response(400, json={"type": "error", "error": error})
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=responses.pop(0)
+        )
+
+    monkeypatch.setattr(
+        adapter,
+        "client",
+        lambda spec: Anthropic(
+            base_url=adapter.base_url(spec.base_url),
+            api_key=spec.api_key,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+            max_retries=0,
+        ),
+    )
+    events = list(
+        llm.run_agent(
+            SPEC,
+            "系统",
+            [{"role": "user", "content": "查资料"}],
+            TOOLS,
+            lambda *args: "资料",
+            max_rounds=1,
+            deep=deep,
+        )
+    )
+    assert events[-1] == {"type": "delta", "text": "根据资料作答"}
+    assert len(bodies) == 2 and "tool_choice" not in bodies[0]
+    # The synthesis round still defines the same tools, so the tool history stays valid
+    # and the cached prefix (tools first) still matches, but no call is allowed.
+    assert bodies[1]["tools"] == bodies[0]["tools"]
+    assert bodies[1]["tool_choice"] == {"type": "none"}
+    assert "工具调用已达本轮上限" in bodies[1]["system"]
+    assert bodies[1]["messages"][-1]["content"][0]["type"] == "tool_result"
+
+
 def test_incomplete_tool_arguments_never_execute(monkeypatch):
     _, bodies, _ = mock_anthropic(
         monkeypatch,
