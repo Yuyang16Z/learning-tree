@@ -368,7 +368,7 @@ with Session(engine) as session:
     checks.push('Referenced chips whose topic or node was deleted are disabled or report the deletion and keep the current topic; live sources still open');
 
     // Malformed stored data must not blank the app: bad source entries are dropped, and a value
-    // that still breaks the conversation leaves the rest of the workspace usable.
+    // that still breaks the conversation shows a fallback while the rest of the workspace works.
     const ownThread = `**/api/nodes/${ownRoot}/thread`;
     let storedRow = { sources: [null, referenced[3], { memory_id: 'x', scope: 'path' }] };
     await page.route(ownThread, async route => {
@@ -382,15 +382,24 @@ with Session(engine) as session:
     await page.reload();
     await page.getByRole('heading', { name: trees[0].title, exact: true, level: 1 }).waitFor();
     await poll(async () => await chips.count() === 1, 'only the well-formed source is shown');
-    storedRow = { diagnostics: { estimated_input_tokens: 1, actual_input_tokens: null, cached_input_tokens: null, output_tokens: null, compacted: false, tool_rounds: 0, calibration_ratio: 'high', timings_ms: { retrieval: 0, tools: 0, summary: 0, model: 0, total: 0 } } };
+    // React cannot render an object as text, so no field-level guard (such as the number checks
+    // of the diagnostics block) keeps this row from throwing. The check asserts the fallback itself,
+    // so it fails, rather than passing on a normal render, if the boundary stops catching it.
+    storedRow = { question: { text: 'A question stored as an object' } };
     await page.reload();
+    const fallback = page.locator('.chat-pane > .chat-error[role="alert"]').filter({ hasText: 'This conversation could not be displayed.' });
+    await fallback.waitFor();
+    const reload = fallback.getByRole('button', { name: 'Reload', exact: true });
+    assert(await reload.isEnabled(), 'The fallback offers Reload');
+    assert.equal(await page.locator('.chat-pane .chat-turn, .chat-pane .chat-compose-box').count(), 0, 'The fallback replaces the conversation');
+    await Promise.all([page.waitForEvent('load'), reload.click()]);
+    await fallback.waitFor();
     const sidebar = page.locator('.sidebar');
-    await sidebar.getByRole('button', { name: trees[1].title, exact: true }).waitFor();
-    await poll(async () => await page.locator('.chat-pane').count() === 1, 'the conversation area keeps its place');
     await sidebar.getByRole('button', { name: trees[1].title, exact: true }).click();
     await page.getByRole('heading', { name: trees[1].title, exact: true, level: 1 }).waitFor();
+    assert.equal(await fallback.count(), 0, 'Another topic opens normally');
     await page.unroute(ownThread);
-    checks.push('Malformed stored provenance or diagnostics never blank the workspace; other topics stay reachable');
+    checks.push('A stored answer that cannot be displayed shows a fallback with a working Reload instead of a blank page; other topics still open');
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ ok: true, checks }, null, 2));
   } finally {
