@@ -470,7 +470,8 @@ def test_retrieval_evaluation_runs_the_synthetic_fixture_end_to_end(tmp_path):
     assert scopes["tree"]["returned"]["tree"] > 0 and scopes["tree"]["returned"]["other"] == 0
     assert scopes["all"]["returned"]["other"] > 0
     for summary in scopes.values():
-        assert summary["modes"] == {"lexical": 17}
+        # The default run is keyword-only: no similarity gate or reranker cutoff applies.
+        assert summary["modes"] == {"lexical": 17} and summary["reranked"] == 0
         for proxy in (summary["self_recall"], summary["parent_recall"]):
             assert proxy["cases"] > 0
             assert all(0 <= proxy[key] <= 1 for key in ("recall_at_k", "hit_rate_at_k", "mrr_at_k"))
