@@ -425,7 +425,8 @@ def search_tree(
         results.append(
             {
                 "node_id": hit.node_id,
-                "message_id": hit.ref_id if hit.kind == "message" else None,
+                # Answers are "message" hits and the user's questions "question" hits.
+                "message_id": hit.ref_id if hit.kind in ("message", "question") else None,
                 "kind": hit.kind,
                 "snippet": hit.snippet,
                 "rank": len(results) + 1,

@@ -130,7 +130,7 @@ reloads the latest settings instead of overwriting them.
 
 The same switches govern the answer model's read-only `search_learning_history`
 tool. It searches completed answers, notes and current facts of the current path
-by default; the `tree` and `all` scopes are refused unless the matching switch
+by default, never questions (including the one being answered); the `tree` and `all` scopes are refused unless the matching switch
 was on when the answer started. The switches stay independent there too: `all`
 adds other topics to the current path and includes this topic's other branches
 only when **Other branches of this topic** is also on. The topic being answered
@@ -166,8 +166,8 @@ example a history-search result) belongs to that answer and is not rewritten.
 ## Topic search
 
 The learning map's search box filters titles and quoted passages instantly and,
-after a short pause, also asks the server for full-text matches in completed
-answers, learning notes and current facts of the open topic. Those appear as a
+after a short pause, also asks the server for full-text matches in your
+questions, completed answers, learning notes and current facts of the open topic. Those appear as a
 second group with a verbatim snippet; choosing an answer hit opens the node and
 highlights the matching passage. Pending or interrupted answers and superseded
 facts are never listed. Results are capped at thirty, and a search is dropped
@@ -232,8 +232,8 @@ while retaining the content-free input ledger to prevent replay.
 (`include_siblings`, `include_other_trees`) with a revision token; the row is
 only created on the first save and is kept when topics are deleted.
 `GET /trees/{id}/search?q=&limit=` returns `{results: [{node_id, message_id,
-kind, snippet, rank}]}` with `kind` one of `title`, `message`, `note` or
-`memory`. `Memory` rows gained `fact_type`, `terms`, `superseded_by`,
+kind, snippet, rank}]}` with `kind` one of `title`, `question` (a question you
+asked; `message_id` is that question), `message` (an answer), `note` or `memory`. `Memory` rows gained `fact_type`, `terms`, `superseded_by`,
 `updated_at` and `origin` (`legacy` for existing rows); `Message` rows gained
 `sources` (ids and scope). All additions are additive and idempotent; database
 backups include them, learning-tree exports exclude `sources`.
@@ -258,15 +258,16 @@ backups include them, learning-tree exports exclude `sources`.
   学习树导出。保存的只有记录编号和范围，主题名称在显示时读取；记忆、来源节点或主题已删除
   的条目不再显示。删除主题、分支或记忆时，其他回答中指向它们的条目会一并移除，已删除主题
   的名称和编号不会留在其他主题里；回答正文或工具步骤中已经引用的文字属于该回答本身，不会被改写。
-- **主题内全文搜索**：学习树搜索框除了即时匹配标题和引用，还会向服务端查询已完成回答、
-  学习笔记和当前事实中的原文片段，作为第二组结果展示；选择回答结果会跳转并高亮对应段落。
+- **主题内全文搜索**：学习树搜索框除了即时匹配标题和引用，还会向服务端查询提问、已完成
+  回答、学习笔记和当前事实中的原文片段，作为第二组结果展示；选择回答结果会跳转并高亮对应段落。
   索引由 SQLite FTS5（三元组分词）和触发器维护，触发器按由来源记录推算的 rowid 定位索引行，
   删除大主题或保存流式回答不会随索引增大而变慢；启动时索引缺失、计数不符或触发器来自其他
   版本会自动重建；短于 3 个字符的查询、不支持 FTS5 或无法打开已有索引（例如数据库换到另一个
   SQLite 版本上）时使用 LIKE 扫描，启动时还会移除索引触发器，保证回答、记忆和笔记照常保存，
   下次能打开索引的启动会重建它。
-- 模型可用的只读工具 `search_learning_history` 受同一组开关约束：默认只查当前路径，
-  `tree`/`all` 范围需在回答开始时已经启用；两个开关互相独立，`all` 在当前路径之外加入
+- 模型可用的只读工具 `search_learning_history` 受同一组开关约束：只返回回答、笔记和事实，
+  不返回提问（包括正在回答的这个问题）；默认只查当前路径，`tree`/`all` 范围需在回答开始时
+  已经启用；两个开关互相独立，`all` 在当前路径之外加入
   其他主题，只有「同主题的其他分支」也开启时才包含当前主题的其他分支；当前主题即使已归档，
   `all` 也能查到它的路径。它不写入数据库，演示模式不会提供。提供这个工具会让回答变成可调用
   工具的请求，需要为工具结果预留空间：上下文窗口为 32,768 时，开关打开后历史压缩会提前约

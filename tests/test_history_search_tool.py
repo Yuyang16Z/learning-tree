@@ -203,6 +203,31 @@ def test_all_scope_keeps_the_current_topic_to_the_path_without_the_sibling_switc
     assert "ARCHIVED" not in json.dumps(call(both, query="quicksort", scope="all", limit=8))
 
 
+@pytest.mark.parametrize("fts", [True, False])
+def test_questions_are_never_returned_as_learning_records(engine, monkeypatch, fts):
+    if not fts:
+        monkeypatch.setattr(search_index, "fts5_available", lambda connection: False)
+    with Session(engine) as session:
+        # ask() stores the question as complete before its answer starts.
+        session.add(Message(id=60, node_id=2, role="user", content="quicksort 的 pivot 怎么选？"))
+        session.add(Message(id=61, node_id=1, role="user", content="以前问过 quicksort 吗？"))
+        session.add(Message(id=62, node_id=3, role="user", content="兄弟分支问 quicksort"))
+        session.commit()
+    search = make_history_search(engine, 1, [1, 2], WIDE)
+    for scope in ("path", "tree", "all"):
+        result = call(search, query="quicksort", scope=scope, limit=8)
+        assert result["ok"] and result["results"]
+        assert not {item["message_id"] for item in result["results"]} & {60, 61, 62}
+    # Questions are filtered inside the search, so the answers still fill the limit.
+    path = make_history_search(engine, 1, [1, 2], OFF)
+    assert found(call(path, query="quicksort", limit=3)) == {
+        ("message", 1, 12),
+        ("note", 2, None),
+        ("memory", 1, None),
+    }
+    assert "提问" in HISTORY_TOOL_DEF["function"]["description"]
+
+
 def test_results_are_rechecked_against_current_records(engine):
     search = make_history_search(engine, 1, [1, 2], OFF)
     assert found(call(search, query="quicksort")) == {

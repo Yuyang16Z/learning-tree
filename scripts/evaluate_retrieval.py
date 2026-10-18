@@ -976,7 +976,7 @@ def measure_search(engine, snapshot: _Snapshot, include_text: bool) -> dict:
             (
                 hit.rank
                 for hit in hits
-                if (hit.kind, hit.ref_id) == ("message", question.message_id)
+                if (hit.kind, hit.ref_id) == ("question", question.message_id)
             ),
             None,
         )

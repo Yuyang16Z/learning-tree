@@ -113,12 +113,12 @@ question itself: its longest run of Chinese, Japanese or Korean characters or
 its longest word, of at least three characters, where one such character weighs
 as much as two letters (so `请解释 Transformer` gives `Transformer`). The term is
 searched in the question's topic with the full-text query of the map search
-(twenty results). The question's own message is indexed and contains the term,
-so that match is counted separately (`own_question_found`); `node_found` and
-`node_rank` only count other hits on the question's node: its answers, facts,
-note or other turns. The report also records hit counts by kind and latency.
-The figures depend on the term rule as much as on search, so compare them only
-between runs on the same data.
+(twenty results). The question's own message is indexed (as a `question` hit)
+and contains the term, so that match is counted separately
+(`own_question_found`); `node_found` and `node_rank` only count other hits on
+the question's node: its answers, facts, note or other turns. The report also
+records hit counts by kind and latency. The figures depend on the term rule as
+much as on search, so compare them only between runs on the same data.
 
 **Timing.** Retrieval latency per scope and search latency are reported as
 count, minimum, p50, p90, p95, p99, maximum and mean in milliseconds

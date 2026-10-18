@@ -114,8 +114,9 @@ def rows(engine, kind=None):
 
 @requires_fts5
 def test_create_all_builds_the_index_and_triggers_keep_it_current(engine):
+    # The user's question is its own kind: search results say what matched.
+    assert rows(engine, "question") == [("question", 11, 1, 1)]
     assert rows(engine, "message") == [
-        ("message", 11, 1, 1),
         ("message", 12, 1, 1),
         ("message", 21, 1, 2),
         ("message", 31, 1, 3),
@@ -243,7 +244,8 @@ def test_trigger_statements_find_index_rows_by_rowid(engine):
 def test_index_rows_carry_rowids_derived_from_their_sources(engine):
     with engine.connect() as connection:
         rows = connection.exec_driver_sql("SELECT rowid, kind, ref_id FROM search_index").all()
-    offsets = {"message": 1, "memory": 2, "note": 3}
+    offsets = search_index.ROWID_OFFSETS
+    assert offsets == {"message": 1, "question": 1, "memory": 2, "note": 3}
     assert rows and all(rowid == ref_id * 4 + offsets[kind] for rowid, kind, ref_id in rows)
 
 
