@@ -8,9 +8,9 @@ import { clearAcceptedDraft, isEmptyDraft, moveFollowupDraft, type ChatDraft as 
 import { documentMetadata, DocumentUploadQueue } from "../lib/documentUploads";
 import { ATTACHMENT_ACCEPT, attachmentKind, ImageAttachmentQueue, MAX_IMAGES, readImage } from "../lib/attachments";
 import { copyText } from "../lib/clipboard";
-import { hasManagedWebSearch, managedMcpPreset, selectedChatTools } from "../lib/chatTools";
+import { hasManagedWebSearch, selectedChatTools } from "../lib/chatTools";
 import { matchesDeletedWorkspace, onWorkspaceDeletion, type WorkspaceDeletion } from "../lib/workspace";
-import { fullResultSource, type FullResultSource } from "../lib/toolSteps";
+import { fullResultSource, toolStepLabel, type FullResultSource } from "../lib/toolSteps";
 import { budgetStopLabel } from "../lib/answerDiagnostics";
 import { sourceLink, type SourceView } from "../lib/sourceLinks";
 import { locatePassage } from "../lib/passage";
@@ -151,15 +151,9 @@ function FullToolResult({ preview, source }: { preview: string; source: FullResu
 }
 function ToolSteps({ steps, mcpServers, nodeId }: { steps: ToolStep[]; mcpServers: McpServer[]; nodeId?: number | null }) {
   const { t } = useI18n();
-  const toolLabels: Record<string, string> = { fetch: t("读取网页", "Read webpage"), web_search: t("联网搜索", "Web search"), search_available_tools: t("查找可用工具", "Find available tools"), read_learning_source: t("回查学习记录", "Read learning history"), read_document_source: t("查阅文档", "Read document"), read_tool_result: t("回看工具结果", "Reread tool result") };
-  for (const server of mcpServers) {
-    if (managedMcpPreset(server) !== "web-research") continue;
-    toolLabels[`mcp_${server.id}_web_search`] = t("联网搜索", "Web search");
-    toolLabels[`mcp_${server.id}_read_webpage`] = t("读取网页", "Read webpage");
-  }
   return <>{steps.map((step, i) => {
     const source = fullResultSource(step, nodeId);
-    return <details className="chat-reasoning" key={i}><summary>{toolLabels[step.tool] ?? step.tool}{step.result === null ? t(" · 进行中", " · Running") : t(" · 已完成", " · Done")}</summary>{step.result !== null && (source ? <FullToolResult preview={step.result} source={source} /> : <div>{step.result}</div>)}</details>;
+    return <details className="chat-reasoning" key={i}><summary>{toolStepLabel(step.tool, t, mcpServers)}{step.result === null ? t(" · 进行中", " · Running") : t(" · 已完成", " · Done")}</summary>{step.result !== null && (source ? <FullToolResult preview={step.result} source={source} /> : <div>{step.result}</div>)}</details>;
   })}</>;
 }
 /** Numbers only, collapsed by default: how the request was budgeted and what the provider reported. */
