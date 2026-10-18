@@ -131,7 +131,10 @@ _COMPLETE_RESULT_NOTE = (
     "\n[完整结果共 {total} 字，已保存；可调用 read_tool_result(call_index={index}) 分页阅读。]"
 )
 # The endpoint rejected tools the user selected; retrying the same request cannot help.
-TOOLS_REJECTED_ERROR = "模型接口拒绝了本次请求中的工具（可能不支持工具调用）。请换用支持工具的模型，或取消选择工具后重试。"
+TOOLS_REJECTED_ERROR = (
+    "模型接口拒绝了本次请求中的工具（可能不支持工具调用）。"
+    "请换用支持工具的模型，或取消选择工具后重试。"
+)
 
 
 def _plain_on_rejected_tools(agent, spec: LLMSpec, plain):
