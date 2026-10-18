@@ -182,6 +182,13 @@ def test_anthropic_model_info_supplies_input_and_output_limits(monkeypatch):
     }
 
 
+def test_every_discovery_note_has_an_exact_interface_translation():
+    from pathlib import Path
+
+    table = (Path(__file__).resolve().parents[1] / "web/src/i18n/workspace.ts").read_text()
+    assert all(f'["{note}", "' in table for note in DISCOVERY_NOTES.values())
+
+
 def test_demo_models_never_construct_a_provider_client(monkeypatch):
     monkeypatch.setattr(llm, "_client", lambda spec: pytest.fail("no client in demo mode"))
     monkeypatch.setattr(adapter, "client", lambda spec: pytest.fail("no client in demo mode"))
@@ -245,6 +252,84 @@ def test_discover_route_uses_the_stored_key_and_never_echoes_it(tmp_path, monkey
         assert api.post("/models/discover", json={"llm_model": "x"}).status_code == 422
         with Session(engine) as session:
             assert session.get(ModelConfig, 4).context_window == 32768, "nothing is stored"
+    finally:
+        app.dependency_overrides.clear()
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"base_url": "https://some-other-relay.test/v1"},
+        {"base_url": "https://provider.test/other/v1"},
+        {"protocol": "anthropic"},
+    ],
+    ids=["other-host", "other-path", "other-protocol"],
+)
+def test_discover_route_never_sends_a_stored_key_to_another_endpoint(
+    tmp_path, monkeypatch, changes
+):
+    from app.main import app
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'discover.db'}", connect_args={"check_same_thread": False}
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            ModelConfig(
+                id=4,
+                label="Stored",
+                base_url="https://provider.test/v1",
+                llm_model="deepseek-chat",
+                api_key="stored-secret-key",
+            )
+        )
+        session.commit()
+    requests = []
+    openai_models(
+        monkeypatch,
+        [{"id": "deepseek-chat", "object": "model", "context_length": 65536}],
+        requests=requests,
+    )
+    monkeypatch.setattr(adapter, "client", lambda spec: pytest.fail("no request may be sent"))
+
+    def session_override():
+        with Session(engine) as session:
+            yield session
+
+    app.dependency_overrides[db.get_session] = session_override
+    try:
+        api = TestClient(app)
+        body = {
+            "protocol": "openai",
+            "base_url": "https://provider.test/v1",
+            "llm_model": "deepseek-chat",
+            "api_key": "",
+            "config_id": 4,
+            **changes,
+        }
+        found = api.post("/models/discover", json=body)
+        assert found.status_code == 200, found.text
+        assert requests == [], "the stored key stays with its own address and protocol"
+        assert found.json() == {
+            "context_window": model_catalog.lookup("deepseek-chat"),
+            "max_output_tokens": None,
+            "source": "catalog",
+            "note": DISCOVERY_NOTES["catalog_needs_key"],
+        }
+        unknown = api.post("/models/discover", json={**body, "llm_model": "custom-model"})
+        assert unknown.json() == {
+            "context_window": None,
+            "max_output_tokens": None,
+            "source": "unknown",
+            "note": DISCOVERY_NOTES["unknown_needs_key"],
+        }
+        assert requests == [] and "stored-secret-key" not in found.text + unknown.text
+        # The saved endpoint, spelled with a trailing slash, still uses the stored key.
+        same = {**body, "protocol": "openai", "base_url": "https://provider.test/v1/"}
+        assert api.post("/models/discover", json=same).json()["source"] == "provider"
+        assert [r.headers["authorization"] for r in requests] == ["Bearer stored-secret-key"]
     finally:
         app.dependency_overrides.clear()
         engine.dispose()

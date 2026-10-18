@@ -118,6 +118,8 @@ const diagnostics: [string, string][] = [
   ["服务商未提供该模型的上下文长度，内置目录也没有收录；请按服务商文档填写。", "The provider does not report a context length for this model and the built-in catalog has no entry; enter the value from the provider's documentation."],
   ["无法从服务商获取模型信息，内置目录也没有收录；请先用「测试」检查连接和密钥，再按服务商文档填写。", "Could not fetch model information from the provider and the built-in catalog has no entry; use Test to check the connection and key, then enter the value from the provider's documentation."],
   ["演示模型没有可检测的上下文窗口。", "The demo model has no detectable context window."],
+  ["地址或协议已更改，已保存的 API Key 不会发往新的服务端；请填写它的 API Key 后再检测。以下为内置目录的近似值，请核对后保存。", "The address or protocol has changed, so the saved API key is not sent to the new endpoint; enter its API key and detect again. This is an approximate value from the built-in catalog. Verify it before saving."],
+  ["地址或协议已更改，已保存的 API Key 不会发往新的服务端；请填写它的 API Key 后再检测，或按服务商文档填写。", "The address or protocol has changed, so the saved API key is not sent to the new endpoint; enter its API key and detect again, or enter the value from the provider's documentation."],
   ["连接失败，请检查服务地址和网络后重试。", "Could not connect. Check the server URL and network, then try again."],
   ["MCP 连接超时，请检查启动命令和服务状态后重试。", "MCP connection timed out. Check the launch command and server status before retrying."],
   ["MCP 连接已关闭", "MCP connection closed"],

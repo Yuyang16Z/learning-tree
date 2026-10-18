@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import delete
 from sqlmodel import Session, select
 
+from .. import anthropic_provider
 from ..db import get_session
 from ..llm import LLMSpec, discover_limits, test_connection
 from ..models import ModelCalibration, ModelConfig
@@ -40,17 +41,42 @@ def add_model(body: ModelConfigIn, session: Session = Depends(get_session)) -> M
     return _out(cfg)
 
 
+def _endpoint(protocol: str, url: str) -> str | None:
+    """The address a provider client sends requests to; None when it is not valid."""
+    value = url.strip().rstrip("/")
+    if protocol != "anthropic":
+        return value
+    try:
+        return anthropic_provider.base_url(value)
+    except ValueError:
+        return None
+
+
 @router.post("/discover", response_model=ModelDiscoverOut)
 def discover_model(
     body: ModelDiscoverIn, session: Session = Depends(get_session)
 ) -> ModelDiscoverOut:
-    """Suggest a model's context window; the form applies it, nothing is stored here."""
+    """Suggest a model's context window; the form applies it, nothing is stored here.
+
+    A blank key with config_id reuses that configuration's stored key only for its own
+    protocol and address: after either was edited in the form, no request is made and
+    the answer comes from the catalog with a note asking for the new endpoint's key.
+    """
     api_key = body.api_key.strip()
+    ask_provider = True
     if not api_key and body.config_id is not None:
         cfg = session.get(ModelConfig, body.config_id)
         if not cfg:
             raise HTTPException(404, "模型不存在")
-        api_key = cfg.api_key
+        target = _endpoint(body.protocol, body.base_url)
+        if (
+            body.protocol == cfg.protocol
+            and target is not None
+            and target == _endpoint(cfg.protocol, cfg.base_url)
+        ):
+            api_key = cfg.api_key
+        else:
+            ask_provider = False
     spec = LLMSpec(
         label="",
         base_url=body.base_url.strip(),
@@ -58,7 +84,7 @@ def discover_model(
         api_key=api_key,
         protocol=body.protocol,
     )
-    return ModelDiscoverOut(**discover_limits(spec))
+    return ModelDiscoverOut(**discover_limits(spec, ask_provider=ask_provider))
 
 
 @router.get("", response_model=list[ModelConfigOut])

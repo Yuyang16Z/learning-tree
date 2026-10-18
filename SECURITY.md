@@ -2,7 +2,7 @@
 
 LearningTree is a personal application for loopback use on a trusted computer. It is not an authenticated shared service. Public interfaces or tunnels require additional authentication, transport security and isolation.
 
-Model API keys and tool configuration are stored in local SQLite without encryption at rest. Protect the database and backups as credentials. Tree exports omit model/server configuration but may contain sensitive chat text, images, reasoning and tool results.
+Model API keys and tool configuration are stored in local SQLite without encryption at rest. Protect the database and backups as credentials. A stored model key is only sent to the protocol and address it was saved with; **Detect** in an edited model form never sends it to a changed address. Tree exports omit model/server configuration but may contain sensitive chat text, images, reasoning and tool results.
 
 Phone access is supported only through a private network such as Tailscale Serve, which limits connections to your signed-in devices; in addition, every request that does not come from this computer must carry the phone-access token (below). Tailscale Funnel, port forwarding and public tunnels would expose the pairing page and an API that can run MCP programs to anyone who obtains that token; **Settings → Phone access** reports Funnel exposure.
 

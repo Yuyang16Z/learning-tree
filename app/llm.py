@@ -744,6 +744,14 @@ DISCOVERY_NOTES = {
         "请先用「测试」检查连接和密钥，再按服务商文档填写。"
     ),
     "mock": "演示模型没有可检测的上下文窗口。",
+    "catalog_needs_key": (
+        "地址或协议已更改，已保存的 API Key 不会发往新的服务端；请填写它的 API Key 后再检测。"
+        "以下为内置目录的近似值，请核对后保存。"
+    ),
+    "unknown_needs_key": (
+        "地址或协议已更改，已保存的 API Key 不会发往新的服务端；"
+        "请填写它的 API Key 后再检测，或按服务商文档填写。"
+    ),
 }
 
 
@@ -781,10 +789,12 @@ def _openai_model_limits(spec: LLMSpec) -> dict | None:
     return None
 
 
-def discover_limits(spec: LLMSpec) -> dict:
+def discover_limits(spec: LLMSpec, *, ask_provider: bool = True) -> dict:
     """Context window and output limit for spec.llm_model: provider, catalog or unknown.
 
     Provider failures are reduced to fixed notes; their messages are never returned.
+    ask_provider=False answers from the catalog without any request, for a caller that
+    has no key it may send to this endpoint; the notes then ask for one.
     """
     if _is_mock(spec):
         return {
@@ -793,14 +803,15 @@ def discover_limits(spec: LLMSpec) -> dict:
             "source": "unknown",
             "note": DISCOVERY_NOTES["mock"],
         }
-    failed = False
-    try:
-        if spec.protocol == "anthropic":
-            found = anthropic_provider.model_limits(spec)
-        else:
-            found = _openai_model_limits(spec)
-    except Exception:  # noqa: BLE001 - provider errors may contain keys or request bodies
-        found, failed = None, True
+    found, failed = None, False
+    if ask_provider:
+        try:
+            if spec.protocol == "anthropic":
+                found = anthropic_provider.model_limits(spec)
+            else:
+                found = _openai_model_limits(spec)
+        except Exception:  # noqa: BLE001 - provider errors may contain keys or request bodies
+            found, failed = None, True
     if found and _positive_int(found.get("context_window")):
         return {
             "context_window": found["context_window"],
@@ -808,16 +819,16 @@ def discover_limits(spec: LLMSpec) -> dict:
             "source": "provider",
             "note": DISCOVERY_NOTES["provider"],
         }
+    suffix = "_needs_key" if not ask_provider else "_after_error" if failed else ""
     window = model_catalog.lookup(spec.llm_model)
     if window:
-        key = "catalog_after_error" if failed else "catalog"
         return {
             "context_window": window,
             "max_output_tokens": None,
             "source": "catalog",
-            "note": DISCOVERY_NOTES[key],
+            "note": DISCOVERY_NOTES["catalog" + suffix],
         }
-    key = "unknown_after_error" if failed else "unknown"
+    key = "unknown" + suffix
     return {
         "context_window": None,
         "max_output_tokens": None,
