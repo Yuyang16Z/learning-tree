@@ -137,7 +137,8 @@ they came from another branch or topic. Entries open the source node, switching
 topic when needed. An entry whose topic or node has since been deleted is struck
 through and cannot be opened; one deleted after the line was drawn is checked
 when chosen, and the app reports the deletion and keeps the current conversation
-open. Records that compaction dropped from the prompt are not listed. The list is stored with the answer and shown again later; it refers to
+open. Entries that are not well-formed (from an older or damaged record) are
+skipped. Records that compaction dropped from the prompt are not listed. The list is stored with the answer and shown again later; it refers to
 this database's ids, so learning-tree exports leave it out.
 
 ## Topic search
@@ -226,7 +227,7 @@ idempotent; database backups include them, learning-tree exports exclude
   但不再进入回答、搜索索引和模型的历史检索；用户手动编辑过的事实不会被自动替代。
 - **参考了哪些记忆**：每条回答下方列出实际进入提示的记忆编号及来源节点，来自其他分支或
   主题的会标注；点击可跳到来源节点。来源主题或节点已删除的条目显示删除线且不能打开；
-  列表显示后才被删除的来源会在点击时核对，提示「这条来源已删除」并留在当前对话。被压缩掉的记忆不会列出。该列表随回答保存，但不随
+  列表显示后才被删除的来源会在点击时核对，提示「这条来源已删除」并留在当前对话；格式不完整的条目会被跳过。被压缩掉的记忆不会列出。该列表随回答保存，但不随
   学习树导出。
 - **主题内全文搜索**：学习树搜索框除了即时匹配标题和引用，还会向服务端查询当前主题的问题、
   已完成回答、学习笔记和当前事实中的原文片段，作为第二组结果展示，标明匹配的是问题、回答、

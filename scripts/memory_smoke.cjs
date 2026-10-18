@@ -366,6 +366,31 @@ with Session(engine) as session:
     await page.getByRole('heading', { name: trees[1].title, exact: true, level: 1 }).waitFor();
     await page.unroute(`**/api/nodes/${ownRoot}/thread`);
     checks.push('Referenced chips whose topic or node was deleted are disabled or report the deletion and keep the current topic; live sources still open');
+
+    // Malformed stored data must not blank the app: bad source entries are dropped, and a value
+    // that still breaks the conversation leaves the rest of the workspace usable.
+    const ownThread = `**/api/nodes/${ownRoot}/thread`;
+    let storedRow = { sources: [null, referenced[3], { memory_id: 'x', scope: 'path' }] };
+    await page.route(ownThread, async route => {
+      const response = await route.fetch();
+      const body = await response.json();
+      body.nodes = body.nodes.map(row => row.node_id === ownRoot
+        ? { ...row, question: 'Which memories shaped this answer?', answer: 'A synthetic answer.', status: 'complete', ...storedRow }
+        : row);
+      await route.fulfill({ response, json: body });
+    });
+    await page.reload();
+    await page.getByRole('heading', { name: trees[0].title, exact: true, level: 1 }).waitFor();
+    await poll(async () => await chips.count() === 1, 'only the well-formed source is shown');
+    storedRow = { diagnostics: { estimated_input_tokens: 1, actual_input_tokens: null, cached_input_tokens: null, output_tokens: null, compacted: false, tool_rounds: 0, calibration_ratio: 'high', timings_ms: { retrieval: 0, tools: 0, summary: 0, model: 0, total: 0 } } };
+    await page.reload();
+    const sidebar = page.locator('.sidebar');
+    await sidebar.getByRole('button', { name: trees[1].title, exact: true }).waitFor();
+    await poll(async () => await page.locator('.chat-pane').count() === 1, 'the conversation area keeps its place');
+    await sidebar.getByRole('button', { name: trees[1].title, exact: true }).click();
+    await page.getByRole('heading', { name: trees[1].title, exact: true, level: 1 }).waitFor();
+    await page.unroute(ownThread);
+    checks.push('Malformed stored provenance or diagnostics never blank the workspace; other topics stay reachable');
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ ok: true, checks }, null, 2));
   } finally {

@@ -85,6 +85,29 @@ describe('stream recovery boundaries', () => {
     expect(received.mock.calls).toEqual([[sources]]);
     expect(result).not.toHaveProperty('sources');
   });
+  it('drops malformed memory sources, and a sources event with none left', async () => {
+    const valid = { memory_id: 7, source_node_id: 1, tree_id: 1, tree_title: '当前树', scope: 'path' };
+    const events = [
+      { started: true, node_id: 9 },
+      { sources: [null] },
+      { sources: [{ memory_id: 'x', scope: 'path' }] },
+      { sources: [valid, null, { ...valid, memory_id: 8, scope: 'everywhere' }] },
+      { delta: '回答' },
+      { done: true, node_id: 9 },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(stream(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')))));
+    const received = vi.fn();
+    await api.ask(1, { question: '问题', config_id: 1 }, { onDelta() {}, onSources: received });
+    expect(received.mock.calls).toEqual([[[valid]]]);
+  });
+  it('reads only well-formed stored sources in thread rows', async () => {
+    const valid = { memory_id: 7, source_node_id: 1, tree_id: 1, tree_title: '当前树', scope: 'tree' };
+    const rows = [{ node_id: 1, answer: 'a', sources: [null, valid] }, { node_id: 2, answer: 'b', sources: [{}] }, { node_id: 3, answer: 'c', sources: null }];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ nodes: rows }), { headers: { 'content-type': 'application/json' } })));
+    const thread = await api.getThread(3);
+    expect(thread.map(row => row.sources)).toEqual([[valid], null, null]);
+    expect(thread.map(row => row.answer)).toEqual(['a', 'b', 'c']);
+  });
   it('hands tool results their stored-result reference from the event and its envelope', async () => {
     const events = [
       { started: true, node_id: 9, request_id: 'r1' },

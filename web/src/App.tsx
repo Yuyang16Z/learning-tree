@@ -20,6 +20,7 @@ import type {
 } from "./types";
 import { Sidebar } from "./components/Sidebar";
 import { ChatPane } from "./components/ChatPane";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { LearningMap } from "./components/LearningMap";
 import { NavigationGate, readSaved, saveValue, clearLegacyRecovery, removeWorkspace, onWorkspaceDeletion, orphanedWorkspaceTrees, orphanedWorkspaceNodes, deletionAffectsRequest } from "./lib/workspace";
 import { mergePendingTitles, pollPendingTitles } from "./lib/titlePolling";
@@ -696,6 +697,8 @@ export default function App() {
       {pairingRequired && <div className="pairing-required" role="alert">{t("这台设备需要重新配对：请在电脑上打开「设置 → 手机访问」，用手机扫描二维码。", "This device needs to be paired again: open Settings → Phone access on the computer and scan the QR code with your phone.")}</div>}
       {notice && <div className="notice" role="status"><span>{localizeError(notice.message, locale)}</span><button onClick={() => setNotice(null)} aria-label={t("关闭提示", "Dismiss notification")}>×</button></div>}
       {busyNavigation && <div className="loading-line" aria-label={t("正在加载", "Loading")} />}
+      {/* Stored answers are rendered from data: a value that breaks the conversation must not blank the app. */}
+      <ErrorBoundary resetKey={`${activeTreeId}:${activeNodeId}`} fallback={<main className="center chat-pane"><div className="chat-error" role="alert">{t("这段对话暂时无法显示。可以打开其他问题，或重新载入页面。", "This conversation could not be displayed. Open another question or reload the page.")} <button type="button" className="chat-error-reload" onClick={() => window.location.reload()}>{t("重新载入", "Reload")}</button></div></main>}>
       <ChatPane
         thread={thread}
         activeTreeId={activeTreeId}
@@ -740,6 +743,7 @@ export default function App() {
         mcpServers={mcpServers.filter((s) => s.enabled)}
         onTestMcp={(id) => api.testMcp(id)}
       />
+      </ErrorBoundary>
       </div>
       {compactLayout && rightOpen && <button className="map-scrim" onClick={() => setRightOpen(false)} aria-label={t("关闭学习树面板", "Close learning tree panel")} />}
       {rightOpen && <div className="splitter" onMouseDown={startResize} />}

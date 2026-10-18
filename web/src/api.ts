@@ -1,5 +1,6 @@
 import { readSSE } from "./lib/sse";
 import { toolReference, type ToolReference } from "./lib/toolSteps";
+import { parseSources } from "./lib/sourceLinks";
 import { reportPairingRequired } from "./lib/phonePairing";
 import { getLocale, translate } from "./i18n";
 import { localizeError } from "./i18n/workspace";
@@ -107,7 +108,8 @@ async function relay(res: Response, on: AskHandlers, start: AskMeta, signal?: Ab
       if (obj.tool_end) on.onToolEnd?.(obj.tool_end.name, obj.tool_end.result, toolReference(obj.tool_end, obj));
       if (obj.diagnostics && typeof obj.diagnostics === 'object' && !Array.isArray(obj.diagnostics)) on.onDiagnostics?.(obj.diagnostics as AnswerDiagnostics);
       // Memory provenance is dispatched, never merged into the completion metadata.
-      if (Array.isArray(obj.sources)) on.onSources?.(obj.sources as AnswerSource[]);
+      const sources = parseSources(obj.sources);
+      if (sources) on.onSources?.(sources);
       if (obj.error) { failure = obj.error; meta = { ...meta, ...obj }; }
       if (obj.done) { completed = true; meta = { ...meta, ...obj }; }
     });
@@ -248,7 +250,8 @@ export const api = {
   toolResult: (nodeId: number, callIndex: number, requestId: string, start = 0, signal?: AbortSignal) =>
     fetch(`${API}/nodes/${nodeId}/tool-results/${callIndex}?${new URLSearchParams({ request_id: requestId, start: String(start), max_chars: "20000" })}`, { signal }).then(j<ToolResultPage>),
   getThread: (id: number) =>
-    fetch(`${API}/nodes/${id}/thread`).then(j<{ nodes: ThreadNode[] }>).then((r) => r.nodes),
+    fetch(`${API}/nodes/${id}/thread`).then(j<{ nodes: ThreadNode[] }>)
+      .then((r) => r.nodes.map(row => ({ ...row, sources: parseSources(row.sources) }))),
   // Explicit deletion only. Editing creates a separate version through ask(mode=revise).
   deleteNode: (id: number) => fetch(`${API}/nodes/${id}`, { method: "DELETE" }).then(j<{ deleted: number[] }>),
   branch: (nodeId: number, seed_text: string, anchor?: SourceAnchor) =>

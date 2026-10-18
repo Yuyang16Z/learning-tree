@@ -1,5 +1,28 @@
 import type { AnswerSource } from "../types";
 
+const SCOPES: readonly unknown[] = ["path", "tree", "other"];
+const isId = (value: unknown) => Number.isSafeInteger(value) && (value as number) > 0;
+const isOptionalId = (value: unknown) => value === null || isId(value);
+
+/**
+ * Sources as streamed or stored with an answer, keeping only well-formed entries (once per memory),
+ * so one malformed entry cannot break rendering. Null when none survive.
+ */
+export function parseSources(value: unknown): AnswerSource[] | null {
+  if (!Array.isArray(value)) return null;
+  const seen = new Set<number>();
+  const sources: AnswerSource[] = [];
+  for (const item of value) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) continue;
+    const { memory_id, source_node_id, tree_id, tree_title, scope } = item as Record<string, unknown>;
+    if (!isId(memory_id) || seen.has(memory_id as number) || !isOptionalId(source_node_id) || !isOptionalId(tree_id)) continue;
+    if (typeof tree_title !== "string" || !SCOPES.includes(scope)) continue;
+    seen.add(memory_id as number);
+    sources.push({ memory_id: memory_id as number, source_node_id: source_node_id as number | null, tree_id: tree_id as number | null, tree_title, scope: scope as AnswerSource["scope"] });
+  }
+  return sources.length ? sources : null;
+}
+
 /** What a Referenced chip can do: open its source node, show that it was deleted, or nothing. */
 export type SourceLink = { kind: "open"; treeId: number; nodeId: number } | { kind: "deleted" } | { kind: "none" };
 
