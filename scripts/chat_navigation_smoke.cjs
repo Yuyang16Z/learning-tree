@@ -449,6 +449,22 @@ async function poll(callback, label) {
     }), 'The matching passage, not the middle of the answer, is scrolled into view');
     assert(((await page.locator(`[data-message-id="${searchRow.answer_message_id}"]`).getAttribute('class')) ?? '').includes('chat-source-flash'));
     checks.push('Choosing a map search hit in a Markdown answer highlights and scrolls to the query text, with Markdown removed from the snippet');
+
+    // Questions are searchable too. The search API labels their hits "question"; the rewrite keeps
+    // this check independent of whether the running server already does.
+    const searchRoute = `**/api/trees/${searchTopic.id}/search?*`;
+    await page.route(searchRoute, async route => {
+      const response = await route.fetch();
+      const body = await response.json();
+      body.results = body.results.map(hit => hit.message_id === searchRow.question_message_id ? { ...hit, kind: 'question' } : hit);
+      await route.fulfill({ response, json: body });
+    });
+    const questionHit = await chooseHistoryHit('KESTREL-88');
+    await page.unroute(searchRoute);
+    assert(questionHit.includes('Question · ') && !questionHit.includes('Answer · '), 'A question hit says it matched a question');
+    await poll(async () => (await highlighted()).some(text => text.includes('KESTREL-88')), 'the highlight lands on the question text');
+    assert(((await page.locator(`[data-message-id="${searchRow.question_message_id}"]`).getAttribute('class')) ?? '').includes('chat-source-flash'), 'The question turn itself is marked');
+    checks.push('A map search hit on a question is labelled as a question and highlights that question in the conversation');
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ ok: true, checks }, null, 2));
   } finally {

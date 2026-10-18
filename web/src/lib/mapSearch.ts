@@ -63,17 +63,32 @@ function longestPlainRun(text: string): string {
 }
 
 /**
- * Message hits navigate to the passage. The anchor must be text the rendered answer contains, so it
- * is the match for `query` (case-insensitive) widened only across plain characters; when the match is
- * not in the snippet verbatim (accents folded by the index), the snippet's longest plain stretch.
+ * Question and answer hits navigate to the passage. The anchor must be text the rendered message
+ * contains, so it is the match for `query` (case-insensitive) widened only across plain characters;
+ * when the match is not in the snippet verbatim (accents folded by the index), the snippet's
+ * longest plain stretch.
  */
 export function searchAnchor(hit: SearchHit, query = ""): SearchAnchor | undefined {
-  if (hit.kind !== "message" || hit.message_id == null) return undefined;
+  if ((hit.kind !== "message" && hit.kind !== "question") || hit.message_id == null) return undefined;
   const snippet = withoutEllipses(hit.snippet);
   const needle = query.trim();
   const match = needle ? new RegExp(escapeRegExp(needle), "iu").exec(snippet) : null;
   const text = match ? plainRun(snippet, match.index, match.index + match[0].length) : longestPlainRun(snippet);
   return { messageId: hit.message_id, ...(text ? { text } : {}) };
+}
+
+type Translate = (zh: string, en: string) => string;
+
+/** What kind of record a history hit matched. */
+export function hitKindLabel(kind: SearchHit["kind"], t: Translate): string {
+  switch (kind) {
+    case "title": return t("标题", "Title");
+    case "question": return t("问题", "Question");
+    case "message": return t("回答", "Answer");
+    case "note": return t("笔记", "Note");
+    case "memory": return t("记忆", "Memory");
+    default: return t("记录", "Record");
+  }
 }
 
 /** A snippet of stored Markdown as display text: markers dropped, link text kept, lines joined. */

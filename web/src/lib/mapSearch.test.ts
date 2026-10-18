@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SearchHit, TreeNode } from "../types";
-import { createMapSearcher, localMatches, mergeSearchResults, plainSnippet, searchAnchor } from "./mapSearch";
+import { createMapSearcher, hitKindLabel, localMatches, mergeSearchResults, plainSnippet, searchAnchor } from "./mapSearch";
 
 function node(id: number, title: string, seed_text: string | null = null): TreeNode {
   return { id, parent_id: id === 1 ? null : 1, tree_id: 7, title, seed_text, has_summary: false };
@@ -60,6 +60,19 @@ describe("map search result groups", () => {
     const anchor = (snippet: string, query: string) => searchAnchor(hit("message", 1, snippet, 12), query)?.text;
     expect(anchor("…**the pivôt rule** matters…", "pivot")).toBe("the pivôt rule");
     expect(anchor("…**", "pivot")).toBeUndefined();
+  });
+
+  it("labels question hits as questions and anchors them on the question turn", () => {
+    expect(searchAnchor(hit("question", 1, "… matter for KESTREL-88?", 31), "kestrel-88")).toEqual({ messageId: 31, text: "matter for KESTREL-88?" });
+    expect(searchAnchor(hit("question", 1, "问题", null))).toBeUndefined();
+    const zh = (text: string) => text;
+    const en = (_zh: string, text: string) => text;
+    expect(hitKindLabel("question", zh)).toBe("问题");
+    expect(hitKindLabel("question", en)).toBe("Question");
+    expect(hitKindLabel("message", zh)).toBe("回答");
+    expect(hitKindLabel("message", en)).toBe("Answer");
+    expect(["title", "note", "memory"].map(kind => hitKindLabel(kind as SearchHit["kind"], en))).toEqual(["Title", "Note", "Memory"]);
+    expect(hitKindLabel("unknown" as SearchHit["kind"], en)).toBe("Record");
   });
 
   it("shows Markdown snippets as plain text", () => {
