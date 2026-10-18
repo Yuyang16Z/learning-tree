@@ -1170,6 +1170,93 @@ def test_openai_malformed_or_truncated_tool_arguments_never_execute(monkeypatch)
     assert not responses
 
 
+def lookup_fragment(arguments, call_id=None, index=None, name="mcp_1_lookup"):
+    fragment = {"function": {"arguments": arguments}}
+    if name:
+        fragment["function"]["name"] = name
+        fragment["type"] = "function"
+    if call_id:
+        fragment["id"] = call_id
+    if index is not None:
+        fragment["index"] = index
+    return fragment
+
+
+@pytest.mark.parametrize(
+    "fragments,expected",
+    [
+        # Qwen3 behind some OpenAI-compatible servers opens a call at index 1 and
+        # streams its continuations at index 0 without an id or name.
+        (
+            [
+                lookup_fragment('{"q":', "call_a", 1),
+                lookup_fragment('"A"}', index=0, name=None),
+            ],
+            [("call_a", {"q": "A"})],
+        ),
+        # Two complete calls that share index 0 but carry different ids.
+        (
+            [
+                lookup_fragment('{"q":"A"}', "call_a", 0),
+                lookup_fragment('{"q":"B"}', "call_b", 0),
+            ],
+            [("call_a", {"q": "A"}), ("call_b", {"q": "B"})],
+        ),
+        # Argument pieces of one call that carry no index at all.
+        (
+            [lookup_fragment('{"q":', "call_a"), lookup_fragment('"A"}', name=None)],
+            [("call_a", {"q": "A"})],
+        ),
+        # Complete calls without an index, as Gemini- and Ollama-style servers send them.
+        (
+            [lookup_fragment('{"q":"A"}', "call_a"), lookup_fragment('{"q":"B"}', "call_b")],
+            [("call_a", {"q": "A"}), ("call_b", {"q": "B"})],
+        ),
+        (
+            [lookup_fragment('{"q":"A"}'), lookup_fragment('{"q":"B"}')],
+            [("call_0", {"q": "A"}), ("call_1", {"q": "B"})],
+        ),
+    ],
+    ids=[
+        "index-drift",
+        "shared-index",
+        "split-without-index",
+        "complete-without-index",
+        "complete-without-index-or-id",
+    ],
+)
+def test_openai_tool_fragments_survive_shifted_reused_or_missing_indexes(
+    monkeypatch, fragments, expected
+):
+    monkeypatch.setattr(llm, "_STREAM_OPTIONS_UNSUPPORTED", set())
+    bodies = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        bodies.append(body)
+        if len(bodies) > 1:
+            return openai_stream([({"role": "assistant", "content": "答案"}, None), ({}, "stop")])
+        chunks = [({"role": "assistant", "content": None, "tool_calls": fragments[:1]}, None)]
+        chunks += [({"tool_calls": [fragment]}, None) for fragment in fragments[1:]]
+        return openai_stream([*chunks, ({}, "tool_calls")])
+
+    monkeypatch.setattr(llm, "_client", openai_client(handler))
+    spec = LLMSpec("兼容", "https://provider.test/v1", "qwen3-32b", "synthetic-key")
+    executed = []
+
+    def execute(name, args):
+        executed.append((name, args))
+        return f"资料-{args['q']}"
+
+    events = list(llm.run_agent(spec, "系统", [{"role": "user", "content": "查"}], TOOLS, execute))
+    assert executed == [("mcp_1_lookup", args) for _, args in expected]
+    assert events[-1] == {"type": "delta", "text": "答案"}
+    calls = bodies[1]["messages"][-1 - len(expected)]["tool_calls"]
+    assert [(c["id"], json.loads(c["function"]["arguments"])) for c in calls] == expected
+    results = [m["tool_call_id"] for m in bodies[1]["messages"] if m["role"] == "tool"]
+    assert results == [call_id for call_id, _ in expected]
+
+
 REASONING_REJECTION = "The `reasoning_content` in the thinking mode must be passed back to the API."
 
 

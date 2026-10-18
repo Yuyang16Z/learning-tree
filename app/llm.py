@@ -244,11 +244,46 @@ def _with_reasoning_field(convo: list[dict]) -> list[dict]:
     ]
 
 
+def _add_fragment(calls: list[dict], by_index: dict[int, dict], fragment) -> None:
+    """Merge one streamed tool-call fragment into the call it continues, or open a call.
+
+    Normally every fragment of a call shares its index, and the id and name arrive on
+    the first one. Some servers shift the index of continuations, reuse one index for
+    several calls or send no index, so an id that differs from the matched call's
+    opens a new call, a bare continuation at an index no call has opened extends the
+    latest call, and without an index a second named call is told apart by its name.
+    """
+    index = getattr(fragment, "index", None)
+    function = getattr(fragment, "function", None)
+    call_id = getattr(fragment, "id", None) or None
+    name = getattr(function, "name", None) or None
+    slot = by_index.get(index) if index is not None else (calls[-1] if calls else None)
+    if slot is not None:
+        if call_id and slot["id"]:
+            if call_id != slot["id"]:
+                slot = None
+        elif index is None and name and slot["name"]:
+            slot = None
+    elif index is not None and not call_id and not name and calls:
+        slot = calls[-1]
+    if slot is None:
+        slot = {"id": None, "name": None, "arguments": ""}
+        calls.append(slot)
+    if index is not None:
+        by_index[index] = slot
+    if call_id:
+        slot["id"] = call_id
+    if name:
+        slot["name"] = name
+    slot["arguments"] += getattr(function, "arguments", None) or ""
+
+
 def _openai_turn(spec: LLMSpec, convo: list[dict], tools: list[dict]):
     """Stream one tool-capable turn: yield (kind, text) chunks, then return the result dict.
 
-    Tool-call fragments are grouped by index and their argument pieces concatenated;
-    the JSON is parsed only after the stream ends, so partial calls never execute.
+    Tool-call fragments are merged into calls in the order the calls open (see
+    _add_fragment) and their argument pieces concatenated; the JSON is parsed only
+    after the stream ends, so partial calls never execute.
     When the endpoint sends reasoning_content at all, the result carries it under that
     key so the tool loop can pass it back on the assistant message.
     """
@@ -263,7 +298,8 @@ def _openai_turn(spec: LLMSpec, convo: list[dict], tools: list[dict]):
     text: list[str] = []
     reasoning: list[str] = []
     reasoning_field = False
-    calls: dict[int, dict] = {}
+    calls: list[dict] = []
+    by_index: dict[int, dict] = {}
     try:
         for chunk in stream:
             if getattr(chunk, "usage", None) is not None:
@@ -285,29 +321,19 @@ def _openai_turn(spec: LLMSpec, convo: list[dict], tools: list[dict]):
                 text.append(delta.content)
                 yield ("text", delta.content)
             for fragment in delta.tool_calls or []:
-                index = fragment.index if fragment.index is not None else len(calls)
-                slot = calls.setdefault(index, {"id": None, "name": None, "arguments": ""})
-                if fragment.id:
-                    slot["id"] = fragment.id
-                function = fragment.function
-                if function is not None:
-                    if function.name:
-                        slot["name"] = function.name
-                    if function.arguments:
-                        slot["arguments"] += function.arguments
+                _add_fragment(calls, by_index, fragment)
     finally:
         stream.close()
     if finish not in ("stop", "tool_calls"):
         raise RuntimeError("模型回答未完整结束，可以重试。")
     tool_calls = []
-    for index in sorted(calls):
-        slot = calls[index]
+    for position, slot in enumerate(calls):
         try:
             args = json.loads(slot["arguments"] or "{}")
         except ValueError as error:
             raise RuntimeError("模型没有返回完整的工具参数，可以重试。") from error
         tool_calls.append(
-            {"id": slot["id"] or f"call_{index}", "name": slot["name"] or "", "args": args}
+            {"id": slot["id"] or f"call_{position}", "name": slot["name"] or "", "args": args}
         )
     result = {
         "content": "".join(text) or None,
