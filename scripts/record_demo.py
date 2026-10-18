@@ -43,6 +43,33 @@ EXPLANATION = (
     "a reusable pattern. Keep the final test separate so it remains an honest last check."
 )
 
+# Seconds between scripted answer chunks, so the recording shows the answer streaming.
+CHUNK_DELAY = 0.035
+
+
+def scripted_stream(spec, system, messages, deep=False, **_options):
+    """Offline stand-in for llm.stream_chat: stream the scripted answer to the question.
+
+    Keyword options of the real function (diagnostics, cache_prefix, ...) are accepted
+    and ignored, so a new one cannot turn every recorded answer into an error card.
+    """
+    from app import llm
+
+    if spec.api_key != "mock":
+        raise RuntimeError("Recording may use only the offline demo provider.")
+    question = llm._last_user_text(messages)
+    answer = BRANCH_ANSWER if question == BRANCH_QUESTION else MAIN_ANSWER
+    for start in range(0, len(answer), 24):
+        time.sleep(CHUNK_DELAY)
+        yield "text", answer[start : start + 24]
+
+
+def scripted_complete(spec, system, messages, **_options):
+    """Offline stand-in for llm.complete: the scripted inline explanation."""
+    if spec.api_key != "mock":
+        raise RuntimeError("Recording may use only the offline demo provider.")
+    return EXPLANATION
+
 
 def serve(port: int) -> None:
     """The child runs from a temporary cwd, where there is no personal .env."""
@@ -69,20 +96,6 @@ def serve(port: int) -> None:
     socket.socket.connect_ex = deny_connection
 
     from app import llm
-
-    def scripted_stream(spec, system, messages, deep=False):
-        if spec.api_key != "mock":
-            raise RuntimeError("Recording may use only the offline demo provider.")
-        question = llm._last_user_text(messages)
-        answer = BRANCH_ANSWER if question == BRANCH_QUESTION else MAIN_ANSWER
-        for start in range(0, len(answer), 24):
-            time.sleep(0.035)
-            yield "text", answer[start : start + 24]
-
-    def scripted_complete(spec, system, messages):
-        if spec.api_key != "mock":
-            raise RuntimeError("Recording may use only the offline demo provider.")
-        return EXPLANATION
 
     # Replace only the provider boundary before routers import these functions.
     # Tree creation, streaming persistence, selected-text source anchors,
