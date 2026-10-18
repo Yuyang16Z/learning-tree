@@ -1,5 +1,6 @@
 """Manage a user-owned preference profile and searchable, source-linked topic facts."""
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -213,31 +214,64 @@ def list_facts(
     )
 
 
-def restore_superseded(session: Session, deleted_ids) -> None:
-    """Facts that the deleted facts had superseded become current again.
+def restore_superseded(session: Session, deleted: Mapping[int, int | None]) -> None:
+    """Hand the facts that deleted facts had superseded to the correction that remains.
 
-    Every path that deletes facts calls this in its own transaction; otherwise the
-    earlier fact would stay hidden behind a fact that no longer exists, or behind
-    an unrelated later fact that reuses its id. The search-index trigger re-indexes
-    the restored facts."""
-    ids = sorted(set(deleted_ids))
-    if ids:
-        session.execute(
-            update(Memory).where(Memory.superseded_by.in_(ids)).values(superseded_by=None)
-        )
+    `deleted` maps each deleted record to its own `superseded_by`, read before the delete;
+    every path that deletes facts calls this after the delete, in the same transaction.
+    A fact that a deleted fact replaced is then replaced by the first fact further down
+    the correction chain that still exists (it corrected the deleted fact), and becomes
+    current again only when no later correction is left. Otherwise it would stay hidden
+    behind a fact that no longer exists, or an unrelated later fact reusing its id, or a
+    fact corrected twice would reach answers again beside its latest correction. The
+    search-index trigger re-indexes facts that become current."""
+    if not deleted:
+        return
+    predecessors = session.exec(
+        select(Memory.id, Memory.superseded_by).where(Memory.superseded_by.in_(list(deleted)))
+    ).all()
+    if not predecessors:
+        return
+
+    def remaining(memory_id: int | None) -> int | None:
+        seen: set[int] = set()
+        while memory_id in deleted and memory_id not in seen:
+            seen.add(memory_id)
+            memory_id = deleted[memory_id]
+        return None if memory_id in deleted else memory_id
+
+    later = {remaining(pointer) for _, pointer in predecessors} - {None}
+    existing = (
+        set(session.exec(select(Memory.id).where(Memory.id.in_(later), Memory.kind == "fact")))
+        if later
+        else set()
+    )
+    by_successor: dict[int | None, list[int]] = {}
+    for memory_id, pointer in predecessors:
+        successor = remaining(pointer)
+        # A dangling id, or a hand-damaged cycle leading back here, leaves the fact current.
+        if successor not in existing or successor == memory_id:
+            successor = None
+        by_successor.setdefault(successor, []).append(memory_id)
+    for successor, ids in by_successor.items():
+        session.execute(update(Memory).where(Memory.id.in_(ids)).values(superseded_by=successor))
 
 
 @router.post("/delete")
 def delete_facts(body: FactDeleteIn, session: Session = Depends(get_session)) -> dict:
     begin_memory_write(session)
-    ids = list(
+    # Each fact's own successor, read before the rows go, keeps correction chains intact.
+    deleted = dict(
         session.exec(
-            select(Memory.id).where(Memory.id.in_(set(body.ids)), Memory.kind == "fact")
+            select(Memory.id, Memory.superseded_by).where(
+                Memory.id.in_(set(body.ids)), Memory.kind == "fact"
+            )
         ).all()
     )
+    ids = list(deleted)
     session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id.in_(ids)))
     session.execute(delete(Memory).where(Memory.id.in_(ids), Memory.kind == "fact"))
-    restore_superseded(session, ids)
+    restore_superseded(session, deleted)
     scrub_sources(session, memory_ids=ids)
     session.commit()
     return {"deleted": len(ids)}
@@ -279,9 +313,10 @@ def delete_memory(memory_id: int, session: Session = Depends(get_session)) -> di
     m = session.get(Memory, memory_id)
     if not m:
         raise HTTPException(404, "记忆不存在")
+    deleted = {memory_id: m.superseded_by}
     session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory_id))
     session.delete(m)
-    restore_superseded(session, [memory_id])
+    restore_superseded(session, deleted)
     scrub_sources(session, memory_ids=[memory_id])
     session.commit()
     return {"deleted": memory_id}

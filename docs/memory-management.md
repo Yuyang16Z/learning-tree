@@ -95,8 +95,11 @@ mark a new fact as correcting an earlier one instead of restating it. The earlie
 fact is then tagged **Superseded**: it stays stored and listed until you delete
 it, but it no longer reaches answers, the search index or the model's history
 search. Deleting the newer fact, or the branch or topic it came from, makes the
-earlier fact current again. Only facts that extraction wrote and that were never
-edited by hand can be superseded, and only by a fact from the same learning path.
+earlier fact current again, unless the newer fact had itself been corrected: the
+earlier fact then stays superseded, now by the correction that remains, so a
+fact corrected twice never returns next to its latest correction. Only facts
+that extraction wrote and that were never edited by hand can be superseded, and
+only by a fact from the same learning path.
 Facts stored before this version are never superseded: earlier versions did not
 record hand edits, so any of them may hold your own correction. Facts extracted by older versions read as
 conclusions. Interpretation of types and corrections depends on the configured
@@ -253,8 +256,9 @@ backups include them, learning-tree exports exclude `sources`.
 - **结构化事实**：提炼出的事实带类型标签（定义、适用条件、纠正误解、待解决疑问、学习状态、
   结论）。新事实可以标记为修正某条当前路径上的旧事实，旧事实显示「已更新」并保留可删，
   但不再进入回答、搜索索引和模型的历史检索；删除新事实或它所在的分支、主题后，旧事实会恢复
-  为当前事实。用户手动编辑过的事实，以及升级前保存的事实（旧版本不记录手动编辑，可能含有
-  用户自己的修正）都不会被自动替代。
+  为当前事实；如果新事实本身也已被更正，旧事实仍显示「已更新」，改由留下的那条更正替代，
+  不会和最新的更正一起回到回答中。用户手动编辑过的事实，以及升级前保存的事实（旧版本不记录
+  手动编辑，可能含有用户自己的修正）都不会被自动替代。
 - **参考了哪些记忆**：每条回答下方列出实际进入提示的记忆编号及来源节点，来自其他分支或
   主题的会标注；点击可跳到来源节点。被压缩掉的记忆不会列出。该列表随回答保存，但不随
   学习树导出。保存的只有记录编号和范围，主题名称在显示时读取；记忆、来源节点或主题已删除

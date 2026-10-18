@@ -131,6 +131,112 @@ def test_deleting_the_replacing_fact_or_its_branch_restores_the_earlier_fact(
     assert fact(engine, OLD).superseded_by == fact(engine, "再次修正：quicksort 不稳定。").id
 
 
+LATEST = "再次修正：quicksort 不稳定，堆排序也不稳定。"
+
+
+def chain(engine, monkeypatch) -> tuple[int, int, int]:
+    """The root's fact is corrected on the branch, and that correction on the branch's child."""
+    old_id, middle_id = supersede(engine, monkeypatch)
+    with Session(engine) as session:
+        session.add(Node(id=3, tree_id=1, parent_id=2, title="子分支", status="complete"))
+        session.commit()
+    extract(
+        monkeypatch,
+        3,
+        "问题三",
+        [{"text": LATEST, "type": "misconception", "terms": [], "supersedes": middle_id}],
+    )
+    latest_id = fact(engine, LATEST).id
+    assert fact(engine, NEW).superseded_by == latest_id
+    assert fact(engine, OLD).superseded_by == middle_id
+    return old_id, middle_id, latest_id
+
+
+def recalled(engine, path) -> set[int]:
+    with Session(engine) as session:
+        found = retrieve_memory(session, 1, path, query="quicksort 稳定", backend=LexicalOnly())
+        return {hit.memory_id for hit in found.facts}
+
+
+def delete_facts(client, deletion, ids) -> None:
+    if deletion == "selected":
+        assert client.post("/memories/delete", json={"ids": ids}).status_code == 200
+    else:
+        for memory_id in ids:
+            assert client.delete(f"/memories/{memory_id}").status_code == 200
+
+
+@pytest.mark.parametrize("deletion", ["selected", "single"])
+def test_deleting_a_correction_that_was_corrected_again_keeps_the_earlier_fact_superseded(
+    setup, monkeypatch, deletion
+):
+    client, engine = setup
+    old_id, middle_id, latest_id = chain(engine, monkeypatch)
+    assert recalled(engine, [1, 2, 3]) == {latest_id}
+    delete_facts(client, deletion, [middle_id])
+    # Corrected twice: the correction that remains still replaces the original.
+    assert fact(engine, OLD).superseded_by == latest_id
+    assert not current(engine, old_id)
+    assert recalled(engine, [1, 2, 3]) == {latest_id}
+    listed = client.get("/memories/facts").json()["items"]
+    assert {item["id"]: item["superseded_by"] for item in listed} == {
+        old_id: latest_id,
+        latest_id: None,
+    }
+    # Once no correction is left, the original is current again.
+    delete_facts(client, deletion, [latest_id])
+    assert fact(engine, OLD).superseded_by is None
+    assert current(engine, old_id)
+    assert recalled(engine, [1, 2, 3]) == {old_id}
+
+
+@pytest.mark.parametrize(
+    ("deleted", "current_after"),
+    [
+        (("middle", "latest"), "old"),  # Every correction goes: the original returns.
+        (("old", "middle"), "latest"),  # The original goes with its first correction.
+        (("old",), "latest"),  # Deleting the original leaves the chain's end alone.
+        (("latest",), "middle"),  # The last correction goes: the one before it returns.
+    ],
+)
+def test_deleting_several_facts_of_a_correction_chain_together(
+    setup, monkeypatch, deleted, current_after
+):
+    client, engine = setup
+    ids = dict(zip(("old", "middle", "latest"), chain(engine, monkeypatch)))
+    delete_facts(client, "selected", [ids[name] for name in deleted])
+    with Session(engine) as session:
+        remaining = {row.id: row.superseded_by for row in session.exec(select(Memory))}
+    assert {memory_id for memory_id, successor in remaining.items() if successor is None} == {
+        ids[current_after]
+    }
+    # Every fact that stays superseded points at a fact that still exists.
+    assert all(successor in remaining for successor in remaining.values() if successor)
+    assert recalled(engine, [1, 2, 3]) == {ids[current_after]}
+
+
+def test_deleting_the_branch_of_a_twice_corrected_fact_restores_the_original(setup, monkeypatch):
+    """Both corrections come from the deleted branch, so nothing replaces the root's fact."""
+    client, engine = setup
+    old_id, _, _ = chain(engine, monkeypatch)
+    assert client.delete("/nodes/2").status_code == 200
+    assert fact(engine, OLD).superseded_by is None
+    assert current(engine, old_id)
+
+
+def test_a_hand_damaged_correction_cycle_never_makes_a_fact_replace_itself(setup, monkeypatch):
+    client, engine = setup
+    old_id, middle_id = supersede(engine, monkeypatch)
+    with Session(engine) as session:
+        middle = session.get(Memory, middle_id)
+        middle.superseded_by = old_id
+        session.add(middle)
+        session.commit()
+    delete_facts(client, "single", [middle_id])
+    assert fact(engine, OLD).superseded_by is None
+    assert current(engine, old_id)
+
+
 def test_facts_stored_before_edits_were_recorded_are_never_superseded(tmp_path, monkeypatch):
     """Earlier versions changed fact text in place without recording the edit."""
     from sqlalchemy import text

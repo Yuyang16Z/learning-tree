@@ -504,16 +504,16 @@ def delete_node(node_id: int, session: Session = Depends(get_session)) -> dict:
         for message in session.exec(select(Message).where(Message.node_id.in_(ids))).all():
             session.delete(message)
         session.execute(delete(ToolResult).where(ToolResult.node_id.in_(ids)))
-        memory_ids = []
+        deleted_memories = {}
         for memory in session.exec(select(Memory).where(Memory.source_node_id.in_(ids))).all():
             session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory.id))
-            memory_ids.append(memory.id)
+            deleted_memories[memory.id] = memory.superseded_by
             session.delete(memory)
-        # Earlier facts these facts corrected become current again, and answers
-        # elsewhere keep no provenance pointing into the deleted subtree.
+        # Earlier facts these facts corrected pass to a correction that remains or become
+        # current again, and answers elsewhere keep no provenance pointing into the subtree.
         session.flush()
-        restore_superseded(session, memory_ids)
-        scrub_sources(session, node_ids=ids, memory_ids=memory_ids)
+        restore_superseded(session, deleted_memories)
+        scrub_sources(session, node_ids=ids, memory_ids=list(deleted_memories))
         # The full-text search_index rows of these messages, memories and notes are
         # removed by the SQLite triggers in app/search_index.py as the rows go.
         # References outside the deleted subtree must not point to nonexistent nodes.
