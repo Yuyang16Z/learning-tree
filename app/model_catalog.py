@@ -31,7 +31,8 @@ _PATTERNS: tuple[tuple[str, int], ...] = (
     (r"grok-4", 262_144),
     (r"mistral-large", 131_072),
 )
-_CLAUDE_VERSION = re.compile(r"claude-(?:[a-z]+-)*?(\d+)(?:[-.](\d+))?")
+# The minor version has one or two digits; a longer run such as 20250514 is a date.
+_CLAUDE_VERSION = re.compile(r"claude-(?:[a-z]+-)*?(\d+)(?:[-.](\d{1,2})(?!\d))?")
 
 
 def _claude_window(model_id: str) -> int | None:
