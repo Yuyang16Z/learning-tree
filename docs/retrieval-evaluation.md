@@ -96,7 +96,13 @@ then other topics):
 - **parent**: facts extracted from the parent node, for follow-ups and
   branches alike.
 
-`recall_at_k` is the share of a label's facts found in the top k, divided by
+Labels compare facts by their text, normalized as retrieval normalizes it
+before removing duplicates: facts with the same text count once, whichever of
+them is returned, and a fact whose text is already in the question's quoted
+passage or learning note is left out of the label, because retrieval never
+returns what the prompt already holds. The report counts those facts as
+`in_prompt` for each scored label and `facts_in_prompt` for each scope.
+`recall_at_k` is the share of a label's texts found in the top k, divided by
 min(k, label size); `hit_rate_at_k` is the share of cases with at least one of
 them in the top k; `mrr_at_k` is the mean reciprocal rank of the first one
 within the top k. Questions without such facts are not counted.
@@ -185,6 +191,9 @@ UTF-8 字节计数、回放真实问题的记忆检索、检查主题全文搜�
   引用和笔记回放 `retrieve_memory`，且只看到提问时已存在、尚未被更正替代的事实。报告记录返回
   事实的来源和类型、模式、是否重排、耗时，并用两类代理标签计算 recall@k、hit rate@k 和 MRR@k：
   self 为本节点及其追问链中更早轮次提炼的事实（每个来源节点单独计分），parent 为父节点的事实。
+  标签按与检索去重相同的规范化文本比较：文本相同的事实只计一次；文本已包含在问题的引用或学习笔记
+  中的事实不计入标签，因为检索不会返回提示中已有的内容，报告用 `in_prompt`（每个计分标签）和
+  `facts_in_prompt`（每个范围）记录这类事实的数量。
 - **主题搜索**：取每个问题中最长的中日韩字符串、否则最长的单词（至少 3 个字符），用地图搜索的
   全文查询在其主题内检索，记录命中数、耗时以及是否命中问题本身所在节点。
 - **耗时**：检索（分范围）和搜索给出 p50/p90/p95/p99 等毫秒分位数；每个范围先做一次不计时的

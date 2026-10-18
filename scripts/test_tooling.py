@@ -659,6 +659,77 @@ def test_retrieval_evaluation_migrates_only_the_copy(tmp_path):
     assert parent["cases"] == 1 and parent["hit_rate_at_k"] == 1.0
 
 
+def test_retrieval_evaluation_labels_leave_out_facts_the_prompt_already_holds(tmp_path):
+    evaluate = load("scripts/evaluate_retrieval.py")
+    source = tmp_path / "labels.db"
+    with closing(sqlite3.connect(source)) as database:
+        database.executescript(
+            """
+            CREATE TABLE knowledgetree (id INTEGER PRIMARY KEY, title VARCHAR NOT NULL,
+                created_at DATETIME NOT NULL);
+            CREATE TABLE node (id INTEGER PRIMARY KEY, tree_id INTEGER NOT NULL,
+                parent_id INTEGER, title VARCHAR NOT NULL, seed_text VARCHAR, summary VARCHAR,
+                learning_note VARCHAR, created_at DATETIME NOT NULL);
+            CREATE TABLE message (id INTEGER PRIMARY KEY, node_id INTEGER NOT NULL,
+                role VARCHAR NOT NULL, content VARCHAR NOT NULL, answered_by VARCHAR,
+                created_at DATETIME NOT NULL);
+            CREATE TABLE memory (id INTEGER PRIMARY KEY, kind VARCHAR NOT NULL,
+                content VARCHAR NOT NULL, tree_id INTEGER, source_node_id INTEGER,
+                created_at DATETIME NOT NULL);
+            INSERT INTO knowledgetree VALUES (1, 'Fixture heaps', '2025-03-01 09:00:00');
+            INSERT INTO node VALUES (1, 1, NULL, 'Fixture root', NULL, NULL, NULL,
+                '2025-03-01 09:01:00');
+            INSERT INTO message VALUES (1, 1, 'user', 'What does a heap guarantee?', NULL,
+                '2025-03-01 09:01:00');
+            INSERT INTO message VALUES (2, 1, 'assistant',
+                'A heap keeps the smallest key at its root.', 'Fixture model',
+                '2025-03-01 09:02:00');
+            -- Facts 2 and 3 share a text, so retrieval can return only one of them.
+            INSERT INTO memory VALUES (1, 'fact', 'A heap keeps the smallest key at its root.',
+                1, 1, '2025-03-01 09:03:00');
+            INSERT INTO memory VALUES (2, 'fact', 'A binary heap is stored as an array.',
+                1, 1, '2025-03-01 09:03:00');
+            INSERT INTO memory VALUES (3, 'fact', 'A binary heap is stored as an array.',
+                1, 1, '2025-03-01 09:03:00');
+            -- A branch whose quoted passage is fact 1, word for word.
+            INSERT INTO node VALUES (2, 1, 1, 'Fixture branch',
+                'A heap keeps the smallest key at its root.', NULL, NULL, '2025-03-01 09:05:00');
+            INSERT INTO message VALUES (3, 2, 'user',
+                'Why is the root of a binary heap the smallest key?', NULL,
+                '2025-03-01 09:05:00');
+            INSERT INTO message VALUES (4, 2, 'assistant',
+                'Every parent is ordered before its children.', 'Fixture model',
+                '2025-03-01 09:06:00');
+            -- A follow-up whose learning note holds the text of facts 2 and 3.
+            INSERT INTO node VALUES (3, 1, 1, 'Fixture follow-up', NULL, NULL,
+                'Remember: a binary heap is stored as an array.', '2025-03-01 09:07:00');
+            INSERT INTO message VALUES (5, 3, 'user',
+                'How do I find the children of a heap node?', NULL, '2025-03-01 09:07:00');
+            INSERT INTO message VALUES (6, 3, 'assistant',
+                'The children of index i are at 2i + 1 and 2i + 2.', 'Fixture model',
+                '2025-03-01 09:08:00');
+            """
+        )
+    output = tmp_path / "report.json"
+    arguments = ["--database", str(source), "--scopes", "path", "--output", str(output)]
+    assert evaluate.main(arguments) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    cases = {case["question_message_id"]: case for case in report["memory_retrieval"]["cases"]}
+    # Retrieval drops fact 1 for the branch because its quote already holds it, and
+    # returns one of the two identical facts: the label is one text, and it was found.
+    found = {"source_node_id": 1, "relevant": 1, "found": 1, "rank": 1}
+    assert cases[3]["memory_ids"] == [3]
+    assert cases[3]["self"] == [] and cases[3]["parent"] == {**found, "in_prompt": 1}
+    # The follow-up's note holds the text of facts 2 and 3, so only fact 1 is left.
+    assert cases[5]["memory_ids"] == [1]
+    assert cases[5]["self"] == [{**found, "in_prompt": 2}]
+    assert cases[5]["parent"] == {**found, "in_prompt": 2}
+    summary = report["memory_retrieval"]["scopes"]["path"]
+    perfect = {"cases": 2, "recall_at_k": 1.0, "hit_rate_at_k": 1.0, "mrr_at_k": 1.0}
+    assert summary["parent_recall"] == {**perfect, "facts_in_prompt": 3}
+    assert summary["self_recall"] == {**perfect, "cases": 1, "facts_in_prompt": 2}
+
+
 @pytest.mark.parametrize("missing", ["runtime", "reranker"])
 def test_retrieval_evaluation_hybrid_without_local_models_exits_2(
     tmp_path, monkeypatch, capsys, missing

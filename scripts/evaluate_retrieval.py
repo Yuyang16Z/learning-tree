@@ -640,6 +640,7 @@ class _Fact:
     superseded_by: int | None
     created_at: datetime | None
     updated_at: datetime | None
+    content: str  # Kept in memory to match labels as retrieval does; never reported.
 
 
 @dataclass(frozen=True)
@@ -738,7 +739,7 @@ def load_snapshot(engine) -> _Snapshot:
             message = _Message(*row[:5], _naive(row[5]), int(row[6] or 0))
             messages.setdefault(message.node_id, []).append(message)
         facts = [
-            _Fact(row[0], row[1], row[2], row[3], row[4], _naive(row[5]), _naive(row[6]))
+            _Fact(*row[:5], _naive(row[5]), _naive(row[6]), row[7])
             for row in session.exec(
                 select(
                     Memory.id,
@@ -748,6 +749,7 @@ def load_snapshot(engine) -> _Snapshot:
                     Memory.superseded_by,
                     Memory.created_at,
                     Memory.updated_at,
+                    Memory.content,
                 )
                 .where(Memory.kind == "fact")
                 .order_by(Memory.id)
@@ -1180,10 +1182,19 @@ def semantic_backend(hybrid: bool):
     return _RecordingBackend(backend), status
 
 
-def _proxy(entries: list[tuple[int, int, int | None]], k: int) -> dict:
-    """recall@k, hit rate@k and MRR@k over (found in top k, relevant, first rank)."""
+def _proxy(entries: list[tuple[int, int, int | None]], k: int, in_prompt: int) -> dict:
+    """recall@k, hit rate@k and MRR@k over (found in top k, relevant, first rank).
+
+    in_prompt counts the label facts left out because the prompt already held their text.
+    """
     if not entries:
-        return {"cases": 0, "recall_at_k": None, "hit_rate_at_k": None, "mrr_at_k": None}
+        return {
+            "cases": 0,
+            "recall_at_k": None,
+            "hit_rate_at_k": None,
+            "mrr_at_k": None,
+            "facts_in_prompt": in_prompt,
+        }
     return {
         "cases": len(entries),
         "recall_at_k": round(
@@ -1191,10 +1202,11 @@ def _proxy(entries: list[tuple[int, int, int | None]], k: int) -> dict:
         ),
         "hit_rate_at_k": round(sum(found > 0 for found, _, _ in entries) / len(entries), 4),
         "mrr_at_k": round(sum(1 / rank if rank else 0 for _, _, rank in entries) / len(entries), 4),
+        "facts_in_prompt": in_prompt,
     }
 
 
-def _label(ranked: list[int], relevant: set[int], k: int) -> dict:
+def _label(ranked: list[str], relevant: set[str], k: int) -> dict:
     top = ranked[:k]
     rank = next((position for position, item in enumerate(top, 1) if item in relevant), None)
     return {"relevant": len(relevant), "found": sum(item in relevant for item in top), "rank": rank}
@@ -1235,7 +1247,12 @@ def measure_retrieval(
 ) -> dict:
     from sqlmodel import Session
 
-    from app.retrieval import RetrievalConfig, read_retrieval_settings, retrieve_memory
+    from app.retrieval import (
+        RetrievalConfig,
+        _normalized,
+        read_retrieval_settings,
+        retrieve_memory,
+    )
 
     valid_nodes = {
         node_id
@@ -1253,6 +1270,24 @@ def measure_retrieval(
     labels: dict[int, tuple[list, tuple | None]] = {}
     cases, summaries = [], {}
     recording = isinstance(backend, _RecordingBackend)
+
+    def label(node_id: int, existing: str) -> tuple[int, set[str], int]:
+        """A node's facts visible now, compared as retrieve_memory compares them.
+
+        Its _deduplicate keeps one fact per normalized text and drops every fact whose text
+        the question's quote or note already holds. A label is therefore a set of distinct
+        normalized texts, and facts already in the prompt are left out and counted.
+        """
+        texts, in_prompt = set(), 0
+        for fact in by_node.get(node_id, ()):
+            content = _normalized(fact.content)
+            if not content or not timeline.visible(fact.id):
+                continue
+            if existing and content in existing:
+                in_prompt += 1
+            else:
+                texts.add(content)
+        return node_id, texts, in_prompt
 
     def run(session, question, config):
         return retrieve_memory(
@@ -1275,26 +1310,15 @@ def measure_retrieval(
             latencies, returned, modes, types = [], Counter(), Counter(), Counter()
             sizes, self_entries, parent_entries = [], [], []
             reranked = eligible = fallbacks = rerank_calls = rerank_fallbacks = 0
+            self_in_prompt = parent_in_prompt = 0
             for question in snapshot.questions:
                 timeline.advance(question.moment)
                 if question.message_id not in labels:
-                    thread = [
-                        (
-                            node_id,
-                            {f.id for f in by_node.get(node_id, ()) if timeline.visible(f.id)},
-                        )
-                        for node_id in question.thread
-                    ]
+                    existing = _normalized(question.existing)
+                    thread = [label(node_id, existing) for node_id in question.thread]
                     parent = None
                     if question.parent_id is not None:
-                        parent = (
-                            question.parent_id,
-                            {
-                                f.id
-                                for f in by_node.get(question.parent_id, ())
-                                if timeline.visible(f.id)
-                            },
-                        )
+                        parent = label(question.parent_id, existing)
                     labels[question.message_id] = (thread, parent)
                 thread, parent = labels[question.message_id]
                 with Session(engine) as session:
@@ -1341,15 +1365,26 @@ def measure_retrieval(
                     fallbacks += embedding_failed or rerank_failed
                     rerank_calls += rerank_called
                     rerank_fallbacks += rerank_failed
-                for node_id, relevant in thread:
+                texts = [_normalized(item.content) for item in result.facts]
+                for node_id, relevant, in_prompt in thread:
+                    self_in_prompt += in_prompt
                     if relevant:
-                        label = _label(ranked, relevant, k)
-                        case_["self"].append({"source_node_id": node_id, **label})
-                        self_entries.append((label["found"], label["relevant"], label["rank"]))
-                if parent and parent[1]:
-                    label = _label(ranked, parent[1], k)
-                    case_["parent"] = {"source_node_id": parent[0], **label}
-                    parent_entries.append((label["found"], label["relevant"], label["rank"]))
+                        score = _label(texts, relevant, k)
+                        case_["self"].append(
+                            {"source_node_id": node_id, **score, "in_prompt": in_prompt}
+                        )
+                        self_entries.append((score["found"], score["relevant"], score["rank"]))
+                if parent:
+                    node_id, relevant, in_prompt = parent
+                    parent_in_prompt += in_prompt
+                    if relevant:
+                        score = _label(texts, relevant, k)
+                        case_["parent"] = {
+                            "source_node_id": node_id,
+                            **score,
+                            "in_prompt": in_prompt,
+                        }
+                        parent_entries.append((score["found"], score["relevant"], score["rank"]))
                 if include_text:
                     case_["question"] = question.text
                     case_["facts"] = [item.content for item in result.facts]
@@ -1373,8 +1408,8 @@ def measure_retrieval(
                 "rerank_attempts": rerank_calls,
                 "rerank_fallbacks": rerank_fallbacks,
                 "latency_ms": summarize(latencies),
-                "self_recall": _proxy(self_entries, k),
-                "parent_recall": _proxy(parent_entries, k),
+                "self_recall": _proxy(self_entries, k, self_in_prompt),
+                "parent_recall": _proxy(parent_entries, k, parent_in_prompt),
             }
     finally:
         timeline.restore()
@@ -1388,7 +1423,11 @@ def measure_retrieval(
             "then other branches, then other topics). Labels are structural proxies, not human "
             "relevance judgments: self = facts from the question's own node and the earlier "
             "turns of its follow-up thread, scored once per source node; parent = facts from "
-            "the parent node. recall_at_k = relevant facts in the top k / min(k, relevant); "
+            "the parent node. Labels compare facts by normalized text, as retrieve_memory "
+            "deduplicates them: facts with the same text count once, and facts whose text the "
+            "question's quote or note already holds are left out (in_prompt, facts_in_prompt), "
+            "since retrieval never returns them. recall_at_k = relevant texts in the top k / "
+            "min(k, relevant); "
             "hit_rate_at_k = share with at least one in the top k; mrr_at_k = mean of 1/rank "
             "of the first relevant fact within the top k. Latency times the retrieve_memory "
             "call after one untimed warm-up per scope."
