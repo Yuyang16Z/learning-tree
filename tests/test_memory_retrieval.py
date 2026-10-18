@@ -916,6 +916,80 @@ def test_wider_hits_share_a_smaller_budget_and_never_displace_path_facts(session
     assert sum(len(hit.content) for hit in tight.facts if hit.scope == "tree") <= 120
 
 
+class LexicalOnly(Backend):
+    def embed_query(self, query):
+        raise RuntimeError("semantic models unavailable")
+
+
+def _path_ids(result):
+    return [hit.memory_id for hit in result.facts if hit.scope == "path"]
+
+
+def test_many_short_wider_facts_cannot_push_a_path_fact_out_of_the_candidates(session):
+    path = remember(session, "quicksort pivot " + "长篇背景说明，" * 60)
+    for index in range(30):
+        remember(session, f"quicksort pivot {index}", tree_id=2, source_node_id=4)
+    query = "quicksort pivot"
+    alone = retrieve_memory(session, 1, [1], query=query, backend=LexicalOnly())
+    assert alone.mode == "lexical" and _path_ids(alone) == [path.id]
+    widened = retrieve_memory(
+        session,
+        1,
+        [1],
+        query=query,
+        config=RetrievalConfig(include_other_trees=True),
+        backend=LexicalOnly(),
+    )
+    assert _path_ids(widened) == [path.id]
+    assert [hit.scope for hit in widened.facts] == ["path"] + ["other"] * 4
+
+
+def test_a_strong_wider_rerank_score_does_not_raise_the_path_cutoff(session):
+    path = remember(session, "路径：schema 校验先于执行。")
+    other = remember(session, "其他主题：schema 校验与版本。", tree_id=2, source_node_id=4)
+    backend = Backend(
+        [path.content, other.content], scores={path.content: 0.15, other.content: 0.9}
+    )
+    alone = retrieve_memory(session, 1, [1], query="schema", backend=backend)
+    assert alone.reranked and _path_ids(alone) == [path.id]
+    widened = retrieve_memory(
+        session,
+        1,
+        [1],
+        query="schema",
+        config=RetrievalConfig(include_other_trees=True),
+        backend=backend,
+    )
+    assert widened.reranked and _path_ids(widened) == [path.id]
+    assert [hit.memory_id for hit in widened.facts] == [path.id, other.id]
+
+
+def test_a_strong_wider_similarity_does_not_tighten_the_path_gate(session):
+    best = remember(session, "路径甲：相关结论。")
+    close = remember(session, "路径乙：几乎同样相关。")
+    other = remember(session, "其他主题：非常相关。", tree_id=2, source_node_id=4)
+    backend = Backend(
+        vectors={
+            best.content: [0.83, (1 - 0.83**2) ** 0.5, 0.0],
+            close.content: [0.81, (1 - 0.81**2) ** 0.5, 0.0],
+            other.content: [0.95, (1 - 0.95**2) ** 0.5, 0.0],
+        }
+    )
+    config = RetrievalConfig(rerank=False)
+    alone = retrieve_memory(session, 1, [1], query="量子", config=config, backend=backend)
+    assert alone.mode == "hybrid" and set(_path_ids(alone)) == {best.id, close.id}
+    widened = retrieve_memory(
+        session,
+        1,
+        [1],
+        query="量子",
+        config=RetrievalConfig(rerank=False, include_other_trees=True),
+        backend=backend,
+    )
+    assert set(_path_ids(widened)) == {best.id, close.id}
+    assert [hit.memory_id for hit in widened.facts if hit.scope == "other"] == [other.id]
+
+
 def test_wider_hits_are_revalidated_against_current_records(session):
     session.add_all([KnowledgeTree(id=3, title="归档树", archived=True)])
     session.add(Node(id=9, tree_id=3, title="归档树的根", status="complete"))

@@ -511,6 +511,70 @@ def _revalidate(
     return result
 
 
+def _fuse(
+    query: str,
+    pool: list[MemoryHit],
+    similarities: dict[int, float] | None,
+    config: RetrievalConfig,
+) -> list[MemoryHit]:
+    """Reciprocal-rank fusion of keyword and vector rankings within one pool."""
+    lexical = _lexical_scores(query, pool)
+    vector_scores: dict[int, float] = {}
+    if similarities is not None:
+        scores = {item.memory_id: similarities[item.memory_id] for item in pool}
+        top = max(scores.values(), default=0.0)
+        # Relative gate: when the best match is strong, candidates within a small
+        # margin of it pass too. A uniformly weak set still admits nothing.
+        strong_top = top >= config.relative_similarity_floor
+        for memory_id, similarity in scores.items():
+            if similarity >= config.min_similarity or (
+                strong_top and top - similarity <= config.relative_similarity_margin
+            ):
+                vector_scores[memory_id] = similarity
+    fused: dict[int, float] = {}
+    for scores in (lexical, vector_scores):
+        ranking = sorted(scores, key=lambda mid: (scores[mid], mid), reverse=True)[
+            : config.candidate_k
+        ]
+        for rank, mid in enumerate(ranking, 1):
+            fused[mid] = fused.get(mid, 0.0) + 1.0 / (60 + rank)
+    by_id = {item.memory_id: item for item in pool}
+    ids = sorted(fused, key=lambda mid: (fused[mid], mid), reverse=True)[: config.candidate_k]
+    return [replace(by_id[mid], score=fused[mid]) for mid in ids]
+
+
+def _rerank(
+    semantic, query: str, ranked: list[list[MemoryHit]], config: RetrievalConfig
+) -> list[list[MemoryHit]]:
+    """One reranker call for every pool; each pool keeps its own relative cutoff."""
+    flat = [item for pool in ranked for item in pool]
+    scores = [float(value) for value in semantic.rerank(query, [item.content for item in flat])]
+    if len(scores) != len(flat) or any(
+        not math.isfinite(score) or not 0 <= score <= 1 for score in scores
+    ):
+        raise ValueError("invalid reranker scores")
+    result, position = [], 0
+    for pool in ranked:
+        pool_scores, position = scores[position : position + len(pool)], position + len(pool)
+        if not pool:
+            result.append([])
+            continue
+        # Cross-encoder sigmoid values are not calibrated probabilities.
+        # Use query-relative ranking, rather than a universal 0.5 threshold.
+        cutoff = max(config.min_rerank_score, max(pool_scores) * config.rerank_relative_cutoff)
+        fused = {item.memory_id: item.score for item in pool}
+        kept = [
+            replace(item, score=score)
+            for item, score in zip(pool, pool_scores, strict=True)
+            if score >= cutoff
+        ]
+        kept.sort(
+            key=lambda item: (item.score, fused[item.memory_id], item.memory_id), reverse=True
+        )
+        result.append(kept)
+    return result
+
+
 def retrieve_memory(
     session: Session,
     tree_id: int | None,
@@ -541,68 +605,38 @@ def retrieve_memory(
     elif not facts:
         selected = []
     else:
-        lexical = _lexical_scores(search_query, facts)
-        vector_scores: dict[int, float] = {}
+        # The current path and the wider scopes are ranked as separate pools: the
+        # similarity gate, the candidate cut and the rerank cutoff of one pool never
+        # see the other, so enabling a scope cannot drop a path fact.
+        pools = [
+            [item for item in facts if item.scope == "path"],
+            [item for item in facts if item.scope != "path"],
+        ]
+        similarities: dict[int, float] | None = None
         try:
             semantic = backend if backend is not None else get_backend()
             query_vector = _unit(semantic.embed_query(search_query))
             vectors = _vectors(session, facts, semantic, len(query_vector))
-            similarities: dict[int, float] = {}
+            similarities = {}
             for item, vector in zip(facts, vectors, strict=True):
                 if len(vector) != len(query_vector):
                     raise ValueError("embedding dimension mismatch")
                 similarities[item.memory_id] = sum(
                     a * b for a, b in zip(query_vector, vector, strict=True)
                 )
-            top = max(similarities.values(), default=0.0)
-            # Relative gate: when the best match is strong, candidates within a small
-            # margin of it pass too. A uniformly weak set still admits nothing.
-            strong_top = top >= config.relative_similarity_floor
-            for memory_id, similarity in similarities.items():
-                if similarity >= config.min_similarity or (
-                    strong_top and top - similarity <= config.relative_similarity_margin
-                ):
-                    vector_scores[memory_id] = similarity
             result.mode = "hybrid"
         except Exception:
             # Local semantic resources are optional at runtime; never block normal answers.
             semantic = None
-            vector_scores = {}
-        fused: dict[int, float] = {}
-        for scores in (lexical, vector_scores):
-            ranking = sorted(scores, key=lambda mid: (scores[mid], mid), reverse=True)[
-                : config.candidate_k
-            ]
-            for rank, mid in enumerate(ranking, 1):
-                fused[mid] = fused.get(mid, 0.0) + 1.0 / (60 + rank)
-        by_id = {item.memory_id: item for item in facts}
-        ids = sorted(fused, key=lambda mid: (fused[mid], mid), reverse=True)[: config.candidate_k]
-        selected = [replace(by_id[mid], score=fused[mid]) for mid in ids]
-        if semantic is not None and config.rerank and selected:
+            similarities = None
+        ranked = [_fuse(search_query, pool, similarities, config) for pool in pools]
+        if semantic is not None and config.rerank and any(ranked):
             try:
-                scores = [
-                    float(value)
-                    for value in semantic.rerank(search_query, [item.content for item in selected])
-                ]
-                if len(scores) != len(selected) or any(
-                    not math.isfinite(score) or not 0 <= score <= 1 for score in scores
-                ):
-                    raise ValueError("invalid reranker scores")
-                # Cross-encoder sigmoid values are not calibrated probabilities.
-                # Use query-relative ranking, rather than a universal 0.5 threshold.
-                cutoff = max(config.min_rerank_score, max(scores) * config.rerank_relative_cutoff)
-                selected = [
-                    replace(item, score=score)
-                    for item, score in zip(selected, scores, strict=True)
-                    if score >= cutoff
-                ]
-                selected.sort(
-                    key=lambda item: (item.score, fused[item.memory_id], item.memory_id),
-                    reverse=True,
-                )
+                ranked = _rerank(semantic, search_query, ranked, config)
                 result.reranked = True
             except Exception:
                 pass  # The fused ranking remains usable without the optional second stage.
+        selected = [item for pool in ranked for item in pool]
     result.preferences = _revalidate(session, result.preferences, tree_id, source_ids)
     selected = _revalidate(session, selected, tree_id, source_ids)
     # Read the authoritative profile after potentially slow semantic inference.

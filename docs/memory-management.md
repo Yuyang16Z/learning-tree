@@ -108,10 +108,13 @@ Below the retrieval status, **Settings → Memory** offers two switches:
 - **Other learning topics** adds facts from other, non-archived learning trees.
 
 The current learning path is always searched and cannot be turned off. Widened
-facts are ranked together with path facts, but they are rendered after them in
-their own sections, each line labelled with the branch or topic it came from,
-and they share a smaller budget (four entries, 1,200 characters) than the path
-(eight entries, 2,400 characters). They therefore never displace a path fact.
+facts go through the same ranking steps as path facts, but as a separate pool:
+the similarity gate, the candidate cut and the reranker cutoff of each pool are
+computed within that pool. They are rendered after the path facts in their own
+sections, each line labelled with the branch or topic it came from, and they
+share a smaller budget (four entries, 1,200 characters) than the path (eight
+entries, 2,400 characters). Turning a switch on therefore never removes a path
+fact the answer would otherwise have received.
 Each widened hit is rechecked against current records for its own scope before
 it enters the prompt: a sibling whose answer failed, or a topic that was
 archived meanwhile, drops out. Both switches are off by default; changing them
@@ -219,9 +222,10 @@ idempotent; database backups include them, learning-tree exports exclude
 ## 中文说明
 
 - **检索范围**：「设置 → 记忆」新增两个开关：「同主题的其他分支」和「其他学习主题」。
-  当前学习路径始终参与检索，不能关闭。扩大范围后的记忆与路径记忆一起排序，但单独分节渲染、
+  当前学习路径始终参与检索，不能关闭。扩大范围后的记忆与路径记忆经过同样的排序步骤，但作为
+  独立的一组：相似度门槛、候选截断和重排截断都只在各自组内计算；它们单独分节渲染、
   每条标注来源分支或主题，并使用更小的预算（4 条、1,200 字符，路径为 8 条、2,400 字符），
-  因此不会挤掉路径记忆；进入提示前会按各自范围重新核对来源是否仍然有效。两个开关默认关闭，
+  因此打开开关不会让原本能进入回答的路径记忆被挤掉；进入提示前会按各自范围重新核对来源是否仍然有效。两个开关默认关闭，
   保存带版本号，别处同时修改会重新载入最新设置而不是覆盖。
 - **结构化事实**：提炼出的事实带类型标签（定义、适用条件、纠正误解、待解决疑问、学习状态、
   结论）。新事实可以标记为修正某条当前路径上的旧事实，旧事实显示「已更新」并保留可删，
