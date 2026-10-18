@@ -1007,8 +1007,14 @@ class FactTimeline:
 
     A fact counts from its created_at; a superseded fact stops counting once the fact
     that replaced it was created. Hidden facts get a temporary superseded_by of 0, which
-    retrieval and the search index already skip; restore() writes the original values
-    back. Questions must be visited in time order after reset().
+    retrieval skips; restore() writes the original values back. Questions must be
+    visited in time order after reset().
+
+    Every superseded_by write would fire the search index's memory triggers, which find
+    the fact's index row through unindexed columns and so scan the whole index: each
+    pass would cost facts x index rows. Retrieval never reads the index, so the triggers
+    are suspended from construction until restore(), which recreates them once every
+    original value is back; the index then matches the restored rows again.
     """
 
     def __init__(self, engine, facts: list[_Fact]) -> None:
@@ -1037,6 +1043,7 @@ class FactTimeline:
                 events.append((retired, fact.id, superseded))
         self.events = sorted(events, key=lambda event: (event[0], event[1]))
         self.current = dict(self.original)  # What the copy holds right now.
+        self.triggers = self._suspend_index_triggers()
         self.reset()
 
     def reset(self) -> None:
@@ -1059,6 +1066,22 @@ class FactTimeline:
 
     def restore(self) -> None:
         self._write(self.original)
+        if self.triggers:
+            with self.engine.begin() as connection:
+                for statement in self.triggers:
+                    connection.exec_driver_sql(statement)
+            self.triggers = []
+
+    def _suspend_index_triggers(self) -> list[str]:
+        """Drop the copy's search-index triggers on memory rows; return their definitions."""
+        with self.engine.begin() as connection:
+            rows = connection.exec_driver_sql(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type = 'trigger' AND tbl_name = 'memory' AND name GLOB 'search_*'"
+            ).all()
+            for name, _ in rows:
+                connection.exec_driver_sql(f'DROP TRIGGER "{name}"')
+        return [statement for _, statement in rows]
 
     def _write(self, target: dict[int, int | None]) -> None:
         from sqlalchemy import text

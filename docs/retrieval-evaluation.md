@@ -60,7 +60,10 @@ and the web application (`app.main`) is never imported. The copy receives the
 app's additive start-up migration, so a database written by an older version
 can be evaluated while the original stays byte-identical. All writes the
 evaluation needs go to the copy: the retrieval scope switches, temporarily
-hidden facts for the replay below, and, with `--hybrid`, cached vectors.
+hidden facts for the replay below, and, with `--hybrid`, cached vectors. While
+facts are hidden and revealed, the copy's search-index triggers on facts are
+suspended, since each write would otherwise rescan the whole index; retrieval
+does not read the index, and topic search is measured before the replay.
 
 ## What is measured
 

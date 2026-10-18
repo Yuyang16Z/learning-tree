@@ -800,6 +800,59 @@ def test_retrieval_evaluation_workspace_is_private_and_removed():
     assert not directory.exists()
 
 
+def _replay_cost(evaluate, index_padding):
+    """SQLite VM steps of one fact replay on a copy whose search index holds extra rows,
+    and whether the copy's triggers and index are intact afterwards."""
+    from sqlalchemy import event
+
+    from app.search_index import index_count, source_count
+
+    schema = "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name"
+    with evaluate.workspace() as directory:
+        database = directory / "evaluation.db"
+        evaluate.build_synthetic(database)
+        with closing(sqlite3.connect(database)) as connection:
+            # Index rows of messages that do not exist: retrieval never reads the index.
+            connection.executemany(
+                "INSERT INTO search_index (kind, ref_id, tree_id, node_id, content) "
+                "VALUES ('message', ?, 0, 0, 'padding for the full-text index')",
+                [(100000 + index,) for index in range(index_padding)],
+            )
+            connection.commit()
+            triggers = connection.execute(schema).fetchall()
+        engine = evaluate._engine(database)
+        steps = [0]
+
+        def count():
+            steps[0] += 1
+            return 0  # Never interrupt the statement.
+
+        event.listen(engine, "connect", lambda raw, record: raw.set_progress_handler(count, 100))
+        try:
+            snapshot = evaluate.load_snapshot(engine)
+            steps[0] = 0
+            evaluate.measure_retrieval(
+                engine, snapshot, ["path"], 5, evaluate._LexicalOnly(), False
+            )
+            cost = steps[0]
+            with engine.connect() as connection:
+                intact = connection.exec_driver_sql(schema).all() == triggers and (
+                    index_count(connection) == source_count(connection) + index_padding
+                )
+        finally:
+            engine.dispose()
+    return cost, intact
+
+
+def test_retrieval_evaluation_replay_cost_does_not_grow_with_the_search_index():
+    evaluate = load("scripts/evaluate_retrieval.py")
+    small, small_intact = _replay_cost(evaluate, 0)
+    large, large_intact = _replay_cost(evaluate, 3000)
+    assert small_intact and large_intact
+    # Hiding and revealing facts must not rescan the full-text index once per fact.
+    assert large <= small * 1.05
+
+
 def test_retrieval_evaluation_request_estimates_match_the_app(tmp_path):
     evaluate = load("scripts/evaluate_retrieval.py")
     from sqlmodel import Session, create_engine
