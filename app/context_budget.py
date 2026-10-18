@@ -163,6 +163,11 @@ def estimate_request_tokens(
             total += _content_tokens(message.get("content"))
             if message.get("tool_calls"):
                 total += _json_tokens(message["tool_calls"])
+            reasoning = message.get("reasoning_content")
+            if protocol != "anthropic" and isinstance(reasoning, str):
+                # OpenAI-compatible thinking endpoints get their reasoning back on
+                # assistant turns; the Anthropic adapter never sends this field.
+                total += estimate_text_tokens(reasoning)
         if message.get("tool_call_id"):
             total += estimate_text_tokens(message["tool_call_id"]) + 32
     if tools:

@@ -1170,6 +1170,126 @@ def test_openai_malformed_or_truncated_tool_arguments_never_execute(monkeypatch)
     assert not responses
 
 
+REASONING_REJECTION = "The `reasoning_content` in the thinking mode must be passed back to the API."
+
+
+def reasoning_endpoint(bodies, first_round, *, thinking):
+    """Emulate the two OpenAI-compatible message rules around reasoning_content.
+
+    A thinking endpoint (DeepSeek) streams the field and, once a request no longer ends
+    on a user message, rejects it unless every assistant message carries the field (an
+    empty string is accepted). A strict endpoint (OpenAI) never streams it and rejects
+    any message that carries it.
+    """
+
+    def handler(request):
+        body = json.loads(request.content)
+        bodies.append(body)
+        messages = body["messages"]
+        carried = ["reasoning_content" in m for m in messages if m["role"] == "assistant"]
+        if thinking and messages[-1]["role"] != "user" and not all(carried):
+            return httpx.Response(400, json={"error": {"message": REASONING_REJECTION}})
+        if not thinking and any("reasoning_content" in m for m in messages):
+            return httpx.Response(
+                400,
+                json={"error": {"message": "Additional properties are not allowed"}},
+            )
+        if len(bodies) == 1:
+            return openai_stream(first_round)
+        final = [({"role": "assistant", "content": "有依据的答案"}, None), ({}, "stop")]
+        if thinking:
+            final.insert(
+                0, ({"role": "assistant", "content": None, "reasoning_content": "整理"}, None)
+            )
+        return openai_stream(final)
+
+    return handler
+
+
+LOOKUP_CALL = {
+    "index": 0,
+    "id": "call_a",
+    "type": "function",
+    "function": {"name": "mcp_1_lookup", "arguments": '{"q":"A"}'},
+}
+
+
+@pytest.mark.parametrize(
+    "first_round,thinking,echoed",
+    [
+        (
+            [
+                ({"role": "assistant", "content": None, "reasoning_content": "先想想，"}, None),
+                ({"reasoning_content": "需要查资料。"}, None),
+                ({"tool_calls": [LOOKUP_CALL]}, None),
+                ({}, "tool_calls"),
+            ],
+            True,
+            "先想想，需要查资料。",
+        ),
+        # An empty chain of thought still announces the field, as null.
+        (
+            [
+                (
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "reasoning_content": None,
+                        "tool_calls": [LOOKUP_CALL],
+                    },
+                    None,
+                ),
+                ({}, "tool_calls"),
+            ],
+            True,
+            "",
+        ),
+        (
+            [
+                ({"role": "assistant", "content": None, "tool_calls": [LOOKUP_CALL]}, None),
+                ({}, "tool_calls"),
+            ],
+            False,
+            None,
+        ),
+    ],
+    ids=["thinking", "empty-thinking", "strict"],
+)
+def test_openai_tool_rounds_pass_reasoning_content_back_only_to_endpoints_that_send_it(
+    monkeypatch, first_round, thinking, echoed
+):
+    monkeypatch.setattr(llm, "_STREAM_OPTIONS_UNSUPPORTED", set())
+    bodies = []
+    monkeypatch.setattr(
+        llm, "_client", openai_client(reasoning_endpoint(bodies, first_round, thinking=thinking))
+    )
+    spec = LLMSpec("兼容", "https://provider.test/v1", "deepseek-flash", "synthetic-key")
+    history = [
+        {"role": "user", "content": "早先的问题"},
+        {"role": "assistant", "content": "早先的回答"},
+        {"role": "user", "content": "现在的问题"},
+    ]
+    original_history = deepcopy(history)
+    executed = []
+
+    def execute(name, args):
+        executed.append((name, args))
+        return "资料"
+
+    events = list(llm.run_agent(spec, "系统", history, TOOLS, execute))
+    assert executed == [("mcp_1_lookup", {"q": "A"})]
+    assert "".join(e["text"] for e in events if e["type"] == "delta") == "有依据的答案"
+    assert history == original_history and len(bodies) == 2
+    assistants = [m for m in bodies[1]["messages"] if m["role"] == "assistant"]
+    assert [m["content"] for m in assistants] == ["早先的回答", None]
+    if echoed is None:
+        assert not any("reasoning_content" in m for body in bodies for m in body["messages"])
+    else:
+        # The tool-call turn returns its own reasoning; an earlier answer, whose
+        # reasoning is never replayed, carries the field empty.
+        assert [m["reasoning_content"] for m in assistants] == ["", echoed]
+
+
 def test_anthropic_narration_streams_before_tool_start_and_final_text_is_not_rechunked(monkeypatch):
     first = [
         {"type": "text", "text": "我先查一下来源。"},

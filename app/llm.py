@@ -221,11 +221,36 @@ def stream_chat(
 
 
 # ---------- Tool calling: turn-based agent loop ----------
+def _has_reasoning_field(delta) -> bool:
+    """Whether a streamed delta carries reasoning_content, even as an empty string or null."""
+    if getattr(delta, "reasoning_content", None) is not None:
+        return True
+    return "reasoning_content" in (getattr(delta, "model_extra", None) or {})
+
+
+def _with_reasoning_field(convo: list[dict]) -> list[dict]:
+    """Copy the assistant messages that lack reasoning_content, adding it empty.
+
+    Thinking endpoints such as DeepSeek reject a request that continues after a tool
+    result unless every assistant message carries the field. Earlier answers on the
+    path are replayed without their reasoning, which those endpoints accept as an
+    empty string. The caller's message dicts are never modified.
+    """
+    return [
+        {**message, "reasoning_content": ""}
+        if message.get("role") == "assistant" and "reasoning_content" not in message
+        else message
+        for message in convo
+    ]
+
+
 def _openai_turn(spec: LLMSpec, convo: list[dict], tools: list[dict]):
     """Stream one tool-capable turn: yield (kind, text) chunks, then return the result dict.
 
     Tool-call fragments are grouped by index and their argument pieces concatenated;
     the JSON is parsed only after the stream ends, so partial calls never execute.
+    When the endpoint sends reasoning_content at all, the result carries it under that
+    key so the tool loop can pass it back on the assistant message.
     """
     stream = _stream_completion(
         spec,
@@ -237,6 +262,7 @@ def _openai_turn(spec: LLMSpec, convo: list[dict], tools: list[dict]):
     finish, usage = None, None
     text: list[str] = []
     reasoning: list[str] = []
+    reasoning_field = False
     calls: dict[int, dict] = {}
     try:
         for chunk in stream:
@@ -250,6 +276,7 @@ def _openai_turn(spec: LLMSpec, convo: list[dict], tools: list[dict]):
             delta = choice.delta
             if delta is None:
                 continue
+            reasoning_field = reasoning_field or _has_reasoning_field(delta)
             piece = getattr(delta, "reasoning_content", None)
             if piece:
                 reasoning.append(piece)
@@ -282,12 +309,16 @@ def _openai_turn(spec: LLMSpec, convo: list[dict], tools: list[dict]):
         tool_calls.append(
             {"id": slot["id"] or f"call_{index}", "name": slot["name"] or "", "args": args}
         )
-    return {
+    result = {
         "content": "".join(text) or None,
         "tool_calls": tool_calls,
         "reasoning": "".join(reasoning),
         "usage": usage,
     }
+    if reasoning_field:
+        # Only endpoints that sent the field get it back; strict ones reject unknown keys.
+        result["reasoning_content"] = result["reasoning"]
+    return result
 
 
 def _relay_turn(turn, deep: bool):
@@ -385,6 +416,10 @@ def run_agent(
     run that long, or its tool results reach that many estimated tokens, the next round
     is the final no-tool round. They are checked between rounds, so a call in progress
     is never interrupted; diagnostics["tool_budget_stop"] names the budget that stopped.
+    Once an OpenAI-compatible endpoint streams reasoning_content (thinking models such
+    as DeepSeek's), each tool-call message passes its reasoning back and every other
+    assistant message in later requests carries the field empty, as those endpoints
+    require after a tool result; endpoints that never send the field never receive it.
     """
     if _is_mock(spec):
         # A demo must never launch a real process or invoke a selected external tool.
@@ -401,6 +436,7 @@ def run_agent(
     started = time.monotonic()
     tool_tokens = 0
     budget_stop: str | None = None
+    reasoning_endpoint = False
     for round_index in range(max_rounds + 1):
         final = round_index == max_rounds or budget_stop is not None
         current_tools = [] if final else tool_catalog.definitions if tool_catalog else tool_defs
@@ -441,6 +477,9 @@ def run_agent(
             if diagnostics is not None:
                 diagnostics["tool_rounds"] = diagnostics.get("tool_rounds", 0) + 1
             available = {tool["function"]["name"] for tool in current_tools}
+            if r.get("reasoning_content") is not None and not reasoning_endpoint:
+                reasoning_endpoint = True
+                convo = _with_reasoning_field(convo)
             convo.append(
                 {
                     "role": "assistant",
@@ -448,6 +487,11 @@ def run_agent(
                     **(
                         {"_anthropic_content": r["_anthropic_content"]}
                         if "_anthropic_content" in r
+                        else {}
+                    ),
+                    **(
+                        {"reasoning_content": r.get("reasoning_content") or ""}
+                        if reasoning_endpoint
                         else {}
                     ),
                     "tool_calls": [

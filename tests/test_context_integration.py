@@ -1136,3 +1136,95 @@ def test_demo_mode_never_registers_history_search(api, monkeypatch):
     events = ask(client, config_id=2)
     assert events[-1]["done"], events
     assert not calls["agent"] and len(calls["stream"]) == 1 and calls["discover"] == [[]]
+
+
+def test_thinking_endpoint_completes_a_real_history_search_round(api, monkeypatch):
+    """A DeepSeek-style thinking endpoint, through the route and the real tool loop.
+
+    Widened recall offers search_learning_history. Once a request ends on a tool result,
+    the endpoint rejects it unless every assistant message carries reasoning_content,
+    including the ancestor's earlier answer on the path.
+    """
+    import httpx
+    from openai import OpenAI
+
+    import app.llm as llm
+
+    client, engine, calls = api
+    with Session(engine) as session:
+        session.add(RetrievalSettings(include_siblings=True))
+        session.commit()
+    bodies = []
+
+    def frame(delta, finish=None):
+        chunk = {
+            "id": "chat_test",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "synthetic",
+            "choices": [{"index": 0, "finish_reason": finish, "delta": delta}],
+        }
+        return "data: " + json.dumps(chunk) + "\n\n"
+
+    def handler(request):
+        body = json.loads(request.content)
+        bodies.append(body)
+        messages = body["messages"]
+        assistants = [m for m in messages if m["role"] == "assistant"]
+        if messages[-1]["role"] != "user" and any("reasoning_content" not in m for m in assistants):
+            message = "The `reasoning_content` in the thinking mode must be passed back to the API."
+            return httpx.Response(400, json={"error": {"message": message}})
+        if len(bodies) == 1:
+            call = {
+                "index": 0,
+                "id": "call_history",
+                "type": "function",
+                "function": {
+                    "name": HISTORY_TOOL_NAME,
+                    "arguments": json.dumps({"query": "许可", "scope": "path"}),
+                },
+            }
+            frames = [
+                frame({"role": "assistant", "content": None, "reasoning_content": "先回查。"}),
+                frame({"tool_calls": [call]}),
+                frame({}, "tool_calls"),
+            ]
+        else:
+            frames = [
+                frame({"role": "assistant", "content": None, "reasoning_content": "整理。"}),
+                frame({"content": "需要明确许可。"}),
+                frame({}, "stop"),
+            ]
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content="".join(frames) + "data: [DONE]\n\n",
+        )
+
+    monkeypatch.setattr(llm, "_STREAM_OPTIONS_UNSUPPORTED", set())
+    monkeypatch.setattr(
+        llm,
+        "_client",
+        lambda spec: OpenAI(
+            base_url=spec.base_url,
+            api_key=spec.api_key,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+            max_retries=0,
+        ),
+    )
+    monkeypatch.setattr(nodes, "run_agent", llm.run_agent)
+    events = ask(client)
+    assert events[-1].get("done") is True, events[-1]
+    assert "".join(event.get("delta", "") for event in events) == "需要明确许可。"
+    assert len(bodies) == 2 and not calls["agent"]
+    assert [tool["function"]["name"] for tool in bodies[0]["tools"]][0] == HISTORY_TOOL_NAME
+    replayed = [m for m in bodies[1]["messages"] if m["role"] == "assistant"]
+    assert [(m["content"], m["reasoning_content"]) for m in replayed] == [
+        ("只有获得明确许可才执行。", ""),
+        (None, "先回查。"),
+    ]
+    with Session(engine) as session:
+        answer = session.exec(
+            select(Message).where(Message.node_id == 2, Message.role == "assistant")
+        ).one()
+        assert answer.status == "complete" and answer.content == "需要明确许可。"

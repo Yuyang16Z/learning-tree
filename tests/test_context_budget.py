@@ -484,6 +484,25 @@ def test_anthropic_native_blocks_are_not_double_counted_with_mirrored_fields():
     assert estimate_request_tokens("系统", messages, protocol="openai") > original_count
 
 
+def test_reasoning_content_is_counted_where_it_is_sent():
+    messages = [{"role": "user", "content": "查询"}, *tool_group(size=20)]
+    reasoning = "先确认来源，再比较两个条件。" * 800
+    echoed = copy.deepcopy(messages)
+    echoed[1]["reasoning_content"] = reasoning
+    # OpenAI-compatible thinking endpoints receive the field back on assistant turns.
+    assert estimate_request_tokens("系统", echoed) == estimate_request_tokens(
+        "系统", messages
+    ) + estimate_text_tokens(reasoning)
+    # The Anthropic adapter never sends it, so it costs nothing there.
+    assert estimate_request_tokens("系统", echoed, protocol="anthropic") == (
+        estimate_request_tokens("系统", messages, protocol="anthropic")
+    )
+    policy = ContextPolicy(8192, 1024)
+    assert estimate_text_tokens(reasoning) > policy.input_budget
+    with pytest.raises(ContextBudgetExceeded):
+        fit_request("系统", echoed, policy=policy)
+
+
 def test_no_input_capacity_returns_actionable_budget_error():
     with pytest.raises(ContextBudgetExceeded) as caught:
         fit_request(
