@@ -3,6 +3,9 @@
 Used only when a provider lists no context length for a model. Values are
 published vendor limits at the time of writing and are marked approximate to
 the user; the validated form keeps the final decision with the user.
+
+The app treats a window as input plus the answer reserve, so where a vendor
+caps input below its advertised total window, the input cap is listed.
 """
 
 from __future__ import annotations
@@ -16,7 +19,9 @@ _PATTERNS: tuple[tuple[str, int], ...] = (
     (r"deepseek-(?:chat|reasoner)", 131_072),
     (r"gpt-4\.1", 1_047_576),
     (r"gpt-4o", 128_000),
-    (r"gpt-5", 400_000),
+    # 400,000 is gpt-5's total including up to 128,000 output; input stops at 272,000.
+    (r"gpt-5(?:\.\d+)?-chat", 128_000),
+    (r"gpt-5", 272_000),
     (r"o[34](?:-|$)", 200_000),
     (r"qwen", 131_072),
     (r"kimi-k2", 262_144),

@@ -34,7 +34,14 @@ from app.models import ModelConfig
         ("anthropic/claude-sonnet-4-6", 1_000_000),
         ("gpt-4.1-mini", 1_047_576),
         ("gpt-4o-mini", 128_000),
-        ("gpt-5", 400_000),
+        # OpenAI lists gpt-5 at 400,000 including up to 128,000 of output; its input
+        # stops at 272,000, which is what this app's window minus reserve must not pass.
+        ("gpt-5", 272_000),
+        ("gpt-5-mini", 272_000),
+        ("gpt-5.1", 272_000),
+        ("gpt-5-chat-latest", 128_000),
+        ("gpt-5.1-chat-latest", 128_000),
+        ("openai/gpt-5-chat", 128_000),
         ("o3", 200_000),
         ("o4-mini", 200_000),
         ("qwen3-235b-a22b", 131_072),
