@@ -672,7 +672,8 @@ def _structured_fact(item) -> dict | None:
     fact_type = item.get("type")
     terms = item.get("terms")
     supersedes = item.get("supersedes")
-    if isinstance(supersedes, str) and supersedes.isdigit():
+    # isdecimal, not isdigit: superscript and circled digits are digits int() rejects.
+    if isinstance(supersedes, str) and supersedes.isdecimal():
         supersedes = int(supersedes)
     return {
         "text": text.strip(),
@@ -726,7 +727,10 @@ def extract_memories(
         preferences, facts = data.get("preferences", []), data.get("facts", [])
         parsed_facts = []
         for item in facts if isinstance(facts, list) else []:
-            fact = item.strip() if isinstance(item, str) else _structured_fact(item)
+            try:
+                fact = item.strip() if isinstance(item, str) else _structured_fact(item)
+            except (TypeError, ValueError):
+                continue  # One malformed item must not discard the rest of the turn.
             if fact:
                 parsed_facts.append(fact)
         return {
