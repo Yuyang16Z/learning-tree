@@ -3,6 +3,7 @@ import { api } from "../api";
 import { useI18n } from "../i18n";
 import { localizeError } from "../i18n/workspace";
 import { copyText } from "../lib/clipboard";
+import { pairingLink } from "../lib/phonePairing";
 import { qrMatrix } from "../lib/qrCode";
 import type { PhoneAccess } from "../types";
 import "./PhoneAccessPanel.css";
@@ -37,6 +38,29 @@ function CopyAction({ text, label }: { text: string; label: string }) {
     return () => window.clearTimeout(timer);
   }, [copied]);
   return <button className="btn" onClick={() => void copyText(text).then(() => setCopied(true), () => {})}>{copied ? t("已复制", "Copied") : label}</button>;
+}
+
+/**
+ * Pair a device that opens this app at another address: an ALLOWED_HOSTS name behind a
+ * reverse proxy, the host running Docker, or Tailscale Serve in front of a container.
+ */
+function OtherAddress({ token, hosts }: { token: string; hosts: string[] }) {
+  const { t } = useI18n();
+  const [address, setAddress] = useState(() => (hosts.length ? `https://${hosts[0]}` : ""));
+  const [open] = useState(hosts.length > 0);
+  const result = pairingLink(address, token, hosts);
+  return <details className="phone-other" open={open}>
+    <summary>{t("用其他地址打开", "Open at another address")}</summary>
+    <p className="phone-muted">{t("如果其他设备通过 ALLOWED_HOSTS 里的主机名、反向代理或运行 Docker 的主机打开学习树，请填写它们使用的地址；在每台设备上打开一次下面的二维码或配对链接即可。提问需要 HTTPS 地址。", "If other devices open LearningTree under a name in ALLOWED_HOSTS, through a reverse proxy or on the host running Docker, enter the address they use, then open the QR code or pairing link below once on each device. Asking questions needs an HTTPS address.")}</p>
+    <input type="url" inputMode="url" value={address} placeholder="https://learning.example" aria-label={t("其他设备使用的地址", "Address your other devices use")} spellCheck={false} autoComplete="off" onChange={event => setAddress(event.target.value)} />
+    {result && "problem" in result && <p className="test-bad">{result.problem === "host"
+      ? t("服务器不接受这个主机名：请把它加入 ALLOWED_HOSTS，重启学习树后再试。", "The server does not accept this host name. Add it to ALLOWED_HOSTS and restart LearningTree.")
+      : t("请填写 http(s) 地址，例如 https://learning.example。", "Enter an http(s) address such as https://learning.example.")}</p>}
+    {result && "link" in result && <div className="phone-ready">
+      <QrCode value={result.link} label={t("用其他设备扫码配对", "Scan to pair another device")} fallback={<p className="phone-muted">{t("链接太长，无法生成二维码；请用「复制配对链接」。", "The link is too long for a QR code; use Copy pairing link.")}</p>} />
+      <div className="phone-actions"><CopyAction text={result.link} label={t("复制配对链接", "Copy pairing link")} /></div>
+    </div>}
+  </details>;
 }
 
 /** Open this workspace on a phone through the Mac's private Tailscale address. */
@@ -99,11 +123,8 @@ export function PhoneAccessPanel() {
           <p className="phone-muted">{t("二维码里带有这台电脑的访问令牌：手机扫码打开一次即完成配对，之后直接打开上面的地址即可。只发给你自己的设备。", "The QR code carries this computer's access token: opening it once pairs the phone, which can then open the address above. Share it only with your own devices.")}</p>
           <div className="phone-actions">
             <CopyAction text={access.access_url} label={t("复制配对链接", "Copy pairing link")} />
-            <button className="btn" onClick={() => void rotate()} disabled={rotating}>{rotating ? t("更换中…", "Replacing…") : t("更换访问令牌", "Replace access token")}</button>
           </div>
         </>}
-        {access.access_error && <p className="test-bad" role="alert">{localizeError(access.access_error, locale)}</p>}
-        {rotation && <p className={rotation.ok ? "phone-muted" : "test-bad"} role={rotation.ok ? "status" : "alert"}>{localizeError(rotation.message, locale)}</p>}
         <p className="phone-muted">{privacy}</p>
       </div>
     </div>}
@@ -111,6 +132,12 @@ export function PhoneAccessPanel() {
       <p><strong>{t("这个学习空间已通过 Tailscale Funnel 公开到互联网。", "This workspace is public on the internet through Tailscale Funnel.")}</strong> {t("学习树只用一个访问令牌保护，并非为公网设计：令牌一旦泄露，任何人都能读取你的记录、修改模型设置，甚至通过 MCP 在这台电脑上运行程序。请立即运行：", "LearningTree is protected only by an access token and is not built for the internet: anyone who obtains it can read your records, change model settings or run programs on this computer through MCP. Run this now:")}</p>
       <CopyLine text={access.command} label={t("复制命令", "Copy command")} />
     </div>}
-    <div>{recheck}</div>
+    {access?.pairing_token && <OtherAddress token={access.pairing_token} hosts={access.pairing_hosts ?? []} />}
+    {access?.access_error && <p className="test-bad" role="alert">{localizeError(access.access_error, locale)}</p>}
+    {rotation && <p className={rotation.ok ? "phone-muted" : "test-bad"} role={rotation.ok ? "status" : "alert"}>{localizeError(rotation.message, locale)}</p>}
+    <div className="phone-actions">
+      {recheck}
+      {access?.can_rotate && <button className="btn" onClick={() => void rotate()} disabled={rotating}>{rotating ? t("更换中…", "Replacing…") : t("更换访问令牌", "Replace access token")}</button>}
+    </div>
   </div>;
 }

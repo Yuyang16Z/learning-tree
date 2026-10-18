@@ -3,13 +3,14 @@ a phone the access token through the QR link and keeps it in a strict cookie."""
 
 import shlex
 import stat
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
 from app import access_token, phone_access
-from app.config import settings
+from app.config import Settings, settings
 
 HOST = "study-mac.tail1a2b3c.ts.net"
 SERVED = {
@@ -150,7 +151,8 @@ def test_token_is_not_written_through_a_symlinked_runtime_directory(tmp_path, mo
     assert list(real.iterdir()) == []
 
 
-def test_settings_on_this_computer_get_the_pairing_link(required):
+def test_settings_on_this_computer_get_the_pairing_link(required, monkeypatch):
+    monkeypatch.setattr(settings, "allowed_hosts", " Learning.Example,localhost,learning.example")
     body = TestClient(main.app, base_url=LOCAL).get("/api/phone-access").json()
     token = access_token.current_token()
     assert token is not None
@@ -158,24 +160,57 @@ def test_settings_on_this_computer_get_the_pairing_link(required):
         "state": "ready",
         "url": f"https://{HOST}",
         "access_url": f"https://{HOST}/#token={token}",
+        "can_rotate": True,
+        "pairing_token": token,
+        "pairing_hosts": ["learning.example"],
     }
 
 
-def test_other_devices_and_unready_states_never_see_or_create_the_token(required, monkeypatch):
+def test_other_devices_never_see_or_create_the_token(required):
     token = access_token.ensure_token()
     phone = TestClient(main.app, base_url=f"https://{HOST}", cookies={COOKIE: token})
     assert phone.get("/api/phone-access").json() == {"state": "ready", "url": f"https://{HOST}"}
     proxied = TestClient(main.app, base_url=LOCAL, cookies={COOKIE: token})
     body = proxied.get("/api/phone-access", headers={"x-forwarded-for": "100.64.0.9"}).json()
-    assert "access_url" not in body
+    assert body == {"state": "ready", "url": f"https://{HOST}"}
     access_token.TOKEN_PATH.unlink()
-    monkeypatch.setattr(
-        phone_access,
-        "phone_access",
-        lambda port: {"state": "not_served", "host": HOST, "command": "tailscale serve --bg 8099"},
+    assert phone.get("/api/phone-access").status_code == 401
+    assert (
+        proxied.get("/api/phone-access", headers={"x-forwarded-for": "100.64.0.9"}).status_code
+        == 401
     )
+    assert access_token.current_token() is None
+
+
+@pytest.mark.parametrize(
+    "access",
+    [
+        {"state": "not_installed"},
+        {"state": "offline"},
+        {"state": "not_served", "host": HOST, "command": "tailscale serve --bg 8099"},
+    ],
+)
+def test_this_computer_gets_the_token_in_every_tailscale_state(required, monkeypatch, access):
+    # ALLOWED_HOSTS names, reverse proxies and Docker need no Tailscale address to pair.
+    monkeypatch.setattr(settings, "allowed_hosts", "learning.example")
+    monkeypatch.setattr(phone_access, "phone_access", lambda port: dict(access))
     body = TestClient(main.app, base_url=LOCAL).get("/api/phone-access").json()
-    assert "access_url" not in body and access_token.current_token() is None
+    token = access_token.current_token()
+    assert token is not None
+    assert body == {
+        **access,
+        "can_rotate": True,
+        "pairing_token": token,
+        "pairing_hosts": ["learning.example"],
+    }
+
+
+def test_a_public_funnel_offers_replacement_but_no_pairing(required, monkeypatch):
+    public = {"state": "public", "url": f"https://{HOST}", "command": "tailscale funnel reset"}
+    monkeypatch.setattr(phone_access, "phone_access", lambda port: dict(public))
+    body = TestClient(main.app, base_url=LOCAL).get("/api/phone-access").json()
+    assert body == {**public, "can_rotate": True}
+    assert access_token.current_token() is not None
 
 
 def test_token_mode_off_keeps_the_plain_address(required, monkeypatch):
@@ -261,3 +296,54 @@ def test_only_this_computer_can_rotate_the_token(required):
     new = access_token.current_token()
     assert new != old and rotated["access_url"] == f"https://{HOST}/#token={new}"
     assert phone.get("/api/phone-access").status_code == 401  # The phone must scan again.
+
+
+def test_without_tailscale_this_computer_still_creates_a_token_other_hosts_pair_with(
+    required, monkeypatch
+):
+    # ALLOWED_HOSTS and Docker setups have no Tailscale address on this machine.
+    monkeypatch.setattr(settings, "allowed_hosts", "learning.example")
+    monkeypatch.setattr(phone_access, "phone_access", lambda port: {"state": "not_installed"})
+    TestClient(main.app, base_url=LOCAL).get("/api/phone-access")
+    token = access_token.current_token()
+    assert token is not None, "opening the panel on this computer creates the token"
+    other = TestClient(main.app, base_url="https://learning.example")
+    assert other.get("/api/phone-access").status_code == 401
+    paired = other.post(
+        "/api/phone-access/session",
+        json={"token": token},
+        headers={"origin": "https://learning.example"},
+    )
+    assert paired.status_code == 200
+    assert other.get("/api/phone-access").json() == {"state": "not_installed"}
+
+
+def test_the_token_file_follows_access_token_file(monkeypatch, tmp_path):
+    root = access_token.PROJECT_ROOT
+    monkeypatch.delenv("ACCESS_TOKEN_FILE", raising=False)
+    default = Settings(_env_file=None).access_token_file
+    assert access_token.token_path(default) == root / ".runtime" / "phone-access-token"
+    monkeypatch.setenv("ACCESS_TOKEN_FILE", str(tmp_path / "data" / "phone-access-token"))
+    configured = Settings(_env_file=None).access_token_file
+    assert access_token.token_path(configured) == tmp_path / "data" / "phone-access-token"
+    # Relative paths start at the project root, whatever the working directory.
+    monkeypatch.chdir(tmp_path)
+    assert access_token.token_path("state/token") == root / "state" / "token"
+    assert access_token.token_path("  ") == root / ".runtime" / "phone-access-token"
+
+
+def test_a_configured_directory_keeps_its_permissions(monkeypatch, tmp_path):
+    volume = tmp_path / "data"
+    volume.mkdir(mode=0o755)
+    volume.chmod(0o755)
+    monkeypatch.setattr(access_token, "TOKEN_PATH", volume / "phone-access-token")
+    access_token.ensure_token()
+    assert stat.S_IMODE(volume.stat().st_mode) == 0o755
+    assert stat.S_IMODE(access_token.TOKEN_PATH.stat().st_mode) == 0o600
+
+
+def test_the_docker_image_keeps_the_token_in_its_data_volume():
+    dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text()
+    # /app belongs to root in the image; the non-root app user can write only /data.
+    assert "ACCESS_TOKEN_FILE=/data/phone-access-token" in dockerfile
+    assert 'VOLUME ["/data"]' in dockerfile and "chown app /data" in dockerfile

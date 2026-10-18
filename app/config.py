@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     # "required": requests that do not come from this computer (a non-loopback Host or a
     # proxy) must carry the phone-access cookie. "off" disables that check entirely.
     access_token_mode: Literal["required", "off"] = "required"
+    # Where that token is kept; a relative path starts at the project root. The Docker
+    # image keeps it in the /data volume beside the database.
+    access_token_file: str = ".runtime/phone-access-token"
     memory_retrieval_mode: Literal["hybrid", "lexical"] = "hybrid"
     # Share of the input budget at which older history is compacted; the hard
     # budget still bounds every request. CONTEXT_COMPACTION_RATIO in .env.

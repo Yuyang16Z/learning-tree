@@ -80,7 +80,7 @@ uv run --inexact python desktop/macos/build.py --install
 docker compose up --build
 ```
 
-打开 **http://127.0.0.1:8099**。对话、文档和设置保存在 `learning-tree-data` 卷里（`/data/learning_tree.db`）；镜像只包含源码和锁定的依赖，以非 root 用户运行，不包含 MCP 预设和可选的语义模型。需要用其他主机名访问时设置 `ALLOWED_HOSTS`（见 [SECURITY.md](SECURITY.md)）。CI 会构建镜像，并用 mock 模型对容器运行 `scripts/docker_smoke.py`。
+打开 **http://127.0.0.1:8099**。对话、文档和设置保存在 `learning-tree-data` 卷里（`/data/learning_tree.db`）；镜像只包含源码和锁定的依赖，以非 root 用户运行，不包含 MCP 预设和可选的语义模型。需要用其他主机名访问时设置 `ALLOWED_HOSTS`（见 [SECURITY.md](SECURITY.md)）；用这个主机名的设备需要配对一次：在运行 Docker 的电脑上打开 http://127.0.0.1:8099 的「设置 → 手机访问」，在「用其他地址打开」里填写设备使用的地址，再用每台设备扫描二维码或打开配对链接。访问令牌保存在卷里（`/data/phone-access-token`），升级镜像后配对仍然有效；只在完全由你控制的私有网络里，才可以改用 `ACCESS_TOKEN_MODE=off` 关闭这项检查。CI 会构建镜像，并用 mock 模型对容器运行 `scripts/docker_smoke.py`。
 
 ### 可选：语义记忆检索
 

@@ -76,8 +76,9 @@ def host_allowed(host_header: str) -> bool:
     A DNS-rebinding page reaches this server under its own domain, so its Host header
     gives it away even though the request arrives on 127.0.0.1."""
     name = _hostname(host_header)
-    extra = {h.strip().lower() for h in settings.allowed_hosts.split(",") if h.strip()}
-    return name in _LOCAL_HOSTNAMES or name.endswith(".ts.net") or name in extra
+    return (
+        name in _LOCAL_HOSTNAMES or name.endswith(".ts.net") or name in access_token.extra_hosts()
+    )
 
 
 def origin_allowed(origin: str, host_header: str) -> bool:

@@ -80,7 +80,7 @@ Build and run the app in a container, publishing the port on loopback only (the 
 docker compose up --build
 ```
 
-Open **http://127.0.0.1:8099**. Chats, documents and settings live in the `learning-tree-data` volume (`/data/learning_tree.db`); the image contains only source code and locked dependencies and runs as a non-root user. MCP presets and optional semantic models are not installed in the image. To reach the container under another host name, set `ALLOWED_HOSTS` (see [SECURITY.md](SECURITY.md)). CI builds the image and runs `scripts/docker_smoke.py` against it with the mock model.
+Open **http://127.0.0.1:8099**. Chats, documents and settings live in the `learning-tree-data` volume (`/data/learning_tree.db`); the image contains only source code and locked dependencies and runs as a non-root user. MCP presets and optional semantic models are not installed in the image. To reach the container under another host name, set `ALLOWED_HOSTS` (see [SECURITY.md](SECURITY.md)); devices that use it pair once: open **Settings → Phone access** at http://127.0.0.1:8099 on the Docker host, enter their address under **Open at another address**, then scan the QR code or open the pairing link on each device. The token stays in the volume (`/data/phone-access-token`), so pairings survive image upgrades; on a private network you fully control, `ACCESS_TOKEN_MODE=off` turns the check off instead. CI builds the image and runs `scripts/docker_smoke.py` against it with the mock model.
 
 ### Optional semantic memory
 

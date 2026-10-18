@@ -153,7 +153,7 @@ const diagnostics: [string, string][] = [
   ["配对尝试过多，请稍后再试。", "Too many pairing attempts. Try again later."],
   ["本机访问无需配对。", "Access from this computer needs no pairing."],
   ["只能在这台电脑上更换访问令牌。", "The access token can only be replaced on this computer."],
-  ["无法保存手机访问令牌，请检查 .runtime 目录的权限。", "Could not save the phone access token. Check the permissions of the .runtime folder."],
+  ["无法保存手机访问令牌，请检查令牌文件所在目录的权限。", "Could not save the phone access token. Check the permissions of the folder that holds it."],
 ];
 const managedNames: Record<string, [string, string]> = {
   "web-research": ["联网搜索", "Web search"],

@@ -19,6 +19,29 @@ export function fragmentToken(hash: string): string | null {
   return value && /^[A-Za-z0-9_-]{32,200}$/.test(value) ? value : null;
 }
 
+export type PairingLink = { link: string } | { problem: "address" | "host" };
+
+/**
+ * The pairing link for another address of this app, "<origin>/#token=…", or why there is
+ * none. Only an http(s) address without credentials whose host the server accepts (a
+ * Tailscale name or an ALLOWED_HOSTS entry) qualifies: any other host either refuses the
+ * request or is someone else's page, which could read the fragment. Blank gives null.
+ */
+export function pairingLink(address: string, token: string, hosts: readonly string[]): PairingLink | null {
+  const text = address.trim();
+  if (!text) return null;
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    return { problem: "address" };
+  }
+  if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password) return { problem: "address" };
+  const host = url.hostname.toLowerCase();
+  if (!host.endsWith(".ts.net") && !hosts.includes(host)) return { problem: "host" };
+  return { link: `${url.origin}/#token=${token}` };
+}
+
 /** Pair this browser from a "#token=…" link, removing the token from the address first. */
 export async function pairFromFragment(page: PairingPage): Promise<PairingResult> {
   if (!/(?:^#|&)token=/.test(page.location.hash)) return "none";

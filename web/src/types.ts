@@ -170,6 +170,12 @@ export interface PhoneAccess {
   access_url?: string;
   /** Fixed message when the token cannot be stored. */
   access_error?: string;
+  /** This computer manages the token (ACCESS_TOKEN_MODE=required), in any state. */
+  can_rotate?: boolean;
+  /** For pairing links to other addresses; this computer only, never while public. */
+  pairing_token?: string;
+  /** ALLOWED_HOSTS names, the only other hosts such a link may use besides *.ts.net. */
+  pairing_hosts?: string[];
 }
 export interface MemoryRetrievalStatus {
   state: 'ready' | 'preparing' | 'degraded' | 'disabled' | 'not_installed';

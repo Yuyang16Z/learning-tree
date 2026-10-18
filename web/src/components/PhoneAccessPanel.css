@@ -11,3 +11,6 @@
 .phone-qr { width: 180px; height: 180px; flex: none; border-radius: 8px; border: 1px solid var(--border); }
 .phone-danger { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--danger); border-radius: 8px; color: var(--danger); }
 .phone-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.phone-other summary { cursor: pointer; }
+.phone-other > * + * { margin-top: 8px; }
+.phone-other input { display: block; width: 100%; box-sizing: border-box; }

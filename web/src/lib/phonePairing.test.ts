@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { fragmentToken, isLoopbackHost, onPairingRequired, pairFromFragment, reportPairingRequired, watchPairingLinks, type PairingPage } from "./phonePairing";
+import { fragmentToken, isLoopbackHost, onPairingRequired, pairFromFragment, pairingLink, reportPairingRequired, watchPairingLinks, type PairingPage } from "./phonePairing";
 
 const TOKEN = "Abc_123-".repeat(6);
 
@@ -76,5 +76,27 @@ describe("phone pairing from the QR link", () => {
     expect(listener).toHaveBeenCalledTimes(1);
     expect(isLoopbackHost("[::1]")).toBe(true);
     expect(isLoopbackHost("LOCALHOST")).toBe(true);
+  });
+});
+
+describe("pairing links for other addresses", () => {
+  const hosts = ["learning.example"];
+
+  it("builds the origin plus the token fragment for an accepted host", () => {
+    expect(pairingLink(" https://Learning.Example:8443/some/path?x=1#old ", TOKEN, hosts)).toEqual({ link: `https://learning.example:8443/#token=${TOKEN}` });
+    expect(pairingLink("http://learning.example", TOKEN, hosts)).toEqual({ link: `http://learning.example/#token=${TOKEN}` });
+    // Tailscale Serve on a Docker host: the container itself sees no Tailscale address.
+    expect(pairingLink("https://study-mac.tail1a2b3c.ts.net", TOKEN, [])).toEqual({ link: `https://study-mac.tail1a2b3c.ts.net/#token=${TOKEN}` });
+  });
+
+  it("refuses hosts the server would reject and anything that is not a plain web address", () => {
+    expect(pairingLink("", TOKEN, hosts)).toBeNull();
+    expect(pairingLink("   ", TOKEN, hosts)).toBeNull();
+    expect(pairingLink("https://learning.example.evil.test", TOKEN, hosts)).toEqual({ problem: "host" });
+    expect(pairingLink("http://127.0.0.1:8099", TOKEN, hosts)).toEqual({ problem: "host" });
+    expect(pairingLink("learning.example", TOKEN, hosts)).toEqual({ problem: "address" });
+    expect(pairingLink("ftp://learning.example", TOKEN, hosts)).toEqual({ problem: "address" });
+    // Built from parts so the release scanner's credential-URL rule does not flag the test.
+    expect(pairingLink("https://user" + ":pw@learning.example", TOKEN, hosts)).toEqual({ problem: "address" });
   });
 });

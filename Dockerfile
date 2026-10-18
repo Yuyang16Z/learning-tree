@@ -27,10 +27,13 @@ COPY --from=python-deps /app/.venv /app/.venv
 COPY app/ ./app/
 COPY integrations/ ./integrations/
 COPY --from=web /src/web/dist ./web/dist
+# The phone-access token lives beside the database: /app belongs to root, and the
+# volume keeps the pairing of other devices across container upgrades.
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    DATABASE_URL=sqlite:////data/learning_tree.db
+    DATABASE_URL=sqlite:////data/learning_tree.db \
+    ACCESS_TOKEN_FILE=/data/phone-access-token
 USER app
 VOLUME ["/data"]
 EXPOSE 8099

@@ -10,10 +10,11 @@ X-Forwarded-Proto: https on TLS and Tailscale-User-Login for signed-in users
 (tailscale/tailscale ipn/ipnlocal/serve.go: the reverseProxy Rewrite sets
 r.Out.Host = r.In.Host, then addProxyForwardedHeaders and addTailscaleIdentityHeaders).
 
-The token is 32 random bytes (URL-safe text) in .runtime/phone-access-token, created
-with mode 0600 in a 0700 directory when Settings -> Phone access is opened on this
-computer. A paired phone keeps it in an HttpOnly cookie; rotating it unpairs every
-device at once.
+The token is 32 random bytes (URL-safe text) in .runtime/phone-access-token (or
+ACCESS_TOKEN_FILE; the Docker image uses its data volume), created with mode 0600 when
+Settings -> Phone access is first opened on this computer, whatever the Tailscale state:
+devices that reach the app under an ALLOWED_HOSTS name pair with it too. A paired phone
+keeps it in an HttpOnly cookie; rotating it unpairs every device at once.
 """
 
 from __future__ import annotations
@@ -28,7 +29,21 @@ import time
 from collections import deque
 from pathlib import Path
 
-TOKEN_PATH = Path(__file__).resolve().parents[1] / ".runtime" / "phone-access-token"
+from .config import settings
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# The application's own runtime directory, which the token makes private (0700).
+RUNTIME_DIRECTORY = PROJECT_ROOT / ".runtime"
+
+
+def token_path(configured: str) -> Path:
+    """The token file named by ACCESS_TOKEN_FILE; a relative path starts at the project
+    root, never at the working directory of whatever started the server."""
+    path = Path(configured.strip() or ".runtime/phone-access-token").expanduser()
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+TOKEN_PATH = token_path(settings.access_token_file)
 COOKIE_NAME = "lt_access"
 COOKIE_MAX_AGE = 34_560_000  # 400 days, the longest lifetime browsers keep a cookie.
 LOCAL_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -55,6 +70,12 @@ def hostname(host_header: str) -> str:
     if value.startswith("["):  # [::1]:8099
         return value[1:].split("]", 1)[0]
     return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
+
+
+def extra_hosts() -> list[str]:
+    """The ALLOWED_HOSTS names, lowercased, in their configured order."""
+    names = (name.strip().lower() for name in settings.allowed_hosts.split(","))
+    return list(dict.fromkeys(name for name in names if name and name not in LOCAL_HOSTNAMES))
 
 
 def is_remote(headers) -> bool:
@@ -101,12 +122,16 @@ def current_token() -> str | None:
 def _write(token: str) -> None:
     directory = TOKEN_PATH.parent
     if directory.is_symlink():
-        raise OSError("The runtime directory must not be a symlink.")
+        raise OSError("The token directory must not be a symlink.")
+    created = not directory.exists()
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        os.chmod(directory, 0o700)
-    except OSError:
-        pass  # Not ours to change; the file itself stays 0600.
+    # Make private a directory created here or the app's own .runtime; a directory named
+    # through ACCESS_TOKEN_FILE (such as a Docker volume) keeps its permissions.
+    if created or directory == RUNTIME_DIRECTORY:
+        try:
+            os.chmod(directory, 0o700)
+        except OSError:
+            pass  # Not ours to change; the file itself stays 0600.
     temporary = directory / f".phone-access-token.{secrets.token_hex(8)}"
     # Created 0600 from the start, then swapped in whole: no reader sees a partial
     # token and no window exists with wider permissions.
