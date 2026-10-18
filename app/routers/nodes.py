@@ -121,6 +121,20 @@ _COMPLETE_RESULT_NOTE = (
 )
 
 
+def _with_result_reader(definitions: list[dict], is_mock: bool) -> list[dict]:
+    """Tool rounds advertise read_tool_result from the first round on, not only once a
+    tool has run: providers cache a request's prefix, tool definitions first, so a list
+    that grew after the first call would make the next request miss that cache. Before
+    any call the reader answers result_unavailable. A selected tool never takes its
+    name, and demo answers and tool-free requests get no reader."""
+    if not definitions or is_mock:
+        return definitions
+    return [
+        *(item for item in definitions if item["function"]["name"] != TOOL_RESULT_TOOL_NAME),
+        TOOL_RESULT_TOOL_DEF,
+    ]
+
+
 def discard_node_work(node_ids) -> None:
     """Caller holds _REQUEST_LOCK; late workers cannot retain durable deleted content."""
     for node_id in node_ids:
@@ -1138,11 +1152,17 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             )
             if history_wanted:
                 context_defs = [*context_defs, HISTORY_TOOL_DEF]
+            context_defs = _with_result_reader(context_defs, is_mock)
             tool_catalog = None
             # A checked group grants availability, not an obligation to attach
             # every server's schema to every request. Reserve a stable allowance
             # so later discovery cannot crowd out the current question.
-            reader_names = (SOURCE_TOOL_NAME, DOCUMENT_TOOL_NAME, HISTORY_TOOL_NAME)
+            reader_names = (
+                SOURCE_TOOL_NAME,
+                DOCUMENT_TOOL_NAME,
+                HISTORY_TOOL_NAME,
+                TOOL_RESULT_TOOL_NAME,
+            )
             pinned = [
                 definition
                 for definition in context_defs
@@ -1164,6 +1184,11 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     budget=schema_budget,
                     pinned_names=tuple(item["function"]["name"] for item in pinned),
                     query=question_text,
+                    # The catalog never registers the reader's reserved name as a
+                    # selected tool; it advertises the agent's own definition instead.
+                    owned=tuple(
+                        item for item in pinned if item["function"]["name"] == TOOL_RESULT_TOOL_NAME
+                    ),
                 )
                 context_defs = tool_catalog.definitions
             request_system, llm_messages = build_context(
@@ -1188,7 +1213,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 if definition["function"]["name"] not in present
             ]
             if context_stats["compacted"] and missing_readers and not is_mock:
-                context_defs = [*context_defs, *missing_readers]
+                context_defs = _with_result_reader([*context_defs, *missing_readers], is_mock)
                 request_system, llm_messages = build_context(
                     ancestors,
                     context_target,
@@ -1225,7 +1250,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     max_page_chars=max(32, min(1200, (policy.tool_reserve - 1024) // 4)),
                     max_page_items=max(1, min(10, (policy.tool_reserve - 700) // 700)),
                 )
-            # Complete results of this answer's own calls; offered once a tool has run.
+            # Complete results of this answer's own calls, advertised in every tool round.
             tool_result_reader = (
                 make_tool_result_reader(
                     engine,
@@ -1233,7 +1258,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     request_id,
                     max_page_chars=max(200, min(2000, policy.input_budget // 8)),
                 )
-                if context_defs and not is_mock
+                if any(item["function"]["name"] == TOOL_RESULT_TOOL_NAME for item in context_defs)
                 else None
             )
             if generation.stop.is_set():
@@ -1329,7 +1354,6 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     protected_system=context_stats["protected_system"],
                     diagnostics=usage,
                     cache_prefix=context_stats.get("stable_system"),
-                    late_tool_defs=[TOOL_RESULT_TOOL_DEF] if tool_result_reader else None,
                     time_limit_seconds=settings.agent_time_limit_seconds,
                     tool_token_budget=settings.agent_tool_token_budget,
                     **({"tool_catalog": tool_catalog, "max_rounds": 6} if tool_catalog else {}),

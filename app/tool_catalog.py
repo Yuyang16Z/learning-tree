@@ -69,6 +69,10 @@ class ToolCatalog:
     Required readers and discovery are pinned. Search results displace older
     unpinned definitions when needed, while complete schemas remain unchanged.
     The caller snapshots ``definitions`` before each provider request.
+
+    ``owned`` definitions belong to the agent loop (the answer's result reader): they
+    are advertised right after discovery and counted in the budget, and may use the
+    reserved names that selected tools never register.
     """
 
     def __init__(
@@ -78,8 +82,10 @@ class ToolCatalog:
         budget: int,
         pinned_names: tuple[str, ...] = (),
         query: str = "",
+        owned: tuple[dict, ...] = (),
     ):
         self.budget = budget
+        self._owned = [copy.deepcopy(definition) for definition in owned]
         self._registry: dict[str, dict] = {}
         for definition in definitions:
             if not isinstance(definition, dict) or definition.get("type") != "function":
@@ -108,6 +114,7 @@ class ToolCatalog:
     def _native_definitions(self, active: list[str]) -> list[dict]:
         return [
             self._search_definition,
+            *self._owned,
             *(self._registry[name] for name in self._pinned),
             *(self._registry[name] for name in active if name not in self._pinned),
         ]

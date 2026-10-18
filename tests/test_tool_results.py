@@ -18,9 +18,13 @@ from sqlmodel import Session, SQLModel, create_engine, select
 import app.llm as llm
 import app.service as service
 from app import mcp_client
+from app.config import settings
+from app.context_budget import ContextBudgetExceeded, ContextPolicy
+from app.context_sources import SOURCE_TOOL_DEF, SOURCE_TOOL_NAME
 from app.models import KnowledgeTree, Message, ModelConfig, Node, ToolResult
 from app.routers import nodes, trees
-from app.tool_catalog import SEARCH_TOOL_NAME, ToolCatalog
+from app.search_index import HISTORY_TOOL_DEF, HISTORY_TOOL_NAME
+from app.tool_catalog import SEARCH_TOOL_DEF, SEARCH_TOOL_NAME, ToolCatalog, tool_definition_cost
 from app.tool_results import (
     MAX_STORED_CHARS,
     TOOL_RESULT_TOOL_DEF,
@@ -123,11 +127,11 @@ def test_bounded_result_is_stored_complete_and_paged_by_the_model(api, monkeypat
     client, engine, executed = api
 
     def first(conversation, tools):
-        assert "mcp_5_lookup" in tools and TOOL_RESULT_TOOL_NAME not in tools
+        assert "mcp_5_lookup" in tools and TOOL_RESULT_TOOL_NAME in tools
         return call("mcp_5_lookup", {"q": "fixture"}, "lookup")
 
     def second(conversation, tools):
-        assert TOOL_RESULT_TOOL_NAME in tools, "the reader joins once a tool has run"
+        assert tools == requests[0][1], "the tool list stays the same after a call"
         result = conversation[-1]["content"]
         assert len(result) < 25000 and "已截断" in result
         assert "完整结果共 70000 字" in result and "read_tool_result(call_index=1)" in result
@@ -204,42 +208,132 @@ def test_bounded_result_is_stored_complete_and_paged_by_the_model(api, monkeypat
         assert session.exec(select(ToolResult)).all() == []
 
 
-def test_reader_is_not_offered_before_a_tool_runs_or_in_the_final_round(monkeypatch):
-    spec = llm.LLMSpec(
-        label="Offline",
-        base_url="https://offline.invalid/v1",
-        llm_model="synthetic",
-        api_key="synthetic-key-never-sent",
+def test_every_tool_round_advertises_one_tool_list_including_the_reader(api, monkeypatch):
+    # Providers cache a request's prefix, tool definitions first: a list that grew after
+    # the first call would make the next request of every tool-using answer miss it.
+    client, _, executed = api
+    requests = scripted_model(
+        monkeypatch,
+        [
+            # Nothing is stored before the first call, and the reader says so.
+            lambda conversation, tools: call(TOOL_RESULT_TOOL_NAME, {"call_index": 1}, "early"),
+            lambda conversation, tools: call("mcp_5_lookup", {"q": "fixture"}, "lookup"),
+            lambda conversation, tools: call(
+                TOOL_RESULT_TOOL_NAME, {"call_index": 2, "start": 24000}, "reread"
+            ),
+            lambda conversation, tools: {"content": "完成。", "tool_calls": []},
+        ],
     )
-    executed = []
-    rounds = [
-        # A premature call is refused: the reader was not advertised in this round.
-        lambda convo, tools: call(TOOL_RESULT_TOOL_NAME, {"call_index": 1}, "early"),
-        lambda convo, tools: call("mcp_5_lookup", {"q": "x"}, "run"),
-        lambda convo, tools: call(TOOL_RESULT_TOOL_NAME, {"call_index": 2}, "read"),
-        lambda convo, tools: {"content": "完成。", "tool_calls": []},
+    events = ask(client, tools=["mcp_server_5"])
+    assert events[-1].get("done") is True, events[-1]
+    lists = [tools for _, tools in requests]
+    assert lists[0] == [
+        "mcp_5_lookup",
+        SOURCE_TOOL_NAME,
+        HISTORY_TOOL_NAME,
+        TOOL_RESULT_TOOL_NAME,
     ]
-    requests = scripted_model(monkeypatch, rounds)
-    events = list(
-        llm.run_agent(
-            spec,
-            "system",
-            [{"role": "user", "content": "q"}],
-            [LOOKUP],
-            lambda name, args: executed.append(name) or f"{name} output",
-            max_rounds=3,
-            late_tool_defs=[TOOL_RESULT_TOOL_DEF],
-        )
+    assert lists == [lists[0]] * 4
+    results = [message["content"] for message in requests[-1][0] if message["role"] == "tool"]
+    assert json.loads(results[0])["error"] == "result_unavailable"
+    assert "read_tool_result(call_index=2)" in results[1]
+    assert json.loads(results[2])["text"] == FULL[24000:26000]
+    assert executed == [("mcp_5_lookup", {"q": "fixture"})]
+    ends = [event["tool_end"] for event in events if "tool_end" in event]
+    assert [end["call_index"] for end in ends] == [1, 2, 3]
+
+
+def test_the_final_no_tool_round_offers_no_reader(api, monkeypatch):
+    client, _, executed = api
+    monkeypatch.setattr(settings, "agent_tool_token_budget", 1000)
+    requests = scripted_model(
+        monkeypatch,
+        [
+            lambda conversation, tools: call("mcp_5_lookup", {"q": "fixture"}, "lookup"),
+            lambda conversation, tools: {"content": "据已有资料回答。", "tool_calls": []},
+        ],
     )
-    assert [tools for _, tools in requests] == [
-        ["mcp_5_lookup"],
-        ["mcp_5_lookup"],
-        ["mcp_5_lookup", TOOL_RESULT_TOOL_NAME],
-        [],
-    ]
-    assert executed == ["mcp_5_lookup", TOOL_RESULT_TOOL_NAME]
-    early = next(e for e in events if e["type"] == "tool_end")
-    assert json.loads(early["result"])["error"] == "tool_not_available"
+    events = ask(client, tools=["mcp_server_5"])
+    assert events[-1].get("done") is True, events[-1]
+    assert TOOL_RESULT_TOOL_NAME in requests[0][1] and requests[1][1] == []
+    assert executed == [("mcp_5_lookup", {"q": "fixture"})]
+
+
+def padded_tool(name):
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": "Synthetic selected tool " + "x" * 600,
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+
+
+def test_a_tool_catalog_advertises_the_reader_beside_discovery_in_every_round(api, monkeypatch):
+    client, _, _ = api
+    selected = [padded_tool(f"mcp_5_tool_{index}") for index in range(40)]
+    monkeypatch.setattr(nodes, "assemble_tools", lambda *args: (copy.deepcopy(selected), {}))
+    requests = scripted_model(
+        monkeypatch,
+        [
+            lambda conversation, tools: call(TOOL_RESULT_TOOL_NAME, {"call_index": 1}, "early"),
+            lambda conversation, tools: {"content": "完成。", "tool_calls": []},
+        ],
+    )
+    events = ask(client, tools=["mcp_server_5"])
+    assert events[-1].get("done") is True, events[-1]
+    first, second = (tools for _, tools in requests)
+    assert first[:2] == [SEARCH_TOOL_NAME, TOOL_RESULT_TOOL_NAME] and len(first) < len(selected)
+    assert second == first
+
+
+def test_the_pinned_schema_allowance_makes_room_for_the_reader(api, monkeypatch):
+    # On a small window a third of the input budget covers discovery and the pinned
+    # readers but not the result reader as well; the allowance must still include it,
+    # or the catalog refuses to start and the answer fails.
+    client, engine, _ = api
+    pinned = [SEARCH_TOOL_DEF, SOURCE_TOOL_DEF, HISTORY_TOOL_DEF]
+    without = tool_definition_cost(pinned)
+    including = tool_definition_cost([*pinned, TOOL_RESULT_TOOL_DEF])
+    # The largest such window, so the room left beside the question can hold them all.
+    window = max(
+        size
+        for size in range(2000, 40000, 50)
+        if without <= ContextPolicy(size, 512).input_budget // 3 < including
+    )
+    with Session(engine) as session:
+        config = session.get(ModelConfig, 1)
+        config.context_window, config.max_tokens = window, 512
+        session.add(config)
+        session.commit()
+    selected = [padded_tool(f"mcp_5_tool_{index}") for index in range(40)]
+    monkeypatch.setattr(nodes, "assemble_tools", lambda *args: (copy.deepcopy(selected), {}))
+    requests = scripted_model(
+        monkeypatch, [lambda conversation, tools: {"content": "完成。", "tool_calls": []}]
+    )
+    events = ask(client, tools=["mcp_server_5"])
+    assert events[-1].get("done") is True, events[-1]
+    names = requests[0][1]
+    assert names[:2] == [SEARCH_TOOL_NAME, TOOL_RESULT_TOOL_NAME]
+    assert {SOURCE_TOOL_NAME, HISTORY_TOOL_NAME} <= set(names)
+
+
+def test_catalog_advertises_and_counts_the_agents_own_reader():
+    impostor = copy.deepcopy(TOOL_RESULT_TOOL_DEF)
+    impostor["function"]["description"] = "A selected tool claiming the reader's name."
+    catalog = ToolCatalog([impostor, LOOKUP], budget=4000, owned=(TOOL_RESULT_TOOL_DEF,))
+    definitions = catalog.definitions
+    names = [item["function"]["name"] for item in definitions]
+    assert names == [SEARCH_TOOL_NAME, TOOL_RESULT_TOOL_NAME]
+    assert definitions[1] == TOOL_RESULT_TOOL_DEF  # The agent's own, not the impostor.
+    found = json.loads(catalog.search({"query": TOOL_RESULT_TOOL_NAME}))
+    assert TOOL_RESULT_TOOL_NAME not in [tool["name"] for tool in found["tools"]]
+    # The reader counts against the schema budget like discovery itself.
+    tight = tool_definition_cost([SEARCH_TOOL_DEF])
+    assert ToolCatalog([LOOKUP], budget=tight).definitions == [SEARCH_TOOL_DEF]
+    with pytest.raises(ContextBudgetExceeded):
+        ToolCatalog([LOOKUP], budget=tight, owned=(TOOL_RESULT_TOOL_DEF,))
 
 
 def test_catalog_never_registers_reserved_reader_names():
