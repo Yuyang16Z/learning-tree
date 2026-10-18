@@ -229,6 +229,13 @@ function Icon({ name }: { name: "tree" | "attachment" | "tools" | "export" | "ar
   return <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
 
+/** Shows or hides the learning map; also in App's fallback for a conversation that cannot render. */
+export function MapToggle({ open, onToggle }: { open: boolean; onToggle: () => void }) {
+  const { t } = useI18n();
+  const label = open ? t("收起学习树", "Hide learning tree") : t("展开学习树", "Show learning tree");
+  return <button className={`chat-icon-button ${open ? "is-active" : ""}`} onClick={onToggle} aria-label={label} title={label}><Icon name="tree" /></button>;
+}
+
 function CopyButton({ text, label, visibleLabel }: { text: string; label: string; visibleLabel?: string }) {
   const { t } = useI18n();
   const [state, setState] = useState<"idle" | "copying" | "copied" | "error">("idle");
@@ -772,7 +779,7 @@ export function ChatPane(props: Props) {
   return <main className="center chat-pane">
     <header className="chat-header">
       <div className="chat-heading"><span className="chat-heading-dot" /><h1>{hasNode ? treeTitle : t("学习空间", "Learning space")}</h1>{nearestBranch && <span className="chat-mode-label">{t("分支", "Branch")}</span>}</div>
-      <div className="chat-header-actions">{onExport && hasNode && <button className="chat-icon-button" onClick={onExport} aria-label={t("导出学习记录", "Export learning history")} title={t("导出学习记录", "Export learning history")}><Icon name="export" /></button>}<button className={`chat-icon-button ${rightOpen ? "is-active" : ""}`} onClick={onToggleRight} aria-label={rightOpen ? t("收起学习树", "Hide learning tree") : t("展开学习树", "Show learning tree")} title={rightOpen ? t("收起学习树", "Hide learning tree") : t("展开学习树", "Show learning tree")}><Icon name="tree" /></button></div>
+      <div className="chat-header-actions">{onExport && hasNode && <button className="chat-icon-button" onClick={onExport} aria-label={t("导出学习记录", "Export learning history")} title={t("导出学习记录", "Export learning history")}><Icon name="export" /></button>}<MapToggle open={rightOpen} onToggle={onToggleRight} /></div>
     </header>
     {nearestBranch && <div className={`chat-source-bar${marks ? " has-marks" : ""}`}><span title={nearestBranch.seed_text ?? ""}>↳ {nearestBranch.seed_text}</span><button onClick={() => void returnToSource()}>{t("返回出处 ↗", "Back to source ↗")}</button><button onClick={() => setNoteOpen(open => !open)} aria-expanded={noteOpen}>{t("我的理解", "My reflection")}{personalNote ? " ·" : ""}</button>{learningNote && <button className="chat-note-return" onClick={() => void returnToSource(true)} title={t("把这段理解放回原问题的草稿，可继续编辑", "Add this reflection to the original question’s draft to continue editing")}>{t("带着理解继续", "Continue with reflection")}</button>}{marks}</div>}
     {!nearestBranch && marks && <div className="chat-mark-bar">{marks}</div>}

@@ -19,7 +19,7 @@ import type {
   Understanding,
 } from "./types";
 import { Sidebar } from "./components/Sidebar";
-import { ChatPane } from "./components/ChatPane";
+import { ChatPane, MapToggle } from "./components/ChatPane";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { LearningMap } from "./components/LearningMap";
 import { NavigationGate, readSaved, saveValue, clearLegacyRecovery, removeWorkspace, onWorkspaceDeletion, orphanedWorkspaceTrees, orphanedWorkspaceNodes, deletionAffectsRequest } from "./lib/workspace";
@@ -669,6 +669,16 @@ export default function App() {
 
   const activeTree = trees.find((t) => t.id === activeTreeId) ?? null;
   const focused = thread[thread.length - 1];
+  const toggleMap = () => { setSidebarOpen(false); setRightOpen(o => { saveValue("bl-map-open", !o); return !o; }); };
+  // Replaces the whole conversation pane, header included, so it keeps the header's map toggle:
+  // on a phone the map starts closed and is the way to open another question.
+  const conversationFallback = <main className="center chat-pane">
+    <header className="chat-header">
+      <div className="chat-heading"><span className="chat-heading-dot" /><h1>{activeNodeId != null ? activeTree?.title ?? "" : t("学习空间", "Learning space")}</h1></div>
+      <div className="chat-header-actions"><MapToggle open={rightOpen} onToggle={toggleMap} /></div>
+    </header>
+    <div className="chat-error" role="alert">{t("这段对话暂时无法显示。可以从学习树打开其他问题，或重新载入页面。", "This conversation could not be displayed. Open another question from the learning tree, or reload the page.")} <button type="button" className="chat-error-reload" onClick={() => window.location.reload()}>{t("重新载入", "Reload")}</button></div>
+  </main>;
   const topicIds = useMemo(() => new Set(trees.map(tree => tree.id)), [trees]);
   const mapNodeIds = useMemo(() => new Set(treeNodes.map(node => node.id)), [treeNodes]);
 
@@ -698,7 +708,7 @@ export default function App() {
       {notice && <div className="notice" role="status"><span>{localizeError(notice.message, locale)}</span><button onClick={() => setNotice(null)} aria-label={t("关闭提示", "Dismiss notification")}>×</button></div>}
       {busyNavigation && <div className="loading-line" aria-label={t("正在加载", "Loading")} />}
       {/* Stored answers are rendered from data: a value that breaks the conversation must not blank the app. */}
-      <ErrorBoundary resetKey={`${activeTreeId}:${activeNodeId}`} fallback={<main className="center chat-pane"><div className="chat-error" role="alert">{t("这段对话暂时无法显示。可以打开其他问题，或重新载入页面。", "This conversation could not be displayed. Open another question or reload the page.")} <button type="button" className="chat-error-reload" onClick={() => window.location.reload()}>{t("重新载入", "Reload")}</button></div></main>}>
+      <ErrorBoundary resetKey={`${activeTreeId}:${activeNodeId}`} fallback={conversationFallback}>
       <ChatPane
         thread={thread}
         activeTreeId={activeTreeId}
@@ -738,7 +748,7 @@ export default function App() {
         onBranch={onBranch}
         onDeleteNode={onDeleteNode}
         rightOpen={rightOpen}
-        onToggleRight={() => { setSidebarOpen(false); setRightOpen(o => { saveValue("bl-map-open", !o); return !o; }); }}
+        onToggleRight={toggleMap}
         onAddMock={addMock}
         mcpServers={mcpServers.filter((s) => s.enabled)}
         onTestMcp={(id) => api.testMcp(id)}

@@ -400,6 +400,49 @@ with Session(engine) as session:
     assert.equal(await fallback.count(), 0, 'Another topic opens normally');
     await page.unroute(ownThread);
     checks.push('A stored answer that cannot be displayed shows a fallback with a working Reload instead of a blank page; other topics still open');
+
+    // On a phone the map starts closed and its toggle sits in the conversation header, which the
+    // fallback replaces: the fallback must keep the toggle so another question can still be opened.
+    const pair = await api('/trees/import', {
+      format: 'branch-learning', version: 1, tree: { title: 'Memory UI check · Fallback' },
+      nodes: [
+        { id: 1, parent_id: null, title: 'Why do parsers need grammars?', kind: 'root', status: 'complete' },
+        { id: 2, parent_id: 1, title: 'What is a grammar rule?', kind: 'branch', status: 'complete', seed_text: 'grammar', source_node_id: 1, source_message_id: 2 },
+      ],
+      messages: [
+        { id: 1, node_id: 1, role: 'user', content: 'Why do parsers need grammars?' },
+        { id: 2, node_id: 1, role: 'assistant', content: 'A grammar says which token sequences form a valid program.', answered_by: 'Demo (offline)' },
+        { id: 3, node_id: 2, role: 'user', content: 'What is a grammar rule?' },
+        { id: 4, node_id: 2, role: 'assistant', content: 'A rule rewrites one symbol as a sequence of symbols.', answered_by: 'Demo (offline)' },
+      ],
+    });
+    const pairNodes = await api(`/trees/${pair.id}`);
+    const pairBranch = pairNodes.find(node => node.parent_id !== null);
+    const branchThread = `**/api/nodes/${pairBranch.id}/thread`;
+    await page.route(branchThread, async route => {
+      const response = await route.fetch();
+      const body = await response.json();
+      body.nodes = body.nodes.map(row => row.node_id === pairBranch.id ? { ...row, question: { text: 'A question stored as an object' } } : row);
+      await route.fulfill({ response, json: body });
+    });
+    await page.evaluate(({ treeId, nodeId }) => localStorage.setItem(`bl-node:${treeId}`, JSON.stringify(nodeId)), { treeId: pair.id, nodeId: pairBranch.id });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.reload();
+    await page.getByRole('heading', { name: trees[0].title, exact: true, level: 1 }).waitFor();
+    await page.getByRole('button', { name: 'Open topic list', exact: true }).click();
+    await sidebar.getByRole('button', { name: pair.title, exact: true }).click();
+    await fallback.waitFor();
+    const learningMap = page.locator('.app > .learning-map');
+    assert.equal(await learningMap.count(), 0, 'The map starts closed on a phone');
+    await page.locator('.chat-pane').getByRole('button', { name: 'Show learning tree', exact: true }).click();
+    await learningMap.waitFor();
+    await learningMap.getByRole('button', { name: 'Why do parsers need grammars?', exact: true }).click();
+    await page.locator('.chat-question').filter({ hasText: 'Why do parsers need grammars?' }).waitFor();
+    assert.equal(await fallback.count(), 0, 'The question opened from the map is displayed');
+    assert.equal(await learningMap.count(), 0, 'Choosing a question closes the map on a phone');
+    await page.unroute(branchThread);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    checks.push('On a phone the fallback keeps the learning-tree toggle, so another question of the topic can be opened from the map');
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ ok: true, checks }, null, 2));
   } finally {
