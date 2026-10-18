@@ -397,6 +397,7 @@ def extract_and_save(
                 source_node_id=node_id,
                 fact_type=record["type"],
                 terms=record["terms"],
+                origin="extracted",
             )
             s.add(memory)
             s.flush()
@@ -404,10 +405,11 @@ def extract_and_save(
             old = (
                 s.get(Memory, record["supersedes"]) if record["supersedes"] in replaceable else None
             )
-            # Only a current, never user-edited fact on this path can be superseded;
-            # the old row stays stored and visible in Settings. superseded_by alone
-            # records it: updated_at marks hand edits, so a fact made current again
-            # when its replacement is deleted can still be corrected later.
+            # Only a current fact on this path that extraction wrote and nobody edited
+            # can be superseded; legacy facts may hold an unrecorded hand edit. The old
+            # row stays stored and visible in Settings. superseded_by alone records it:
+            # updated_at marks hand edits, so a fact made current again when its
+            # replacement is deleted can still be corrected later.
             if (
                 old is not None
                 and old.id != memory.id
@@ -415,6 +417,7 @@ def extract_and_save(
                 and old.tree_id == tree_id
                 and old.source_node_id in path_ids
                 and old.superseded_by is None
+                and old.origin == "extracted"
                 and old.updated_at is None
             ):
                 old.superseded_by = memory.id

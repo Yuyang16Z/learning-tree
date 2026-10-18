@@ -129,3 +129,64 @@ def test_deleting_the_replacing_fact_or_its_branch_restores_the_earlier_fact(
         [{"text": "再次修正：quicksort 不稳定。", "type": "misconception", "supersedes": old_id}],
     )
     assert fact(engine, OLD).superseded_by == fact(engine, "再次修正：quicksort 不稳定。").id
+
+
+def test_facts_stored_before_edits_were_recorded_are_never_superseded(tmp_path, monkeypatch):
+    """Earlier versions changed fact text in place without recording the edit."""
+    from sqlalchemy import text
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'legacy.db'}", connect_args={"check_same_thread": False}
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE memory (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, "
+                "content TEXT NOT NULL, tree_id INTEGER, source_node_id INTEGER, "
+                "created_at DATETIME NOT NULL)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO memory VALUES (1, 'fact', '我改过的结论：先校验再执行。', 1, 1, "
+                "'2026-01-01')"
+            )
+        )
+    for module in (service, database):
+        monkeypatch.setattr(module, "engine", engine)
+    database.init_db()
+    with Session(engine) as session:
+        session.add(KnowledgeTree(id=1, title="旧主题"))
+        session.add(Node(id=1, tree_id=1, title="根", status="complete"))
+        session.commit()
+    extract(
+        monkeypatch,
+        1,
+        "新问题",
+        [{"text": "自动结论：执行后再校验。", "type": "misconception", "supersedes": 1}],
+    )
+    with Session(engine) as session:
+        legacy = session.get(Memory, 1)
+        assert legacy.superseded_by is None and legacy.origin == "legacy"
+        added = session.exec(select(Memory).where(Memory.id != 1)).one()
+        assert added.content == "自动结论：执行后再校验。" and added.origin == "extracted"
+    engine.dispose()
+
+
+def test_a_fact_edited_in_settings_is_never_superseded(setup, monkeypatch):
+    client, engine = setup
+    extract(monkeypatch, 1, "问题一", [OLD])
+    old = fact(engine, OLD)
+    assert old.origin == "extracted"
+    edited = "我的修改：quicksort 在原地实现时不稳定。"
+    response = client.patch(
+        f"/memories/{old.id}", json={"content": edited, "expected_content": OLD}
+    )
+    assert response.status_code == 200
+    extract(
+        monkeypatch,
+        1,
+        "问题二",
+        [{"text": NEW, "type": "misconception", "supersedes": old.id}],
+    )
+    assert fact(engine, edited).superseded_by is None

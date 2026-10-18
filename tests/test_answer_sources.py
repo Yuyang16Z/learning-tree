@@ -227,14 +227,17 @@ def test_reads_drop_entries_whose_records_are_gone_or_were_replaced(setup, monke
     # Bypass the deletion paths: a reused memory id now names an unrelated fact.
     with engine.begin() as connection:
         connection.execute(text("DELETE FROM memory WHERE id = :id"), {"id": ids["foreign_fact"]})
-        connection.execute(
-            text(
-                "INSERT INTO memory (id, kind, content, tree_id, source_node_id, created_at, "
-                "fact_type) VALUES (:id, 'fact', 'unrelated', :tree, :node, '2026-01-01', "
-                "'conclusion')"
-            ),
-            {"id": ids["foreign_fact"], "tree": ids["a"], "node": ids["a_branch"]},
+    with Session(engine) as session:
+        session.add(
+            Memory(
+                id=ids["foreign_fact"],
+                kind="fact",
+                content="unrelated",
+                tree_id=ids["a"],
+                source_node_id=ids["a_branch"],
+            )
         )
+        session.commit()
     assert shown(client, ids["a_root"]) == [entry(ids, "own", "path")]
     with engine.begin() as connection:
         connection.execute(text("DELETE FROM node WHERE id = :id"), {"id": ids["b_branch"]})

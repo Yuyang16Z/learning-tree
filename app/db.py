@@ -103,6 +103,8 @@ _ADDED_COLUMNS = {
         "terms": "JSON",
         "superseded_by": "INTEGER",
         "updated_at": "DATETIME",
+        # Existing facts may carry unrecorded hand edits; they are never superseded.
+        "origin": "TEXT NOT NULL DEFAULT 'legacy'",
     },
     "mcpserver": {
         "transport": "TEXT NOT NULL DEFAULT 'stdio'",

@@ -62,6 +62,12 @@ class Memory(SQLModel, table=True):
     # search index but stay visible in Settings until deleted.
     superseded_by: int | None = None
     updated_at: datetime | None = None  # Set by hand edits only; never by supersession.
+    # "extracted": written by automatic extraction. "legacy": stored before origins
+    # were recorded, when hand edits left no trace, so it may hold the user's own
+    # correction. Only extracted facts never edited by hand can be superseded.
+    origin: str = Field(
+        default="legacy", sa_column=Column(String, nullable=False, default="legacy")
+    )
 
 
 class MemoryEmbedding(SQLModel, table=True):
