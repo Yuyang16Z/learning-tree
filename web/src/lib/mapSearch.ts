@@ -7,12 +7,20 @@ export const MAP_SEARCH_CAP = 30;
 /** The search API rejects longer queries. */
 export const MAP_SEARCH_MAX_QUERY = 300;
 
-/** Server hits as delivered for one topic and trimmed query. */
-export interface RemoteHits { treeId: number; query: string; hits: SearchHit[] }
+/** Server hits as delivered for one topic and trimmed query; a failed search delivers none. */
+export interface RemoteHits { treeId: number; query: string; hits: SearchHit[]; failed?: boolean }
+
+const answers = (remote: RemoteHits | null, treeId: number | null, query: string) =>
+  !!remote && remote.treeId === treeId && remote.query === query.trim();
 
 /** Server hits count only while they answer the topic and query now shown, so none outlive a keystroke. */
 export function currentHits(remote: RemoteHits | null, treeId: number | null, query: string): SearchHit[] {
-  return remote && remote.treeId === treeId && remote.query === query.trim() ? remote.hits : [];
+  return answers(remote, treeId, query) ? remote!.hits : [];
+}
+
+/** The server has not yet answered (or failed) the search for the topic and query now shown. */
+export function searchPending(remote: RemoteHits | null, treeId: number | null, query: string): boolean {
+  return !!query.trim() && treeId !== null && !answers(remote, treeId, query);
 }
 
 /** Instant client-side title/quote matches; the first result group. */
@@ -24,23 +32,26 @@ export function localMatches(nodes: readonly TreeNode[], query: string): TreeNod
 /**
  * Server hits form the second group: title hits already shown locally are dropped,
  * hits for nodes this map no longer knows are dropped, and the cap covers both groups.
+ * `more` says the lists leave matches out: a group was cut by the cap, or the server sent
+ * as many hits as the map asks for (MAP_SEARCH_CAP), so it may hold more.
  */
-export function mergeSearchResults(local: readonly TreeNode[], hits: readonly SearchHit[], nodes: readonly TreeNode[], cap = MAP_SEARCH_CAP): { local: TreeNode[]; remote: SearchHit[] } {
+export function mergeSearchResults(local: readonly TreeNode[], hits: readonly SearchHit[], nodes: readonly TreeNode[], cap = MAP_SEARCH_CAP): { local: TreeNode[]; remote: SearchHit[]; more: boolean } {
   const known = new Set(nodes.map(node => node.id));
   const shown = new Set(local.map(node => node.id));
   const first = local.slice(0, cap);
   const seen = new Set<string>();
   const remote: SearchHit[] = [];
+  let more = local.length > cap || hits.length >= MAP_SEARCH_CAP;
   for (const hit of hits) {
-    if (remote.length + first.length >= cap) break;
     if (!known.has(hit.node_id)) continue;
     if (hit.kind === "title" && shown.has(hit.node_id)) continue;
     const key = `${hit.kind}:${hit.node_id}:${hit.message_id ?? ""}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    if (remote.length + first.length >= cap) { more = true; break; }
     remote.push(hit);
   }
-  return { local: first, remote };
+  return { local: first, remote, more };
 }
 
 // Snippets are windows of stored Markdown. These characters may become markup when the answer
@@ -120,8 +131,8 @@ interface SearcherOptions {
 }
 
 export interface MapSearcher {
-  /** Debounce `query` for `treeId`; `deliver` only runs while this request is still current. */
-  run(treeId: number, query: string, deliver: (hits: SearchHit[]) => void): void;
+  /** Debounce `query` for `treeId`; `deliver` or `fail` only runs while this request is still current. */
+  run(treeId: number, query: string, deliver: (hits: SearchHit[]) => void, fail?: () => void): void;
   /** Drop the pending request and ignore any in-flight response (tree change, close). */
   cancel(): void;
 }
@@ -138,7 +149,7 @@ export function createMapSearcher({ search, delayMs = 250, setTimer = (callback,
     ticket += 1;
   };
   return {
-    run(treeId, query, deliver) {
+    run(treeId, query, deliver, fail) {
       cancel();
       const needle = query.trim();
       if (!needle) return;
@@ -149,7 +160,10 @@ export function createMapSearcher({ search, delayMs = 250, setTimer = (callback,
         controller = ctrl;
         search(treeId, needle, ctrl.signal).then(hits => {
           if (current === ticket && !ctrl.signal.aborted) deliver(hits);
-        }, () => { /* Aborted or failed searches leave the instant group in place. */ });
+        }, () => {
+          // A failed search leaves the instant group in place; an aborted one is not reported.
+          if (current === ticket && !ctrl.signal.aborted) fail?.();
+        });
       }, delayMs);
     },
     cancel,

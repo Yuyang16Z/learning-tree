@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SearchHit, TreeNode } from "../types";
-import { createMapSearcher, currentHits, hitKindLabel, localMatches, mergeSearchResults, plainSnippet, searchAnchor, type RemoteHits } from "./mapSearch";
+import { createMapSearcher, currentHits, hitKindLabel, localMatches, mergeSearchResults, plainSnippet, searchAnchor, searchPending, type RemoteHits } from "./mapSearch";
 
 function node(id: number, title: string, seed_text: string | null = null): TreeNode {
   return { id, parent_id: id === 1 ? null : 1, tree_id: 7, title, seed_text, has_summary: false };
@@ -34,6 +34,20 @@ describe("map search result groups", () => {
     expect(merged.remote).toHaveLength(0);
     const few = mergeSearchResults(many.slice(0, 28), hits, many);
     expect(few.remote).toHaveLength(2);
+  });
+
+  it("says when more matches exist than the capped list shows", () => {
+    const many = Array.from({ length: 40 }, (_, index) => node(index + 1, `pivot ${index}`));
+    expect(mergeSearchResults(localMatches(many, "pivot"), [], many).more).toBe(true);
+    const some = many.slice(0, 20);
+    const serverPage = Array.from({ length: 30 }, (_, index) => hit("message", (index % 20) + 1, "pivot", index + 100));
+    expect(mergeSearchResults([], serverPage, some).more).toBe(true);
+    const cut = Array.from({ length: 12 }, (_, index) => hit("message", index + 1, "pivot", index + 200));
+    const cutResult = mergeSearchResults(localMatches(some, "pivot"), cut, some);
+    expect([cutResult.local.length, cutResult.remote.length, cutResult.more]).toEqual([20, 10, true]);
+    const fits = mergeSearchResults(localMatches(some, "pivot"), cut.slice(0, 10), some);
+    expect([fits.local.length + fits.remote.length, fits.more]).toEqual([30, false]);
+    expect(mergeSearchResults(localMatches(nodes, "pivot"), [hit("message", 1, "…pivot…", 12)], nodes).more).toBe(false);
   });
 
   it("anchors only message hits, with a verbatim snippet", () => {
@@ -154,6 +168,39 @@ describe("debounced topic search", () => {
     expect(search).toHaveBeenCalledTimes(2);
     expect(currentHits(remote, 7, "pivot 归并")).toEqual([]);
     expect(currentHits(null, 7, "pivot")).toEqual([]);
+  });
+
+  it("is pending until the current query's search answers or fails", async () => {
+    vi.useFakeTimers();
+    let fail = false;
+    const search = vi.fn(async () => { if (fail) throw new Error("offline"); return [hit("message", 1, "pivot", 12)]; });
+    let remote: RemoteHits | null = null;
+    const failures: string[] = [];
+    const searcher = createMapSearcher({ search, delayMs: 10 });
+    const run = (treeId: number, query: string) => searcher.run(treeId, query, hits => { remote = { treeId, query: query.trim(), hits }; }, () => {
+      failures.push(query);
+      remote = { treeId, query: query.trim(), hits: [], failed: true };
+    });
+    expect(searchPending(remote, 7, "   ")).toBe(false);
+    expect(searchPending(remote, null, "pivot")).toBe(false);
+    run(7, "pivot");
+    expect(searchPending(remote, 7, "pivot")).toBe(true);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(searchPending(remote, 7, " pivot ")).toBe(false);
+    expect(searchPending(remote, 7, "pivots")).toBe(true);
+    fail = true;
+    run(7, "pivots");
+    await vi.advanceTimersByTimeAsync(10);
+    expect(failures).toEqual(["pivots"]);
+    expect(searchPending(remote, 7, "pivots")).toBe(false);
+    expect(currentHits(remote, 7, "pivots")).toEqual([]);
+    // A request that was cancelled or superseded reports nothing.
+    run(7, "pivot again");
+    await vi.advanceTimersByTimeAsync(5);
+    run(8, "pivot again");
+    searcher.cancel();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(failures).toEqual(["pivots"]);
   });
 
   it("ignores blank queries and failed requests", async () => {

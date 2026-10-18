@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import type { NavigationAnchor, SearchHit, TreeNode } from "../types";
 import { api } from "../api";
-import { createMapSearcher, currentHits, hitKindLabel, localMatches, MAP_SEARCH_MAX_QUERY, mergeSearchResults, plainSnippet, searchAnchor, type RemoteHits } from "../lib/mapSearch";
+import { createMapSearcher, currentHits, hitKindLabel, localMatches, MAP_SEARCH_CAP, MAP_SEARCH_MAX_QUERY, mergeSearchResults, plainSnippet, searchAnchor, searchPending, type RemoteHits } from "../lib/mapSearch";
 import { groupAncestorIds, groupTopics, layoutTopics, TOPIC_CARD } from "../lib/topicLayout";
 import { navigateMapView } from "../lib/mapCamera";
 import { cardUnderstanding, UNDERSTANDING_TEXT, unresolvedNodes } from "../lib/understanding";
@@ -60,7 +60,7 @@ export function LearningMap({ nodes, activeId, onSelect, onDelete, onCollapse, w
   const unresolvedPanelRef = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState("");
   const [remote, setRemote] = useState<RemoteHits | null>(null);
-  const searcherRef = useRef(createMapSearcher({ search: (treeId, needle, signal) => api.searchTree(treeId, needle, 30, signal) }));
+  const searcherRef = useRef(createMapSearcher({ search: (treeId, needle, signal) => api.searchTree(treeId, needle, MAP_SEARCH_CAP, signal) }));
   const treeId = nodes[0]?.tree_id ?? null;
   const [camera, setCamera] = useState<Camera>({ x: 0, y: 0, zoom: 1 });
   const [returnView, setReturnView] = useState<ReturnView | null>(null);
@@ -102,7 +102,7 @@ export function LearningMap({ nodes, activeId, onSelect, onDelete, onCollapse, w
     const needle = query.trim();
     if (!needle || treeId === null) { searcher.cancel(); setRemote(null); return; }
     // Tagged with their query and topic: rendering drops them once either changes.
-    searcher.run(treeId, needle, delivered => setRemote({ treeId, query: needle, hits: delivered }));
+    searcher.run(treeId, needle, delivered => setRemote({ treeId, query: needle, hits: delivered }), () => setRemote({ treeId, query: needle, hits: [], failed: true }));
     return () => searcher.cancel();
   }, [query, treeId, identity]);
 
@@ -262,6 +262,9 @@ export function LearningMap({ nodes, activeId, onSelect, onDelete, onCollapse, w
   const hits = useMemo(() => currentHits(remote, treeId, query), [remote, treeId, query]);
   const merged = useMemo(() => mergeSearchResults(results, hits, nodes), [results, hits, nodes]);
   const resultCount = merged.local.length + merged.remote.length;
+  const resultStatus = resultCount
+    ? merged.more ? t("{count}+ 个结果", "{count}+ results", { count: resultCount }) : t("{count} 个结果", "{count} results", { count: resultCount })
+    : searchPending(remote, treeId, query) ? t("正在搜索…", "Searching…") : t("没有找到相关问题", "No matching questions");
   const activeGroupId = activeId == null ? undefined : tree.nodeToGroup.get(activeId);
   const nodeStyle = (x: number, y: number, height: number): CSSProperties => ({ left: x, top: y, width: TOPIC_CARD.width, height });
 
@@ -286,7 +289,7 @@ export function LearningMap({ nodes, activeId, onSelect, onDelete, onCollapse, w
       </div>
       {searchOpen && <div className="lm-search">
         <div className="lm-search-field"><Icon name="search" /><input autoFocus value={query} maxLength={MAP_SEARCH_MAX_QUERY} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") { setSearchOpen(false); setQuery(""); } }} placeholder={t("找一个问题", "Find a question")} aria-label={t("搜索问题或引用", "Search questions or quotes")} />{query && <button type="button" className="lm-icon" aria-label={t("清空搜索", "Clear search")} onClick={() => setQuery("")}><Icon name="close" /></button>}</div>
-        {query.trim() && <div className="lm-results" aria-label={t("搜索结果", "Search results")}><span className="lm-result-count" role="status">{resultCount ? t("{count} 个结果", "{count} results", { count: resultCount }) : t("没有找到相关问题", "No matching questions")}</span>{merged.local.map((node) => <button type="button" key={node.id} onClick={() => selectResult(node)}><span>{node.title || node.seed_text || t("新问题", "New question")}</span></button>)}{merged.remote.length > 0 && <div className="lm-result-group" role="group" aria-label={t("记录中的匹配", "Matches in history")}>{merged.remote.map((hit) => { const node = nodes.find((item) => item.id === hit.node_id); return <button type="button" key={`${hit.kind}:${hit.node_id}:${hit.message_id ?? ""}`} onClick={() => selectHit(hit)}><span>{node?.title || node?.seed_text || t("新问题", "New question")}</span><small className="lm-result-snippet">{hitKindLabel(hit.kind, t)} · {plainSnippet(hit.snippet)}</small></button>; })}</div>}</div>}
+        {query.trim() && <div className="lm-results" aria-label={t("搜索结果", "Search results")}><span className="lm-result-count" role="status">{resultStatus}</span>{merged.local.map((node) => <button type="button" key={node.id} onClick={() => selectResult(node)}><span>{node.title || node.seed_text || t("新问题", "New question")}</span></button>)}{merged.remote.length > 0 && <div className="lm-result-group" role="group" aria-label={t("记录中的匹配", "Matches in history")}>{merged.remote.map((hit) => { const node = nodes.find((item) => item.id === hit.node_id); return <button type="button" key={`${hit.kind}:${hit.node_id}:${hit.message_id ?? ""}`} onClick={() => selectHit(hit)}><span>{node?.title || node?.seed_text || t("新问题", "New question")}</span><small className="lm-result-snippet">{hitKindLabel(hit.kind, t)} · {plainSnippet(hit.snippet)}</small></button>; })}</div>}</div>}
       </div>}
       {unresolvedOpen && <div className="lm-search lm-unresolved" ref={unresolvedPanelRef} tabIndex={-1} role="region" aria-label={t("没懂的问题", "Not understood")}>
         <div className="lm-results"><span className="lm-result-count" role="status">{unresolvedSummary}</span>{unresolved.items.map((node) => {

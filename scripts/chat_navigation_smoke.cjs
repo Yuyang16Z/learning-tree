@@ -473,14 +473,22 @@ async function poll(callback, label) {
     await searchBox.fill('median-of-three');
     const historyGroup = map.getByRole('group', { name: 'Matches in history', exact: true });
     await historyGroup.waitFor();
-    await page.route(searchRoute, route => route.abort());
+    let releaseSearch;
+    await page.route(searchRoute, async route => {
+      await new Promise(resolve => { releaseSearch = resolve; });
+      await route.abort();
+    });
     await searchBox.fill('median-of-three keeps');
     assert.equal(await historyGroup.count(), 0, 'Hits for the previous query disappear at once');
-    await page.waitForTimeout(600);
+    const searchStatus = map.locator('.lm-result-count');
+    await poll(async () => releaseSearch !== undefined, 'the next search was sent');
+    assert.equal(await searchStatus.innerText(), 'Searching…', 'An unanswered search is not reported as finding nothing');
+    releaseSearch();
+    await poll(async () => await searchStatus.innerText() === 'No matching questions', 'a failed search ends the wait');
     assert.equal(await historyGroup.count(), 0, 'A failed search leaves no stale hits behind');
     await page.unroute(searchRoute);
     await searchBox.press('Escape');
-    checks.push('Map search shows history hits only for the current query, also when its request fails');
+    checks.push('Map search shows history hits only for the current query, says it is searching until the server answers, and drops stale hits when a request fails');
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ ok: true, checks }, null, 2));
   } finally {
