@@ -17,6 +17,7 @@ describe("localized application diagnostics", () => {
   it("updates existing dynamic and form errors after switching back to Chinese", () => {
     for (const original of [
       "回答未完成（APIConnectionError），可重试。", "模型输出提前结束（length），可以重试。",
+      "模型接口拒绝了本次请求中的工具（可能不支持工具调用）。请换用支持工具的模型，或取消选择工具后重试。",
       "MCP「我的工具」连接失败，请在设置中测试连接。", "未找到 MCP 启动命令：/my path/server。请确认已经安装。",
       "连上了，发现 14 个工具", "请求失败（502），请重试。",
       "API 地址需要以 https:// 或 http:// 开头。", "保存失败，理解草稿已保留。",

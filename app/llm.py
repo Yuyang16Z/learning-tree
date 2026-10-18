@@ -13,6 +13,7 @@ without an API key.
 
 import inspect
 import json
+import re
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
@@ -61,6 +62,27 @@ def _client(spec: LLMSpec) -> OpenAI:
 def _rejects_stream_options(exc: Exception) -> bool:
     # Inspected only; provider error text is never logged or returned to a client.
     return getattr(exc, "status_code", None) == 400 and "stream_options" in str(exc)
+
+
+# (base_url, model) pairs whose provider rejected a request because it carried tools
+# (an Ollama model without a tool template, vLLM without a tool parser); per process.
+TOOLS_UNSUPPORTED: set[tuple[str, str]] = set()
+
+
+def rejects_tools(exc: Exception) -> bool:
+    """An HTTP 400/422 that names tools or function calling. Inspected only; provider
+    error text is never logged or returned to a client."""
+    return getattr(exc, "status_code", None) in (400, 422) and bool(
+        re.search(r"tool|function[ _-]?call", str(exc), re.IGNORECASE)
+    )
+
+
+def tools_unsupported(spec: LLMSpec) -> bool:
+    return (spec.base_url, spec.llm_model) in TOOLS_UNSUPPORTED
+
+
+def remember_tools_unsupported(spec: LLMSpec) -> None:
+    TOOLS_UNSUPPORTED.add((spec.base_url, spec.llm_model))
 
 
 def _stream_completion(spec: LLMSpec, api: OpenAI, **kwargs):

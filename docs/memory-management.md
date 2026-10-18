@@ -137,6 +137,15 @@ only when **Other branches of this topic** is also on. The topic being answered
 in stays searchable under `all` even when it is archived. The tool never writes,
 never embeds and is not offered in demo mode.
 
+Offering the tool turns an answer into a tool-capable request, which keeps room
+for tool results: with a 32,768-token window, history is compacted 15–20%
+earlier while a switch is on. A model endpoint that rejects requests carrying
+tools (for example an Ollama model without a tool template, or vLLM started
+without a tool parser) still answers: the first rejected answer is sent again
+without the read-only readers, and that endpoint and model get none for the
+rest of the session. Tools you select yourself are never dropped; when an
+endpoint rejects them, the answer says so instead of asking you to retry.
+
 ### Referenced memories
 
 Under each answer, a compact **Referenced** line lists the memories that were
@@ -259,7 +268,11 @@ backups include them, learning-tree exports exclude `sources`.
 - 模型可用的只读工具 `search_learning_history` 受同一组开关约束：默认只查当前路径，
   `tree`/`all` 范围需在回答开始时已经启用；两个开关互相独立，`all` 在当前路径之外加入
   其他主题，只有「同主题的其他分支」也开启时才包含当前主题的其他分支；当前主题即使已归档，
-  `all` 也能查到它的路径。它不写入数据库，演示模式不会提供。
+  `all` 也能查到它的路径。它不写入数据库，演示模式不会提供。提供这个工具会让回答变成可调用
+  工具的请求，需要为工具结果预留空间：上下文窗口为 32,768 时，开关打开后历史压缩会提前约
+  15%–20%。不支持工具调用的模型接口（例如没有工具模板的 Ollama 模型、未启用工具解析的 vLLM）
+  仍能回答：第一次被拒的回答会去掉只读工具重新发送，本次运行期间该接口和模型不再附带它们。
+  用户自己选择的工具不会被悄悄去掉，接口拒绝时会直接说明，而不是提示重试。
 - **离线评估**：运行 `uv run python scripts/evaluate_retrieval.py --database branch_learning.db`，
   在临时副本上查看检索范围和主题搜索在自己数据上的表现，原数据库不会改变；报告写入
   `artifacts/`，详见[离线检索评估](retrieval-evaluation.md)。这条命令使用关键词检索，不经过

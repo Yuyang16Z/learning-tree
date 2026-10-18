@@ -29,7 +29,15 @@ from ..document_context import (
 )
 from ..documents import DocumentAttachment, document_summary, resolve_documents
 from ..learning_summaries import invalidate_summaries, summarize_history
-from ..llm import LLMSpec, complete, run_agent, stream_chat
+from ..llm import (
+    LLMSpec,
+    complete,
+    rejects_tools,
+    remember_tools_unsupported,
+    run_agent,
+    stream_chat,
+    tools_unsupported,
+)
 from ..models import (
     Memory,
     MemoryEmbedding,
@@ -122,6 +130,26 @@ _STREAM_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 _COMPLETE_RESULT_NOTE = (
     "\n[完整结果共 {total} 字，已保存；可调用 read_tool_result(call_index={index}) 分页阅读。]"
 )
+# The endpoint rejected tools the user selected; retrying the same request cannot help.
+TOOLS_REJECTED_ERROR = "模型接口拒绝了本次请求中的工具（可能不支持工具调用）。请换用支持工具的模型，或取消选择工具后重试。"
+
+
+def _plain_on_rejected_tools(agent, spec: LLMSpec, plain):
+    """Relay the agent's events, unless its first request is rejected for carrying tools:
+    then remember the endpoint and answer through `plain()` instead. Only the implicit
+    read-only readers ride along here, and nothing was relayed before the rejection."""
+    try:
+        first = next(agent)
+    except StopIteration:
+        return
+    except Exception as exc:
+        if not rejects_tools(exc):
+            raise
+        remember_tools_unsupported(spec)
+        yield from plain()
+        return
+    yield first
+    yield from agent
 
 
 def _with_result_reader(definitions: list[dict], is_mock: bool) -> list[dict]:
@@ -1177,8 +1205,10 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 tool_defs, tool_router = assemble_tools(tool_session, requested_tools)
             # User-selected tools, before the implicit document reader joins them.
             tools_requested = bool(tool_defs)
+            # An endpoint that rejected tools before gets no implicit readers either.
+            readers_off = not tools_requested and tools_unsupported(spec)
             document_reader = None
-            if context_documents and not is_mock:
+            if context_documents and not is_mock and not readers_off:
                 tool_defs = [*tool_defs, DOCUMENT_TOOL_DEF]
                 document_reader = make_document_reader(
                     engine,
@@ -1192,10 +1222,14 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             context_defs = tool_defs + ([SOURCE_TOOL_DEF] if tool_defs and not is_mock else [])
             # The read-only history search joins tool rounds, and is offered on its
             # own when the user widened memory recall; demo mode never gets it.
-            history_wanted = not is_mock and (
-                tools_requested
-                or scope_snapshot["include_siblings"]
-                or scope_snapshot["include_other_trees"]
+            history_wanted = (
+                not is_mock
+                and not readers_off
+                and (
+                    tools_requested
+                    or scope_snapshot["include_siblings"]
+                    or scope_snapshot["include_other_trees"]
+                )
             )
             if history_wanted:
                 context_defs = [*context_defs, HISTORY_TOOL_DEF]
@@ -1259,7 +1293,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 for definition in (SOURCE_TOOL_DEF, HISTORY_TOOL_DEF)
                 if definition["function"]["name"] not in present
             ]
-            if context_stats["compacted"] and missing_readers and not is_mock:
+            if context_stats["compacted"] and missing_readers and not is_mock and not readers_off:
                 context_defs = _with_result_reader([*context_defs, *missing_readers], is_mock)
                 request_system, llm_messages = build_context(
                     ancestors,
@@ -1359,6 +1393,20 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             if title_needed:
                 _queue_branch_title(target_id, spec)
                 title_queued = True
+
+            def plain_answer():
+                return (
+                    {"type": kind, "text": chunk}
+                    for kind, chunk in stream_chat(
+                        spec,
+                        request_system,
+                        llm_messages,
+                        deep=body.deep_think,
+                        diagnostics=usage,
+                        cache_prefix=context_stats.get("stable_system"),
+                    )
+                )
+
             tool_defs = context_defs
             if tool_defs:
                 execute = make_executor(tool_router)
@@ -1406,18 +1454,12 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     **({"tool_catalog": tool_catalog, "max_rounds": 6} if tool_catalog else {}),
                     **({"deep": True} if body.deep_think else {}),
                 )
+                if not tools_requested:
+                    # Only implicit readers ride along: an endpoint without tool
+                    # support still answers, without them.
+                    stream = _plain_on_rejected_tools(stream, spec, plain_answer)
             else:
-                stream = (
-                    {"type": kind, "text": chunk}
-                    for kind, chunk in stream_chat(
-                        spec,
-                        request_system,
-                        llm_messages,
-                        deep=body.deep_think,
-                        diagnostics=usage,
-                        cache_prefix=context_stats.get("stable_system"),
-                    )
-                )
+                stream = plain_answer()
             model_started = time.monotonic()
             for event in stream:
                 if generation.stop.is_set():
@@ -1488,6 +1530,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     if generation.stop.is_set()
                     else str(exc)
                     if isinstance(exc, ContextBudgetExceeded)
+                    else TOOLS_REJECTED_ERROR
+                    if rejects_tools(exc)
                     else f"回答未完成（{type(exc).__name__}），可重试。"
                 )
         finally:
