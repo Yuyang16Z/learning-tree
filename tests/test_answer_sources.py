@@ -316,3 +316,58 @@ def test_tool_steps_keep_what_they_quoted_from_a_topic_deleted_later(setup, monk
     assert [(hit["tree_id"], hit["tree_title"]) for hit in found] == [(ids["b"], SECRET)]
     exported = client.get(f"/trees/{ids['a']}/export").json()["messages"]
     assert [m["steps"][0]["result"] for m in exported if m["steps"]] == [step["result"]]
+
+
+# Values the app never writes (a hand-edited, restored or damaged row): not JSON, not an
+# array, or an array holding something other than objects.
+DAMAGED = ['["bogus"]', '{"tree_id": "x y"}', "not json", '"just text"']
+
+
+@pytest.mark.parametrize("deletion", ["tree", "node", "single", "selected"])
+def test_damaged_stored_provenance_never_blocks_a_deletion(setup, monkeypatch, deletion):
+    """Deletes skip provenance they cannot read, as reads do, and still scrub the rest."""
+    client, engine = setup
+    ids = build(client, engine)
+    sources = [("own", "path"), ("sibling", "tree"), ("foreign", "other")]
+    answer(client, monkeypatch, ids["a_root"], [entry(ids, *item) for item in sources])
+    gone = "sibling" if deletion == "node" else "foreign"
+    # One more row mixes a malformed element with entries the delete must still handle.
+    mixed = json.dumps(["bogus", entry(ids, gone, dict(sources)[gone]), entry(ids, "own", "path")])
+    other = client.post("/trees", json={"title": "Topic C"}).json()
+    with Session(engine) as session:
+        rows = [
+            Message(node_id=other["root_node_id"], role="assistant", content="损坏的来源")
+            for _ in range(len(DAMAGED) + 1)
+        ]
+        session.add_all(rows)
+        session.commit()
+        values = dict(zip([row.id for row in rows], [*DAMAGED, mixed]))
+    with engine.begin() as connection:
+        for message_id, value in values.items():
+            connection.execute(
+                text("UPDATE message SET sources = :value WHERE id = :id"),
+                {"value": value, "id": message_id},
+            )
+
+    if deletion == "tree":
+        response = client.delete(f"/trees/{ids['b']}")
+    elif deletion == "node":
+        response = client.delete(f"/nodes/{ids['a_branch']}")
+    elif deletion == "single":
+        response = client.delete(f"/memories/{ids['foreign_fact']}")
+    else:
+        response = client.post("/memories/delete", json={"ids": [ids["foreign_fact"]]})
+    assert response.status_code == 200
+    with engine.connect() as connection:
+        after = dict(connection.exec_driver_sql("SELECT id, sources FROM message").all())
+    *damaged, mixed_id = values
+    assert {key: after[key] for key in damaged} == {key: values[key] for key in damaged}
+    assert json.loads(after[mixed_id]) == [entry(ids, "own", "path", title=False)]
+    answers = [
+        json.loads(value)
+        for key, value in after.items()
+        if key not in values and value not in (None, "null")
+    ]
+    assert answers == [
+        [entry(ids, name, scope, title=False) for name, scope in sources if name != gone]
+    ]

@@ -139,14 +139,22 @@ def scrub_sources(
         return
     if not (trees or nodes or memories):
         return
+    # json_each and json_extract raise "malformed JSON" on a value the app never writes
+    # (not JSON, not an array, an element that is not an object), which would fail the
+    # whole delete; reads skip such values (_entries), so the scrub does too. The guards
+    # sit in CASE, which evaluates only the branch it picks: SQLite may evaluate both
+    # operands of AND, and WHERE terms in an order of its choosing.
     candidates = session.execute(
         text(
             "SELECT m.id FROM message m WHERE m.sources IS NOT NULL AND m.sources <> 'null' "
-            "AND EXISTS (SELECT 1 FROM json_each(m.sources) e "
-            "WHERE json_extract(e.value, '$.tree_id') IN (SELECT value FROM json_each(:trees)) "
+            "AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(m.sources) "
+            "AND json_type(m.sources) = 'array' THEN m.sources ELSE '[]' END) e "
+            "WHERE CASE WHEN e.type = 'object' THEN "
+            "json_extract(e.value, '$.tree_id') IN (SELECT value FROM json_each(:trees)) "
             "OR json_extract(e.value, '$.source_node_id') IN "
             "(SELECT value FROM json_each(:nodes)) "
-            "OR json_extract(e.value, '$.memory_id') IN (SELECT value FROM json_each(:memories)))"
+            "OR json_extract(e.value, '$.memory_id') IN (SELECT value FROM json_each(:memories)) "
+            "ELSE 0 END)"
         ),
         {"trees": json.dumps(trees), "nodes": json.dumps(nodes), "memories": json.dumps(memories)},
     ).scalars()
