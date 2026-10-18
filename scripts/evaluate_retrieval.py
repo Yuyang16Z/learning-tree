@@ -1090,13 +1090,19 @@ class _LexicalOnly:
 
 
 class _RecordingBackend:
-    """Delegates to the local models and counts attempts, so silent fallbacks are visible."""
+    """Delegates to the local models and counts calls, so silent fallbacks are visible.
+
+    retrieve_memory swallows every semantic failure, and it also rejects invalid reranker
+    scores without an exception reaching this wrapper; a reranker call whose result was
+    not applied (RetrievalResult.reranked false) is therefore what marks that fallback.
+    """
 
     def __init__(self, inner) -> None:
         self.inner = inner
         self.model_key = inner.model_key
         self.queries = 0
         self.failures = 0
+        self.reranks = 0
 
     def embed_query(self, query):
         self.queries += 1
@@ -1114,18 +1120,28 @@ class _RecordingBackend:
             raise
 
     def rerank(self, query, documents):
+        self.reranks += 1
         return self.inner.rerank(query, documents)
 
 
 def semantic_backend(hybrid: bool):
-    """The backend to evaluate with and its readiness; never downloads weights."""
+    """The backend to evaluate with and its readiness; never downloads weights.
+
+    --hybrid measures the whole semantic pipeline, so both the embedding model and the
+    separately downloaded reranker must be ready.
+    """
     if not hybrid:
         return _LexicalOnly(), {"state": "lexical", "embedding_ready": False}
     from app.semantic_models import get_backend
 
     backend = get_backend()
     status = backend.prepare(allow_download=False)
-    if not status.get("embedding_ready"):
+    missing = [
+        name
+        for name, key in (("embedding", "embedding_ready"), ("reranking", "reranker_ready"))
+        if not status.get(key)
+    ]
+    if missing:
         state = status.get("state")
         if state == "not_installed":
             hint = "install them with: uv run python scripts/manage.py retrieval"
@@ -1133,9 +1149,10 @@ def semantic_backend(hybrid: bool):
             hint = "this process runs with MEMORY_RETRIEVAL_MODE=lexical"
         else:
             hint = "prepare the models with: uv run python scripts/manage.py retrieval"
+        models = "models are" if len(missing) > 1 else "model is"
         raise HybridUnavailable(
-            f"Hybrid retrieval was requested, but the local semantic models are unavailable "
-            f"(state: {state}); {hint}. Nothing was evaluated."
+            f"Hybrid retrieval was requested, but the local {' and '.join(missing)} {models} "
+            f"unavailable (state: {state}); {hint}. Nothing was evaluated."
         )
     return _RecordingBackend(backend), status
 
@@ -1234,7 +1251,7 @@ def measure_retrieval(
             warmed = False
             latencies, returned, modes, types = [], Counter(), Counter(), Counter()
             sizes, self_entries, parent_entries = [], [], []
-            reranked = eligible = fallbacks = 0
+            reranked = eligible = fallbacks = rerank_calls = rerank_fallbacks = 0
             for question in snapshot.questions:
                 timeline.advance(question.moment)
                 if question.message_id not in labels:
@@ -1267,7 +1284,8 @@ def measure_retrieval(
                     if not warmed:
                         run(session, question, config)  # Untimed warm-up per scope.
                         warmed = True
-                    attempts = (backend.queries, backend.failures) if recording else (0, 0)
+                    if recording:
+                        calls = (backend.queries, backend.failures, backend.reranks)
                     started = time.perf_counter()
                     result = run(session, question, config)
                     elapsed = (time.perf_counter() - started) * 1000
@@ -1287,11 +1305,19 @@ def measure_retrieval(
                     "parent": None,
                 }
                 if recording:
-                    tried = backend.queries > attempts[0]
-                    eligible += tried
-                    fallbacks += tried and (
-                        backend.failures > attempts[1] or result.mode != "hybrid"
+                    # Reranking only follows a successful embedding stage, and an empty
+                    # candidate list legitimately skips it, so only a reranker call whose
+                    # result was not applied is a reranking fallback.
+                    tried = backend.queries > calls[0]
+                    rerank_called = backend.reranks > calls[2]
+                    rerank_failed = rerank_called and not result.reranked
+                    embedding_failed = tried and (
+                        backend.failures > calls[1] or result.mode != "hybrid"
                     )
+                    eligible += tried
+                    fallbacks += embedding_failed or rerank_failed
+                    rerank_calls += rerank_called
+                    rerank_fallbacks += rerank_failed
                 for node_id, relevant in thread:
                     if relevant:
                         label = _label(ranked, relevant, k)
@@ -1321,6 +1347,8 @@ def measure_retrieval(
                 "reranked": reranked,
                 "semantic_attempts": eligible,
                 "semantic_fallbacks": fallbacks,
+                "rerank_attempts": rerank_calls,
+                "rerank_fallbacks": rerank_fallbacks,
                 "latency_ms": summarize(latencies),
                 "self_recall": _proxy(self_entries, k),
                 "parent_recall": _proxy(parent_entries, k),
@@ -1398,18 +1426,22 @@ def evaluate(database: Path, args, backend, status: dict, preloaded: bool) -> di
         counts = _database_counts(engine, snapshot)
     finally:
         engine.dispose()
-    attempts = sum(item["semantic_attempts"] for item in retrieval["scopes"].values())
-    fallbacks = sum(item["semantic_fallbacks"] for item in retrieval["scopes"].values())
-    hybrid_cases = sum(item["modes"].get("hybrid", 0) for item in retrieval["scopes"].values())
+    scopes = retrieval["scopes"].values()
+    attempts = sum(item["semantic_attempts"] for item in scopes)
+    fallbacks = sum(item["semantic_fallbacks"] for item in scopes)
+    ready = bool(status.get("embedding_ready") and status.get("reranker_ready"))
     semantic = {
         "requested": args.hybrid,
         "state": status.get("state"),
         "embedding_ready": bool(status.get("embedding_ready")),
         "reranker_ready": bool(status.get("reranker_ready")),
         "semantic_attempts": attempts,
-        "hybrid_cases": hybrid_cases,
+        "rerank_attempts": sum(item["rerank_attempts"] for item in scopes),
+        "hybrid_cases": sum(item["modes"].get("hybrid", 0) for item in scopes),
         "fallback_cases": fallbacks,
-        "achieved": bool(args.hybrid and status.get("embedding_ready") and not fallbacks),
+        "rerank_fallbacks": sum(item["rerank_fallbacks"] for item in scopes),
+        # Both models ran for at least one question and no retrieval fell back from either.
+        "achieved": bool(args.hybrid and ready and attempts and not fallbacks),
     }
     return {
         "scope": (
@@ -1514,7 +1546,8 @@ def parse_args(argv: list[str] | None):
     parser.add_argument(
         "--hybrid",
         action="store_true",
-        help="use cached local semantic models; exit 2 if hybrid retrieval is not achieved",
+        help="use the cached local embedding and reranking models; exit 2 if either is "
+        "unavailable, any retrieval falls back from either, or no question reaches them",
     )
     parser.add_argument(
         "--scopes", type=_scopes, default=list(SCOPES), help="comma list of path, tree, all"
@@ -1580,10 +1613,18 @@ def main(argv: list[str] | None = None) -> int:
         f"{report['settings']['retrieval_mode']} retrieval."
     )
     print(f"Report: {_display(output)} (proxy labels, not human relevance judgments).")
-    if args.hybrid and not report["semantic"]["achieved"]:
+    semantic = report["semantic"]
+    if args.hybrid and not semantic["achieved"]:
+        if not semantic["semantic_attempts"]:
+            reason = "no question had facts to rank, so the local models were never used"
+        else:
+            reason = (
+                f"{semantic['fallback_cases']} of {semantic['semantic_attempts']} retrievals "
+                f"fell back, {semantic['rerank_fallbacks']} of them at the reranking stage"
+            )
         print(
-            "Hybrid retrieval was requested but not achieved for every case; see "
-            "semantic.fallback_cases in the report.",
+            f"Hybrid retrieval was requested but not achieved: {reason}. See the semantic "
+            "section of the report.",
             file=sys.stderr,
         )
         return 2

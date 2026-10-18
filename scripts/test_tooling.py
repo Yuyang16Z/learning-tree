@@ -659,29 +659,50 @@ def test_retrieval_evaluation_migrates_only_the_copy(tmp_path):
     assert parent["cases"] == 1 and parent["hit_rate_at_k"] == 1.0
 
 
-def test_retrieval_evaluation_hybrid_without_local_models_exits_2(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("missing", ["runtime", "reranker"])
+def test_retrieval_evaluation_hybrid_without_local_models_exits_2(
+    tmp_path, monkeypatch, capsys, missing
+):
     evaluate = load("scripts/evaluate_retrieval.py")
     import app.semantic_models as semantic
 
-    monkeypatch.setattr(semantic, "_dependencies_available", lambda: False)
+    if missing == "runtime":
+        monkeypatch.setattr(semantic, "_dependencies_available", lambda: False)
+    else:
+        # The embedding model is cached but the separately downloaded reranker is not.
+        monkeypatch.setattr(semantic, "get_backend", lambda: _FakeModels(reranker="missing"))
     output = tmp_path / "report.json"
     assert evaluate.main(["--synthetic", "--hybrid", "--output", str(output)]) == 2
     assert not output.exists()
-    assert "Hybrid retrieval was requested" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "Hybrid retrieval was requested" in error
+    if missing == "reranker":
+        assert "reranking model" in error and "embedding" not in error
 
 
 class _FakeModels:
-    """Deterministic stand-in for the local models; it may start failing mid-run."""
+    """Deterministic stand-in for the local models; either one may fail or be missing.
+
+    reranker: "ready", "missing" (not loaded), "fails" (raises from its third call on)
+    or "invalid" (returns scores outside [0, 1], which retrieval rejects).
+    """
 
     model_key = "synthetic-evaluation-model"
 
-    def __init__(self, fail_after=None):
+    def __init__(self, fail_after=None, reranker="ready"):
         self.fail_after = fail_after
+        self.reranker = reranker
         self.queries = 0
+        self.reranks = 0
 
     def prepare(self, allow_download):
         assert allow_download is False
-        return {"state": "ready", "embedding_ready": True, "reranker_ready": True}
+        ready = self.reranker != "missing"
+        return {
+            "state": "ready" if ready else "degraded",
+            "embedding_ready": True,
+            "reranker_ready": ready,
+        }
 
     @staticmethod
     def _vector(text):
@@ -700,30 +721,74 @@ class _FakeModels:
         return [self._vector(document) for document in documents]
 
     def rerank(self, query, documents):
-        return [0.5 for _ in documents]
+        self.reranks += 1
+        if self.reranker == "missing" or (self.reranker == "fails" and self.reranks > 2):
+            raise RuntimeError("synthetic reranking failure")
+        return [1.5 if self.reranker == "invalid" else 0.5 for _ in documents]
 
 
-@pytest.mark.parametrize("fail_after, expected", [(None, 0), (3, 2)])
+@pytest.mark.parametrize(
+    "fail_after, reranker, expected",
+    [(None, "ready", 0), (3, "ready", 2), (None, "fails", 2), (None, "invalid", 2)],
+)
 def test_retrieval_evaluation_records_whether_hybrid_was_achieved(
-    tmp_path, monkeypatch, fail_after, expected
+    tmp_path, monkeypatch, capsys, fail_after, reranker, expected
 ):
     evaluate = load("scripts/evaluate_retrieval.py")
     import app.semantic_models as semantic
 
-    models = _FakeModels(fail_after)
+    models = _FakeModels(fail_after, reranker)
     monkeypatch.setattr(semantic, "get_backend", lambda: models)
     output = tmp_path / "report.json"
     arguments = ["--synthetic", "--hybrid", "--scopes", "path", "--output", str(output)]
     assert evaluate.main(arguments) == expected
     report = json.loads(output.read_text(encoding="utf-8"))
     semantic_report = report["semantic"]
+    path = report["memory_retrieval"]["scopes"]["path"]
     assert semantic_report["requested"] is True and semantic_report["embedding_ready"] is True
-    assert semantic_report["achieved"] is (fail_after is None)
-    if fail_after is None:
+    assert semantic_report["reranker_ready"] is True
+    assert semantic_report["achieved"] is (expected == 0)
+    assert semantic_report["semantic_attempts"] == path["semantic_attempts"] > 0
+    assert semantic_report["rerank_attempts"] == path["rerank_attempts"] > 0
+    assert semantic_report["rerank_fallbacks"] == path["rerank_fallbacks"]
+    if expected == 0:
         assert semantic_report["fallback_cases"] == 0 and semantic_report["hybrid_cases"] > 0
-        assert report["memory_retrieval"]["scopes"]["path"]["reranked"] > 0
-    else:
+        assert semantic_report["rerank_fallbacks"] == 0
+        assert path["reranked"] == path["rerank_attempts"] <= models.reranks
+        assert capsys.readouterr().err == ""
+    elif fail_after is not None:
         assert semantic_report["fallback_cases"] > 0
+    else:
+        # The embedding model kept working, so these cases still report mode "hybrid",
+        # but the reranker's result was not applied.
+        assert semantic_report["hybrid_cases"] == semantic_report["semantic_attempts"]
+        assert path["reranked"] == path["rerank_attempts"] - path["rerank_fallbacks"]
+        assert semantic_report["rerank_fallbacks"] > 0
+        assert semantic_report["fallback_cases"] == semantic_report["rerank_fallbacks"]
+        assert "reranking" in capsys.readouterr().err
+
+
+def test_retrieval_evaluation_hybrid_needs_a_question_that_reaches_the_models(
+    tmp_path, monkeypatch, capsys
+):
+    evaluate = load("scripts/evaluate_retrieval.py")
+    import app.semantic_models as semantic
+
+    models = _FakeModels()
+    monkeypatch.setattr(semantic, "get_backend", lambda: models)
+    source = tmp_path / "learning.db"
+    evaluate.build_synthetic(source)
+    with closing(sqlite3.connect(source)) as database:
+        database.execute("DELETE FROM memory")  # Questions and answers, but no facts yet.
+        database.commit()
+    output = tmp_path / "report.json"
+    arguments = ["--database", str(source), "--hybrid", "--output", str(output)]
+    assert evaluate.main(arguments) == 2
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["database"]["completed_questions"] == 17
+    assert report["semantic"]["semantic_attempts"] == models.queries == 0
+    assert report["semantic"]["achieved"] is False
+    assert "never used" in capsys.readouterr().err
 
 
 def test_retrieval_evaluation_workspace_is_private_and_removed():

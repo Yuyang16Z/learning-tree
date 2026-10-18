@@ -24,7 +24,7 @@ copied, nothing is evaluated and the script asks you to retry.
 | --- | --- |
 | `--database PATH` | Evaluate a temporary copy of this file. |
 | `--synthetic` | Evaluate the built-in fixture instead (exactly one of the two). |
-| `--hybrid` | Use the cached local embedding and reranking models. Without it, retrieval is keyword-only, like `MEMORY_RETRIEVAL_MODE=lexical`. |
+| `--hybrid` | Use the cached local embedding and reranking models; both must be prepared. Without it, retrieval is keyword-only, like `MEMORY_RETRIEVAL_MODE=lexical`. |
 | `--scopes path,tree,all` | Retrieval scopes to replay (default: all three). |
 | `--k 5` | Cut-off for the proxy metrics (default 5). |
 | `--include-text` | Also write questions, search terms and returned fact text. Off by default. |
@@ -33,10 +33,14 @@ copied, nothing is evaluated and the script asks you to retry.
 Exit status 0 means the report was written. Status 1 means the source or the
 report path was refused, or the source could not be read; nothing was evaluated
 and no report was written.
-Status 2 means `--hybrid` was requested but the local models are not installed
-or prepared (no report), or some retrieval fell back to keywords during the run
-(the report is written with `semantic.achieved` false); command-line usage
-errors also exit with 2. Install and prepare the models with
+Status 2 means `--hybrid` was requested but the local embedding or reranking
+model is not installed or prepared (no report), or hybrid retrieval was not
+achieved: some retrieval fell back during the run (to keywords when embedding
+failed, or to the ranking before reranking when the reranker failed), or no
+question had facts to rank, so the models were never used. The report is then
+written with `semantic.achieved` false, and `semantic` counts the retrievals
+that called each model and those that fell back. Command-line usage errors also
+exit with 2. Install and prepare the models with
 `uv run python scripts/manage.py retrieval` first; the script only loads cached
 weights.
 
@@ -156,14 +160,16 @@ UTF-8 字节计数、回放真实问题的记忆检索、检查主题全文搜�
 - **运行**：在仓库根目录执行
   `uv run python scripts/evaluate_retrieval.py --database branch_learning.db`；不带个人数据试用可加
   `--synthetic`。应用可以保持运行；复制期间若有其他程序打开文件，本次不评估并提示重试。
-  `--hybrid` 只加载已准备好的本地模型（先运行 `uv run python scripts/manage.py retrieval`）；
+  `--hybrid` 只加载已准备好的本地向量模型和重排模型，两者都必须可用（先运行
+  `uv run python scripts/manage.py retrieval`）；
   `--scopes` 选择回放范围（默认 path、tree、all），`--k` 为指标截断（默认 5），
   `--include-text` 才会写入问题、检索词和返回的事实原文，`--output` 指定报告路径
   （默认仓库内 `artifacts/retrieval-evaluation.json`；不能是数据库本身，无论路径如何拼写或经由别名，
   也不能是数据库旁边以其文件名开头的文件，例如 `-wal`）。退出码 0 表示已写报告；1 表示源文件或
-  报告路径被拒绝、或源文件无法读取，未评估也未写报告；2 表示请求了混合检索但模型不可用
-  （不写报告），或运行中有检索退回关键词（报告中 `semantic.achieved` 为 false）；命令行参数错误
-  也返回 2。
+  报告路径被拒绝、或源文件无法读取，未评估也未写报告；2 表示请求了混合检索但向量模型或重排模型
+  不可用（不写报告），或没有完整实现混合检索：运行中有检索退回（向量失败时退回关键词，重排失败时
+  使用重排前的排序），或没有任何问题有可排序的事实、模型从未被调用（报告中 `semantic.achieved`
+  为 false，`semantic` 记录调用各模型的检索数和退回数）；命令行参数错误也返回 2。
 - **副本**：通过只读连接和 SQLite 备份 API 复制到仅本人可读的临时目录，结束时删除。干净关闭的
   WAL 数据库以 immutable 方式读取，避免在原文件旁留下 `-wal`/`-shm`；有活动日志时经由日志读取；
   只有日志没有共享内存文件、或残留回滚日志时拒绝执行。导入任何应用模块之前就把 `DATABASE_URL`
