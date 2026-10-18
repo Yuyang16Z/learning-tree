@@ -7,16 +7,24 @@ os.environ["DATABASE_URL"] = "sqlite://"
 os.environ["DEFAULT_API_KEY"] = ""
 os.environ["MEMORY_RETRIEVAL_MODE"] = "lexical"
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from openai import OpenAI
 from sqlalchemy import inspect, text
 from sqlmodel import Session, SQLModel, create_engine, select
 
+import app.llm as llm
 import app.service as service
 from app import db
-from app.calibration import load_calibration, record_usage
-from app.context_budget import ContextPolicy
+from app.calibration import (
+    MIN_ESTIMATED_UNITS,
+    calibration_sample,
+    load_calibration,
+    record_usage,
+)
+from app.context_budget import ContextPolicy, estimate_request_tokens, has_images
 from app.models import KnowledgeTree, Message, ModelCalibration, ModelConfig, Node
 from app.routers import nodes, trees
 from app.service import to_spec
@@ -123,6 +131,24 @@ def test_record_usage_gates_small_requests_clamps_and_averages(tmp_path):
     assert record_usage(engine, 2, 10000, 5000) == 0.5
 
 
+def test_calibration_sample_pairs_each_qualifying_request():
+    rounds = [
+        {"estimated_input_tokens": 3000, "input_tokens": 3600, "has_images": False},
+        {"estimated_input_tokens": 1999, "input_tokens": 9000},  # Below the gate on its own.
+        {"estimated_input_tokens": 5000, "input_tokens": None},  # Usage not reported.
+        {"estimated_input_tokens": 5000, "input_tokens": 1000, "has_images": True},
+        {"estimated_input_tokens": 4000, "input_tokens": 0},
+        {"estimated_input_tokens": 2000, "input_tokens": 2400},
+    ]
+    assert calibration_sample(rounds) == (5000, 6000)
+    assert calibration_sample(rounds[1:5]) is None and calibration_sample([]) is None
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
+    assert has_images([{"role": "user", "content": [{"type": "text", "text": "q"}, image]}])
+    native = [{"type": "image", "source": {"type": "base64", "data": "AA=="}}]
+    assert has_images([{"role": "assistant", "content": None, "_anthropic_content": native}])
+    assert not has_images([{"role": "user", "content": "q"}, {"role": "tool", "content": "x"}])
+
+
 def test_real_answers_learn_calibration_and_shrink_the_next_budget(workspace):
     client, engine, monkeypatch = workspace
     streaming_double(monkeypatch, estimated=4000, actual=6000, cached=1000)
@@ -204,3 +230,152 @@ def test_legacy_schema_gains_diagnostics_column_and_calibration_table(tmp_path, 
         message = session.get(Message, 5)
         assert message.content == "旧回答" and message.diagnostics is None
     engine.dispose()
+
+
+LOOKUP = {
+    "type": "function",
+    "function": {
+        "name": "lookup",
+        "description": "Look a term up.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+
+def counts(input_tokens):
+    return {"input_tokens": input_tokens, "cached_input_tokens": 0, "output_tokens": 20}
+
+
+def tool_loop(monkeypatch, tool_rounds, usage_for):
+    """The real run_agent and request fitting; the double answers each fitted request
+    with `tool_rounds` lookup calls, then a final answer, reporting usage_for(index, estimate)."""
+    estimates = []
+
+    def chat_once(spec, conversation, tools):
+        system, messages = conversation[0]["content"], conversation[1:]
+        estimate = estimate_request_tokens(system, messages, tools, spec.protocol)
+        estimates.append(estimate)
+        index = len(estimates) - 1
+        reply = (
+            {"content": None, "tool_calls": [{"id": f"call_{index}", "name": "lookup", "args": {}}]}
+            if index < tool_rounds
+            else {"content": "合成回答。", "tool_calls": []}
+        )
+        return {**reply, "usage": usage_for(index, estimate)}
+
+    monkeypatch.setattr(llm, "_chat_once", chat_once)
+    monkeypatch.setattr(nodes, "run_agent", llm.run_agent)
+    monkeypatch.setattr(nodes, "assemble_tools", lambda *args, **kwargs: ([LOOKUP], {}))
+    return estimates
+
+
+def calibration_rows(engine):
+    with Session(engine) as session:
+        return [(row.samples, row.ratio) for row in session.exec(select(ModelCalibration))]
+
+
+def test_tool_rounds_each_below_the_gate_teach_nothing(workspace):
+    """The 2,000-unit gate applies to each provider request, not to an answer's sum."""
+    client, engine, monkeypatch = workspace
+    estimates = tool_loop(monkeypatch, 2, lambda index, estimate: counts(estimate + 350))
+    events = ask(client, tools=["lookup"])
+    assert events[-1]["status"] == "complete", events
+    assert len(estimates) == 3 and max(estimates) < MIN_ESTIMATED_UNITS <= sum(estimates)
+    report = next(event["diagnostics"] for event in events if "diagnostics" in event)
+    assert report["tool_rounds"] == 2 and report["estimated_input_tokens"] == sum(estimates)
+    assert calibration_rows(engine) == []
+
+
+def test_requests_without_reported_usage_stay_out_of_sample_and_totals(workspace):
+    """Only requests that report their input pair an estimate with an actual count."""
+    client, engine, monkeypatch = workspace
+    estimates = tool_loop(
+        monkeypatch,
+        1,
+        lambda index, estimate: counts(round(estimate * 1.1)) if index == 0 else None,
+    )
+    events = ask(client, question="请逐条解释这些条件。" + "条件与例外" * 500, tools=["lookup"])
+    assert events[-1]["status"] == "complete", events
+    assert len(estimates) == 2 and min(estimates) >= MIN_ESTIMATED_UNITS
+    ((samples, ratio),) = calibration_rows(engine)
+    assert samples == 1 and ratio == pytest.approx(1.1, abs=0.001)
+    report = next(event["diagnostics"] for event in events if "diagnostics" in event)
+    # A total that one request did not report is unknown, never a partial sum.
+    assert report["estimated_input_tokens"] == sum(estimates)
+    assert report["actual_input_tokens"] is None and report["cached_input_tokens"] is None
+
+
+def openai_stream(monkeypatch, prompt_tokens_for):
+    """The real stream_chat over the OpenAI SDK; the endpoint reports prompt_tokens_for(body)."""
+    bodies = []
+
+    def frame(payload):
+        return "data: " + json.dumps(payload) + "\n\n"
+
+    def handler(request):
+        body = json.loads(request.content)
+        bodies.append(body)
+        chunk = {"id": "c", "object": "chat.completion.chunk", "created": 1, "model": "synthetic"}
+        frames = [
+            frame({**chunk, "choices": [{"index": 0, "delta": {"content": "合成回答。"}}]}),
+            frame({**chunk, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+            frame(
+                {
+                    **chunk,
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": prompt_tokens_for(body),
+                        "completion_tokens": 5,
+                        "total_tokens": prompt_tokens_for(body) + 5,
+                    },
+                }
+            ),
+        ]
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content="".join(frames) + "data: [DONE]\n\n",
+        )
+
+    monkeypatch.setattr(llm, "_STREAM_OPTIONS_UNSUPPORTED", set())
+    monkeypatch.setattr(
+        llm,
+        "_client",
+        lambda spec: OpenAI(
+            base_url=spec.base_url,
+            api_key=spec.api_key,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+            max_retries=0,
+        ),
+    )
+    monkeypatch.setattr(nodes, "stream_chat", llm.stream_chat)
+    return bodies
+
+
+def test_image_questions_never_move_the_learned_ratio(workspace):
+    """An image's fixed reservation measures provider image pricing, not the text estimator."""
+    client, engine, monkeypatch = workspace
+    with Session(engine) as session:
+        config = session.get(ModelConfig, 1)
+        # Large enough that the image history never compacts: every question streams.
+        config.context_window, config.max_tokens = 65536, 4096
+        session.add(config)
+        session.add(ModelCalibration(config_id=1, samples=3, ratio=1.5))
+        session.commit()
+
+    def reported(body):
+        system, *messages = body["messages"]
+        if isinstance(messages[-1]["content"], list):
+            return 1418  # Text plus the provider's own (small) image cost.
+        return round(estimate_request_tokens(system["content"], messages) * 1.5)
+
+    bodies = openai_stream(monkeypatch, reported)
+    # A text question teaches the ratio over this streaming path.
+    assert ask(client, question="解释" + "条件与例外" * 600)[-1]["status"] == "complete"
+    ((samples, ratio),) = calibration_rows(engine)
+    assert samples == 4 and ratio == pytest.approx(1.5, abs=0.01)
+    # Image questions, and later requests resending their images as history, do not.
+    image = "data:image/png;base64,iVBORw0KGgo="
+    for _ in range(3):
+        assert ask(client, question="图里是什么？", images=[image])[-1]["status"] == "complete"
+    assert len(bodies) == 4 and calibration_rows(engine) == [(samples, ratio)]

@@ -21,7 +21,13 @@ from typing import Literal
 from openai import OpenAI
 
 from . import anthropic_provider, model_catalog
-from .context_budget import ContextPolicy, estimate_request_tokens, fit_request
+from .context_budget import (
+    BudgetedRequest,
+    ContextPolicy,
+    estimate_request_tokens,
+    fit_request,
+    has_images,
+)
 from .tool_catalog import SEARCH_TOOL_NAME, ToolCatalog
 
 MOCK_ANSWER = (
@@ -98,16 +104,19 @@ def _openai_usage(usage) -> dict | None:
     }
 
 
-def _record_round(diagnostics: dict | None, estimated: int, usage: dict | None) -> None:
-    """Append one provider request to the caller's diagnostics side-channel."""
+def _record_round(diagnostics: dict | None, prepared: BudgetedRequest, usage: dict | None) -> None:
+    """Append one fitted provider request and its reported usage to the caller's
+    diagnostics side-channel. has_images marks a request whose estimate includes fixed
+    image reservations, so calibration can leave it out."""
     if diagnostics is None:
         return
     diagnostics.setdefault("rounds", []).append(
         {
-            "estimated_input_tokens": estimated,
+            "estimated_input_tokens": prepared.estimated_input_tokens,
             "input_tokens": usage["input_tokens"] if usage else None,
             "cached_input_tokens": usage["cached_input_tokens"] if usage else None,
             "output_tokens": usage["output_tokens"] if usage else None,
+            "has_images": has_images(prepared.messages),
         }
     )
 
@@ -190,7 +199,7 @@ def stream_chat(
     if spec.protocol == "anthropic":
         turn_spec = replace(spec, cache_prefix=cache_prefix) if cache_prefix else spec
         usage = yield from anthropic_provider.stream_chat(turn_spec, system, messages, deep)
-        _record_round(diagnostics, prepared.estimated_input_tokens, usage)
+        _record_round(diagnostics, prepared, usage)
         return
 
     stream = _stream_completion(
@@ -223,7 +232,7 @@ def stream_chat(
             raise RuntimeError("模型连接在回答完成前断开，可以重试。")
     finally:
         stream.close()
-    _record_round(diagnostics, prepared.estimated_input_tokens, usage)
+    _record_round(diagnostics, prepared, usage)
 
 
 # ---------- Tool calling: turn-based agent loop ----------
@@ -506,7 +515,7 @@ def run_agent(
         r = (yield from _relay_turn(turn, deep)) if streamed else turn
         if r is None:
             raise RuntimeError("模型连接在回答完成前断开，可以重试。")
-        _record_round(diagnostics, prepared.estimated_input_tokens, r.get("usage"))
+        _record_round(diagnostics, prepared, r.get("usage"))
         if not streamed and deep and r.get("reasoning"):
             yield {"type": "reasoning", "text": r["reasoning"]}
         if r["tool_calls"]:
@@ -605,7 +614,7 @@ def complete(
     system, messages = prepared.system, prepared.messages
     if spec.protocol == "anthropic":
         text, usage = _collect_text(anthropic_provider.stream_chat(spec, system, messages))
-        _record_round(diagnostics, prepared.estimated_input_tokens, usage)
+        _record_round(diagnostics, prepared, usage)
         return text
     resp = _client(spec).chat.completions.create(
         model=spec.llm_model,
@@ -614,9 +623,7 @@ def complete(
     )
     if resp.choices[0].finish_reason != "stop":
         raise RuntimeError("模型回答未完整结束，可以重试。")
-    _record_round(
-        diagnostics, prepared.estimated_input_tokens, _openai_usage(getattr(resp, "usage", None))
-    )
+    _record_round(diagnostics, prepared, _openai_usage(getattr(resp, "usage", None)))
     return resp.choices[0].message.content or ""
 
 

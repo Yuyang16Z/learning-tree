@@ -134,6 +134,10 @@ def _json_tokens(value) -> int:
     return estimate_text_tokens(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
 
 
+def _is_image(part) -> bool:
+    return isinstance(part, dict) and part.get("type") in ("image", "image_url")
+
+
 def _content_tokens(content) -> int:
     if isinstance(content, str):
         return estimate_text_tokens(content)
@@ -143,11 +147,20 @@ def _content_tokens(content) -> int:
         return _json_tokens(content)
     total = 0
     for part in content:
-        if isinstance(part, dict) and part.get("type") in ("image", "image_url"):
+        if _is_image(part):
             total += IMAGE_TOKEN_RESERVE + 64
         else:
             total += _json_tokens(part) + 16
     return total
+
+
+def has_images(messages: list[dict]) -> bool:
+    """Whether a request carries image parts, which the estimate reserves rather than counts."""
+    return any(
+        isinstance(value, list) and any(_is_image(part) for part in value)
+        for message in messages
+        for value in (message.get("content"), message.get("_anthropic_content"))
+    )
 
 
 def estimate_request_tokens(

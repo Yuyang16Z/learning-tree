@@ -14,7 +14,7 @@ from sqlalchemy import delete
 from sqlalchemy.orm import defer
 from sqlmodel import Session, select
 
-from ..calibration import record_usage
+from ..calibration import calibration_sample, record_usage
 from ..config import settings
 from ..context import BASE_SYSTEM, build_context, context_messages, make_content
 from ..context_budget import ContextBudgetExceeded, ContextPolicy, estimate_request_tokens
@@ -1070,8 +1070,12 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             rounds = usage.get("rounds") or []
 
             def total(key: str) -> int | None:
-                values = [r.get(key) for r in rounds if r.get(key) is not None]
-                return int(sum(values)) if values else None
+                # A total some request did not report is unknown: a partial sum would
+                # set an answer-wide estimate against part of its usage.
+                values = [r.get(key) for r in rounds]
+                if not values or any(value is None for value in values):
+                    return None
+                return int(sum(values))
 
             def ms(seconds: float) -> int:
                 return int(round(max(0.0, seconds) * 1000))
@@ -1469,16 +1473,11 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             try:
                 report_diagnostics()
                 if generation.status == "complete" and not is_mock:
-                    report = generation.diagnostics or {}
-                    if report.get("actual_input_tokens"):
-                        # Calibrate the estimator from real usage only; the recorder
-                        # ignores small requests, and demo answers never learn.
-                        record_usage(
-                            engine,
-                            config_id,
-                            int(report.get("estimated_input_tokens") or 0),
-                            int(report["actual_input_tokens"]),
-                        )
+                    # Calibrate the estimator from real usage only, pairing each request's
+                    # estimate with its own reported input; demo answers never learn.
+                    sample = calibration_sample(usage.get("rounds") or [])
+                    if sample:
+                        record_usage(engine, config_id, *sample)
             except Exception:
                 pass
             if stream and hasattr(stream, "close"):
