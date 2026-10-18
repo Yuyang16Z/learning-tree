@@ -117,7 +117,11 @@ computed within that pool. They are rendered after the path facts in their own
 sections, each line labelled with the branch or topic it came from, and they
 share a smaller budget (four entries, 1,200 characters) than the path (eight
 entries, 2,400 characters). Turning a switch on therefore never removes a path
-fact the answer would otherwise have received.
+fact the answer would otherwise have received. To keep each question's cost
+bounded however many facts other branches and topics hold, at most 48 widened
+facts per question are embedded, scored and reranked: the best keyword matches
+first, then the most recent. A widened fact that shares no words with the
+question can therefore be missed once a scope holds more than 48 facts.
 Each widened hit is rechecked against current records for its own scope before
 it enters the prompt: a sibling whose answer failed, or a topic that was
 archived meanwhile, drops out. Both switches are off by default; changing them
@@ -231,8 +235,10 @@ backups include them, learning-tree exports exclude `sources`.
   当前学习路径始终参与检索，不能关闭。扩大范围后的记忆与路径记忆经过同样的排序步骤，但作为
   独立的一组：相似度门槛、候选截断和重排截断都只在各自组内计算；它们单独分节渲染、
   每条标注来源分支或主题，并使用更小的预算（4 条、1,200 字符，路径为 8 条、2,400 字符），
-  因此打开开关不会让原本能进入回答的路径记忆被挤掉；进入提示前会按各自范围重新核对来源是否仍然有效。两个开关默认关闭，
-  保存带版本号，别处同时修改会重新载入最新设置而不是覆盖。
+  因此打开开关不会让原本能进入回答的路径记忆被挤掉；为了让每次提问的开销有上限，扩大范围的记忆
+  每次最多 48 条进入向量计算和重排（先取关键词最匹配的，再取最新的），所以范围内超过 48 条时，
+  与问题没有共同词语的记忆可能检索不到；进入提示前会按各自范围重新核对来源是否仍然有效。
+  两个开关默认关闭，保存带版本号，别处同时修改会重新载入最新设置而不是覆盖。
 - **结构化事实**：提炼出的事实带类型标签（定义、适用条件、纠正误解、待解决疑问、学习状态、
   结论）。新事实可以标记为修正某条当前路径上的旧事实，旧事实显示「已更新」并保留可删，
   但不再进入回答、搜索索引和模型的历史检索；删除新事实或它所在的分支、主题后，旧事实会恢复

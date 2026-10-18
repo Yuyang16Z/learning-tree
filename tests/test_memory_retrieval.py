@@ -990,6 +990,26 @@ def test_a_strong_wider_similarity_does_not_tighten_the_path_gate(session):
     assert [hit.memory_id for hit in widened.facts if hit.scope == "other"] == [other.id]
 
 
+def test_wider_scopes_bound_the_vector_work_per_question(session):
+    path = remember(session, "路径：schema 校验先于工具执行。")
+    matching = [
+        remember(session, f"其他主题 {index}：schema 校验的版本兼容。", tree_id=2, source_node_id=4)
+        for index in range(3)
+    ]
+    for index in range(200):
+        remember(session, f"无关记录 {index}：地理与气候。", tree_id=2, source_node_id=4)
+    relevant = [path.content, *(memory.content for memory in matching)]
+    config = RetrievalConfig(include_other_trees=True)
+    backend = Backend(relevant)
+    result = retrieve_memory(session, 1, [1], query="schema 校验", config=config, backend=backend)
+    embedded = sum(backend.document_calls, [])
+    assert len(embedded) <= 1 + config.wider_candidate_k < 201
+    assert set(relevant) <= set(embedded), "keyword matches always reach the vector stage"
+    assert ids(result) == {path.id, *(memory.id for memory in matching)}
+    reranked = sum((documents for _, documents in backend.rerank_calls), [])
+    assert len(reranked) <= 1 + config.wider_candidate_k
+
+
 def test_wider_hits_are_revalidated_against_current_records(session):
     session.add_all([KnowledgeTree(id=3, title="归档树", archived=True)])
     session.add(Node(id=9, tree_id=3, title="归档树的根", status="complete"))

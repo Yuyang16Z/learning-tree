@@ -57,6 +57,10 @@ class RetrievalConfig:
     include_other_trees: bool = False
     wider_top_k: int = 4
     wider_char_budget: int = 1200
+    # Wider scopes can hold every fact of every topic. Only this many of them, the
+    # best keyword matches first and then the most recent, reach embedding, vector
+    # scoring and reranking, so a question's cost does not grow with all facts.
+    wider_candidate_k: int = 48
     # A candidate close to a strong best match passes even below min_similarity.
     # These defaults are not validated against measured data yet.
     relative_similarity_margin: float = 0.03
@@ -511,6 +515,22 @@ def _revalidate(
     return result
 
 
+def _shortlist(query: str, pool: list[MemoryHit], config: RetrievalConfig) -> list[MemoryHit]:
+    """At most wider_candidate_k wider facts, ranked by keywords and then recency."""
+    if len(pool) <= config.wider_candidate_k:
+        return pool
+    lexical = _lexical_scores(query, pool)
+    keep = {
+        item.memory_id
+        for item in sorted(
+            pool,
+            key=lambda item: (lexical.get(item.memory_id, 0.0), item.memory_id),
+            reverse=True,
+        )[: max(0, config.wider_candidate_k)]
+    }
+    return [item for item in pool if item.memory_id in keep]
+
+
 def _fuse(
     query: str,
     pool: list[MemoryHit],
@@ -610,15 +630,16 @@ def retrieve_memory(
         # see the other, so enabling a scope cannot drop a path fact.
         pools = [
             [item for item in facts if item.scope == "path"],
-            [item for item in facts if item.scope != "path"],
+            _shortlist(search_query, [item for item in facts if item.scope != "path"], config),
         ]
+        ranked_facts = pools[0] + pools[1]
         similarities: dict[int, float] | None = None
         try:
             semantic = backend if backend is not None else get_backend()
             query_vector = _unit(semantic.embed_query(search_query))
-            vectors = _vectors(session, facts, semantic, len(query_vector))
+            vectors = _vectors(session, ranked_facts, semantic, len(query_vector))
             similarities = {}
-            for item, vector in zip(facts, vectors, strict=True):
+            for item, vector in zip(ranked_facts, vectors, strict=True):
                 if len(vector) != len(query_vector):
                     raise ValueError("embedding dimension mismatch")
                 similarities[item.memory_id] = sum(
