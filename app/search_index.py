@@ -288,13 +288,15 @@ def excerpt(content: str, needle: str, fallback: str = "") -> str:
 
     FTS5's own snippet() places its window by token position, which with trigram
     phrases can land on the start of the text instead of the match; it is only
-    used when a case-folded search cannot locate the match (diacritics).
+    used when a case-insensitive search cannot locate the match (diacritics).
+    The search folds case character by character, so its offsets stay valid in
+    the original text; full case folding (ß to ss, ligatures) would shift them.
     """
-    position = content.casefold().find(needle.casefold())
-    if position < 0:
+    match = re.search(re.escape(needle), content, re.IGNORECASE)
+    if match is None:
         return fallback or content[:40] + ("…" if len(content) > 40 else "")
-    start = max(0, position - 12)
-    end = min(len(content), position + len(needle) + 28)
+    start = max(0, match.start() - 12)
+    end = min(len(content), match.end() + 28)
     return ("…" if start > 0 else "") + content[start:end] + ("…" if end < len(content) else "")
 
 

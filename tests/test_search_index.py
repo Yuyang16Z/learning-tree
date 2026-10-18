@@ -393,6 +393,23 @@ def test_short_queries_and_missing_fts5_use_like_with_literal_wildcards(engine, 
         assert search_text(session, "QUICKSORT", tree_id=2, kinds=["memory"])[0].ref_id == 103
 
 
+def test_excerpts_keep_the_match_when_case_folding_changes_lengths(engine):
+    from app.search_index import excerpt
+
+    german = "Das heißt: " * 40 + "Quicksort teilt das Array in zwei Teile und sortiert sie."
+    snippet = excerpt(german, "quicksort")
+    assert "Quicksort teilt" in snippet and snippet.strip("…") in german
+    ligatures = "ﬁﬂ" * 30 + " QuickSort teilt"
+    assert "QuickSort" in excerpt(ligatures, "QUICKSORT")
+    # Matches that only diacritic folding finds keep the FTS snippet.
+    assert excerpt("Ein café am Markt", "cafe", "…Ein café…") == "…Ein café…"
+    with Session(engine) as session:
+        session.add(Message(id=70, node_id=2, role="assistant", content=german))
+        session.commit()
+        hits = search_text(session, "Quicksort teilt", tree_id=1)
+        assert [hit.ref_id for hit in hits] == [70] and "Quicksort teilt" in hits[0].snippet
+
+
 def test_database_errors_become_empty_results(engine, monkeypatch):
     def broken(*args, **kwargs):
         raise OperationalError("SELECT secret", {}, Exception("no such table"))
