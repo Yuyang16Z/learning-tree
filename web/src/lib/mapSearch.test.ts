@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SearchHit, TreeNode } from "../types";
-import { createMapSearcher, hitKindLabel, localMatches, mergeSearchResults, plainSnippet, searchAnchor } from "./mapSearch";
+import { createMapSearcher, currentHits, hitKindLabel, localMatches, mergeSearchResults, plainSnippet, searchAnchor, type RemoteHits } from "./mapSearch";
 
 function node(id: number, title: string, seed_text: string | null = null): TreeNode {
   return { id, parent_id: id === 1 ? null : 1, tree_id: 7, title, seed_text, has_summary: false };
@@ -130,6 +130,30 @@ describe("debounced topic search", () => {
     release([hit("message", 2, "fresh", 13)]);
     await vi.advanceTimersByTimeAsync(0);
     expect(delivered.map(hits => hits[0].snippet)).toEqual(["fresh"]);
+  });
+
+  it("shows server hits only for the topic and query they answer, also after a failed request", async () => {
+    vi.useFakeTimers();
+    let fail = false;
+    const search = vi.fn(async (_treeId: number, query: string) => {
+      if (fail) throw new Error("422");
+      return [hit("message", 1, `…${query}…`, 12)];
+    });
+    let remote: RemoteHits | null = null;
+    const searcher = createMapSearcher({ search, delayMs: 10 });
+    const run = (treeId: number, query: string) => searcher.run(treeId, query, hits => { remote = { treeId, query: query.trim(), hits }; });
+    run(7, "pivot");
+    await vi.advanceTimersByTimeAsync(10);
+    expect(currentHits(remote, 7, " pivot ").map(item => item.snippet)).toEqual(["…pivot…"]);
+    // The next keystroke hides them before its own request is even sent.
+    expect(currentHits(remote, 7, "pivot 归并")).toEqual([]);
+    expect(currentHits(remote, 8, "pivot")).toEqual([]);
+    fail = true;
+    run(7, "pivot 归并");
+    await vi.advanceTimersByTimeAsync(10);
+    expect(search).toHaveBeenCalledTimes(2);
+    expect(currentHits(remote, 7, "pivot 归并")).toEqual([]);
+    expect(currentHits(null, 7, "pivot")).toEqual([]);
   });
 
   it("ignores blank queries and failed requests", async () => {

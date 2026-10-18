@@ -146,8 +146,10 @@ appear as a second group, each labelled with what matched (question, answer,
 note or memory) and a short snippet shown without Markdown markers. Choosing a
 question or answer hit opens the node, scrolls to the matching text and
 highlights it, also inside formatted answers (bold text, lists, code, links).
-Pending or interrupted answers and superseded facts are never listed. Results are capped at thirty, and a search is dropped
-when you switch topics before it returns.
+Pending or interrupted answers and superseded facts are never listed. Results
+are capped at thirty, and queries at 300 characters. History hits are shown only
+for the query and topic they answer: changing either hides them at once, and a
+search that fails or returns after you switched topics adds nothing.
 
 Search uses a SQLite FTS5 trigram index (`search_index`) maintained by database
 triggers, so it follows every edit, completion, supersession and deletion
@@ -225,7 +227,8 @@ idempotent; database backups include them, learning-tree exports exclude
 - **主题内全文搜索**：学习树搜索框除了即时匹配标题和引用，还会向服务端查询当前主题的问题、
   已完成回答、学习笔记和当前事实中的原文片段，作为第二组结果展示，标明匹配的是问题、回答、
   笔记还是记忆（片段去掉 Markdown 标记）；选择问题或回答结果会跳转到匹配文字并高亮，加粗、
-  列表、代码和链接等格式化回答中也能定位。
+  列表、代码和链接等格式化回答中也能定位。记录中的匹配只对应当前查询和主题：修改查询或切换主题
+  会立即隐藏旧结果，失败的搜索不会留下旧结果；查询最长 300 个字符。
   索引由 SQLite FTS5（三元组分词）和触发器维护，启动时缺失或计数不符会自动重建；短于
   3 个字符的查询或不支持 FTS5 的 SQLite 使用 LIKE 扫描。
 - 模型可用的只读工具 `search_learning_history` 受同一组开关约束：默认只查当前路径，

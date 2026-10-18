@@ -465,6 +465,22 @@ async function poll(callback, label) {
     await poll(async () => (await highlighted()).some(text => text.includes('KESTREL-88')), 'the highlight lands on the question text');
     assert(((await page.locator(`[data-message-id="${searchRow.question_message_id}"]`).getAttribute('class')) ?? '').includes('chat-source-flash'), 'The question turn itself is marked');
     checks.push('A map search hit on a question is labelled as a question and highlights that question in the conversation');
+
+    // The next query never lists the previous query's history hits, even when its own request fails.
+    await map.getByRole('button', { name: 'Search nodes', exact: true }).click();
+    const searchBox = map.getByRole('textbox', { name: 'Search questions or quotes', exact: true });
+    assert.equal(await searchBox.getAttribute('maxlength'), '300', 'Queries stop at the server limit');
+    await searchBox.fill('median-of-three');
+    const historyGroup = map.getByRole('group', { name: 'Matches in history', exact: true });
+    await historyGroup.waitFor();
+    await page.route(searchRoute, route => route.abort());
+    await searchBox.fill('median-of-three keeps');
+    assert.equal(await historyGroup.count(), 0, 'Hits for the previous query disappear at once');
+    await page.waitForTimeout(600);
+    assert.equal(await historyGroup.count(), 0, 'A failed search leaves no stale hits behind');
+    await page.unroute(searchRoute);
+    await searchBox.press('Escape');
+    checks.push('Map search shows history hits only for the current query, also when its request fails');
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ ok: true, checks }, null, 2));
   } finally {

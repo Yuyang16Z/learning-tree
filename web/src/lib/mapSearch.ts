@@ -4,6 +4,16 @@ export type SearchAnchor = Omit<NavigationAnchor, "nodeId" | "nonce">;
 
 /** The map shows at most this many results across both groups. */
 export const MAP_SEARCH_CAP = 30;
+/** The search API rejects longer queries. */
+export const MAP_SEARCH_MAX_QUERY = 300;
+
+/** Server hits as delivered for one topic and trimmed query. */
+export interface RemoteHits { treeId: number; query: string; hits: SearchHit[] }
+
+/** Server hits count only while they answer the topic and query now shown, so none outlive a keystroke. */
+export function currentHits(remote: RemoteHits | null, treeId: number | null, query: string): SearchHit[] {
+  return remote && remote.treeId === treeId && remote.query === query.trim() ? remote.hits : [];
+}
 
 /** Instant client-side title/quote matches; the first result group. */
 export function localMatches(nodes: readonly TreeNode[], query: string): TreeNode[] {
