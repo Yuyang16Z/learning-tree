@@ -28,6 +28,7 @@ import sqlite3
 import sys
 import tempfile
 import time
+import unicodedata
 from collections import Counter
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
@@ -1441,6 +1442,33 @@ def evaluate(database: Path, args, backend, status: dict, preloaded: bool) -> di
     }
 
 
+def _same_file(first: Path, second: Path) -> bool:
+    try:
+        return os.path.samefile(first, second)
+    except OSError:
+        return False  # Either path is missing or unreadable.
+
+
+def _fold(name: str) -> str:
+    """Case-folded, canonically decomposed: how case- and normalization-insensitive file
+    systems such as APFS compare names."""
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", name).casefold())
+
+
+def _overwrites_database(output: Path, source: Path) -> bool:
+    """Whether writing the report at `output` could replace the database or a file beside it.
+
+    Files and directories are compared by identity, so case variants and aliases such as
+    macOS firmlinks are caught. Names in the database's own directory are compared
+    caselessly, which also covers -wal, -shm and -journal files that do not exist yet.
+    """
+    if _same_file(output, source):
+        return True
+    return _same_file(output.parent, source.parent) and _fold(output.name).startswith(
+        _fold(source.name)
+    )
+
+
 def _write_report(report: dict, output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     partial = output.with_name(output.name + ".partial")
@@ -1516,7 +1544,7 @@ def main(argv: list[str] | None = None) -> int:
             print("Database file not found.", file=sys.stderr)
             return 1
         source = source.resolve()
-        if output.parent == source.parent and output.name.startswith(source.name):
+        if _overwrites_database(output, source):
             print("The report must not be written over or beside the database.", file=sys.stderr)
             return 1
     if output.is_dir():

@@ -28,10 +28,11 @@ copied, nothing is evaluated and the script asks you to retry.
 | `--scopes path,tree,all` | Retrieval scopes to replay (default: all three). |
 | `--k 5` | Cut-off for the proxy metrics (default 5). |
 | `--include-text` | Also write questions, search terms and returned fact text. Off by default. |
-| `--output FILE` | Report path (default `artifacts/retrieval-evaluation.json` in the repository). |
+| `--output FILE` | Report path (default `artifacts/retrieval-evaluation.json` in the repository). It may not be the database, under any spelling or alias of its path, or a file beside it whose name starts with the database's name, such as its `-wal` file. |
 
-Exit status 0 means the report was written. Status 1 means the source was
-refused or could not be read; nothing was evaluated and no report was written.
+Exit status 0 means the report was written. Status 1 means the source or the
+report path was refused, or the source could not be read; nothing was evaluated
+and no report was written.
 Status 2 means `--hybrid` was requested but the local models are not installed
 or prepared (no report), or some retrieval fell back to keywords during the run
 (the report is written with `semantic.achieved` false); command-line usage
@@ -158,9 +159,11 @@ UTF-8 字节计数、回放真实问题的记忆检索、检查主题全文搜�
   `--hybrid` 只加载已准备好的本地模型（先运行 `uv run python scripts/manage.py retrieval`）；
   `--scopes` 选择回放范围（默认 path、tree、all），`--k` 为指标截断（默认 5），
   `--include-text` 才会写入问题、检索词和返回的事实原文，`--output` 指定报告路径
-  （默认仓库内 `artifacts/retrieval-evaluation.json`）。退出码 0 表示已写报告；1 表示源文件被拒绝
-  或无法读取，未评估也未写报告；2 表示请求了混合检索但模型不可用（不写报告），或运行中有检索
-  退回关键词（报告中 `semantic.achieved` 为 false）；命令行参数错误也返回 2。
+  （默认仓库内 `artifacts/retrieval-evaluation.json`；不能是数据库本身，无论路径如何拼写或经由别名，
+  也不能是数据库旁边以其文件名开头的文件，例如 `-wal`）。退出码 0 表示已写报告；1 表示源文件或
+  报告路径被拒绝、或源文件无法读取，未评估也未写报告；2 表示请求了混合检索但模型不可用
+  （不写报告），或运行中有检索退回关键词（报告中 `semantic.achieved` 为 false）；命令行参数错误
+  也返回 2。
 - **副本**：通过只读连接和 SQLite 备份 API 复制到仅本人可读的临时目录，结束时删除。干净关闭的
   WAL 数据库以 immutable 方式读取，避免在原文件旁留下 `-wal`/`-shm`；有活动日志时经由日志读取；
   只有日志没有共享内存文件、或残留回滚日志时拒绝执行。导入任何应用模块之前就把 `DATABASE_URL`

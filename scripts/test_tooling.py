@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tomllib
+import unicodedata
 from contextlib import closing
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -557,14 +558,33 @@ def test_retrieval_evaluation_reads_a_live_database_through_its_log(tmp_path):
     assert json.loads(output.read_text(encoding="utf-8"))["database"]["topics"] == 5
 
 
+# Report paths that reach the database, or a name beside it, through another spelling.
+_REPORT_SPELLINGS = {
+    "output_name_case": lambda folder, source: folder / source.name.upper(),
+    "output_log_case": lambda folder, source: folder / f"{source.name.capitalize()}-WAL",
+    "output_log_normalization": lambda folder, source: (
+        folder / unicodedata.normalize("NFD", f"{source.name}-wal")
+    ),
+    "output_folder_case": lambda folder, source: (
+        folder.with_name(folder.name.upper()) / source.name
+    ),
+    # On macOS /System/Volumes/Data/private/... is the same directory as /private/...
+    "output_firmlink": lambda folder, source: Path(f"/System/Volumes/Data{source.resolve()}"),
+}
+
+
 @pytest.mark.parametrize(
-    "case", ["missing", "not_sqlite", "log_without_shared_memory", "rollback_journal", "output"]
+    "case",
+    ["missing", "not_sqlite", "log_without_shared_memory", "rollback_journal", "output"]
+    + list(_REPORT_SPELLINGS),
 )
 def test_retrieval_evaluation_refuses_unsafe_sources(tmp_path, capsys, case):
     evaluate = load("scripts/evaluate_retrieval.py")
     folder = tmp_path / "data"
     folder.mkdir()
-    source = folder / "learning.db"
+    # A name that NFD decomposes, for the normalization-insensitive spelling (APFS).
+    name = "Écoles.db" if case == "output_log_normalization" else "learning.db"
+    source = folder / unicodedata.normalize("NFC", name)
     output = tmp_path / "report.json"
     if case == "not_sqlite":
         source.write_text("not a database", encoding="utf-8")
@@ -576,6 +596,12 @@ def test_retrieval_evaluation_refuses_unsafe_sources(tmp_path, capsys, case):
         Path(f"{source}-journal").write_bytes(b"")
     elif case == "output":
         output = Path(f"{source}-wal")
+    elif case in _REPORT_SPELLINGS:
+        output = _REPORT_SPELLINGS[case](folder, source)
+        if case in ("output_folder_case", "output_firmlink") and not (
+            output.exists() and os.path.samefile(output, source)
+        ):
+            pytest.skip("this file system has no such alias for the database")
     before = {path.name: path.read_bytes() for path in folder.iterdir()}
     assert evaluate.main(["--database", str(source), "--output", str(output)]) == 1
     assert {path.name: path.read_bytes() for path in folder.iterdir()} == before
