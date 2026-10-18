@@ -13,6 +13,7 @@ import { matchesDeletedWorkspace, onWorkspaceDeletion, type WorkspaceDeletion } 
 import { fullResultSource, type FullResultSource } from "../lib/toolSteps";
 import { budgetStopLabel } from "../lib/answerDiagnostics";
 import { sourceLink, type SourceView } from "../lib/sourceLinks";
+import { locatePassage } from "../lib/passage";
 import { DocumentCards } from "./DocumentCards";
 import { ChatTurnNavigator, turnKey } from "./ChatTurnNavigator";
 import { markTarget, toggleUnderstanding, UNDERSTANDING_LEVELS, UNDERSTANDING_TEXT } from "../lib/understanding";
@@ -272,14 +273,8 @@ function textRange(element: HTMLElement, start: number, end: number) {
   return null;
 }
 function markSource(element: HTMLElement, anchor: Destination) {
-  const content = element.textContent ?? "";
-  let start = anchor.start ?? -1;
-  let end = anchor.end ?? -1;
-  if (start < 0 || end <= start || end > content.length || (anchor.text && content.slice(start, end) !== anchor.text)) {
-    start = anchor.text ? content.indexOf(anchor.text) : -1;
-    end = start + (anchor.text?.length ?? 0);
-  }
-  const range = start >= 0 && end > start ? textRange(element, start, end) : null;
+  const passage = locatePassage(element.textContent ?? "", anchor);
+  const range = passage ? textRange(element, passage.start, passage.end) : null;
   if (range) {
     const highlightApi = window as unknown as { Highlight?: new (...ranges: Range[]) => unknown; CSS?: { highlights?: Map<string, unknown> } };
     if (highlightApi.Highlight && highlightApi.CSS?.highlights) highlightApi.CSS.highlights.set("learning-source", new highlightApi.Highlight(range));

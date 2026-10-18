@@ -140,8 +140,9 @@ this database's ids, so learning-tree exports leave it out.
 The learning map's search box filters titles and quoted passages instantly and,
 after a short pause, also asks the server for full-text matches in completed
 answers, learning notes and current facts of the open topic. Those appear as a
-second group with a verbatim snippet; choosing an answer hit opens the node and
-highlights the matching passage. Pending or interrupted answers and superseded
+second group with a short snippet, shown without Markdown markers; choosing an
+answer hit opens the node, scrolls to the matching text and highlights it, also
+inside formatted answers (bold text, lists, code, links). Pending or interrupted answers and superseded
 facts are never listed. Results are capped at thirty, and a search is dropped
 when you switch topics before it returns.
 
@@ -219,7 +220,8 @@ idempotent; database backups include them, learning-tree exports exclude
   列表显示后才被删除的来源会在点击时核对，提示「这条来源已删除」并留在当前对话。被压缩掉的记忆不会列出。该列表随回答保存，但不随
   学习树导出。
 - **主题内全文搜索**：学习树搜索框除了即时匹配标题和引用，还会向服务端查询已完成回答、
-  学习笔记和当前事实中的原文片段，作为第二组结果展示；选择回答结果会跳转并高亮对应段落。
+  学习笔记和当前事实中的原文片段，作为第二组结果展示（片段去掉 Markdown 标记）；选择回答结果会
+  跳转到匹配文字并高亮，加粗、列表、代码和链接等格式化回答中也能定位。
   索引由 SQLite FTS5（三元组分词）和触发器维护，启动时缺失或计数不符会自动重建；短于
   3 个字符的查询或不支持 FTS5 的 SQLite 使用 LIKE 扫描。
 - 模型可用的只读工具 `search_learning_history` 受同一组开关约束：默认只查当前路径，

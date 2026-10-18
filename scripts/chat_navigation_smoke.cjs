@@ -409,6 +409,46 @@ async function poll(callback, label) {
     assert.equal(recapModelCalls, 1, 'Only the question the learner sent reaches the model');
     assert.equal(recapReads - readsBefore, 3, 'Each return reads its recap once; dismissing and leaving read nothing');
     checks.push('Returning from a branch shows a dismissible local recap above the composer that ends on dismiss, navigation or a new question');
+
+    // Map search hits are windows of stored Markdown; choosing one must highlight the query in the
+    // rendered answer, far down a long answer, not flash the whole message.
+    const filler = Array.from({ length: 10 }, (_, index) => `Paragraph ${index + 1}: partitioning keeps every element on the correct side of the pivot, one comparison at a time, so each recursive call works on a smaller range.`);
+    const searchAnswer = ['Quicksort needs a **good pivot**.', '## Pivot choice', '1. Take the first element.\n2. Take a random element.', ...filler, 'Finally: **median-of-three** keeps the pivot stable on sorted input.'].join('\n\n');
+    const searchTopic = await api('/trees/import', {
+      format: 'branch-learning', version: 1, tree: { title: 'Map search UI check' },
+      nodes: [{ id: 1, parent_id: null, title: 'Choosing a pivot', kind: 'root', status: 'complete' }],
+      messages: [
+        { id: 1, node_id: 1, role: 'user', content: 'Why does partition balance matter for KESTREL-88?' },
+        { id: 2, node_id: 1, role: 'assistant', content: searchAnswer, answered_by: 'Demo (offline)' },
+      ],
+    });
+    const searchRow = (await api(`/nodes/${searchTopic.root_node_id}/thread`)).nodes[0];
+    await page.evaluate(treeId => localStorage.setItem('bl-tree', JSON.stringify(treeId)), searchTopic.id);
+    await page.reload();
+    await page.getByRole('heading', { name: 'Map search UI check', exact: true, level: 1 }).waitFor();
+    const highlighted = () => page.evaluate(() => [...(CSS.highlights.get('learning-source') ?? [])].map(range => range.toString()));
+    async function chooseHistoryHit(query) {
+      await map.getByRole('button', { name: 'Search nodes', exact: true }).click();
+      await map.getByRole('textbox', { name: 'Search questions or quotes', exact: true }).fill(query);
+      const group = map.getByRole('group', { name: 'Matches in history', exact: true });
+      await group.waitFor();
+      const hit = group.getByRole('button').first();
+      const text = await hit.innerText();
+      await page.evaluate(() => CSS.highlights.clear());
+      await hit.click();
+      return text;
+    }
+    const markdownHit = await chooseHistoryHit('median-of-three');
+    assert(markdownHit.includes('median-of-three') && !markdownHit.includes('**'), 'History snippets show Markdown as plain text');
+    await poll(async () => (await highlighted()).join('|') === 'median-of-three', 'the highlight covers the query inside rendered Markdown');
+    assert(await page.evaluate(() => {
+      const range = [...CSS.highlights.get('learning-source')][0];
+      const rect = range.getBoundingClientRect();
+      const viewport = document.querySelector('.chat-scroll').getBoundingClientRect();
+      return rect.top >= viewport.top && rect.bottom <= viewport.bottom;
+    }), 'The matching passage, not the middle of the answer, is scrolled into view');
+    assert(((await page.locator(`[data-message-id="${searchRow.answer_message_id}"]`).getAttribute('class')) ?? '').includes('chat-source-flash'));
+    checks.push('Choosing a map search hit in a Markdown answer highlights and scrolls to the query text, with Markdown removed from the snippet');
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ ok: true, checks }, null, 2));
   } finally {

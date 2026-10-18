@@ -208,6 +208,8 @@ async function poll(callback) {
     const answerMessage = rootAnswer.messages.find(message => message.role === 'assistant');
     await historyHit.click();
     await poll(async () => ((await page.locator(`[data-message-id="${answerMessage.id}"]`).getAttribute('class')) ?? '').includes('chat-source-flash'));
+    // The whole-answer flash is also the fallback when no passage matches: the highlight proves the jump.
+    await poll(async () => (await page.evaluate(() => [...(CSS.highlights.get('learning-source') ?? [])].map(range => range.toString()))).some(text => text.includes('兄弟分支没掺进来')));
     assert.equal(await map.getByRole('textbox', { name: 'Search questions or quotes', exact: true }).count(), 0, 'Choosing a hit closes the search');
     checks.push('Map search lists full-text matches from the server and jumps to the matching answer passage');
     await input.fill(ordinaryDraft);

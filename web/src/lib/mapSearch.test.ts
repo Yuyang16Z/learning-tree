@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SearchHit, TreeNode } from "../types";
-import { createMapSearcher, localMatches, mergeSearchResults, searchAnchor } from "./mapSearch";
+import { createMapSearcher, localMatches, mergeSearchResults, plainSnippet, searchAnchor } from "./mapSearch";
 
 function node(id: number, title: string, seed_text: string | null = null): TreeNode {
   return { id, parent_id: id === 1 ? null : 1, tree_id: 7, title, seed_text, has_summary: false };
@@ -41,6 +41,31 @@ describe("map search result groups", () => {
     expect(searchAnchor(hit("message", 1, "……", 12))).toEqual({ messageId: 12 });
     expect(searchAnchor(hit("note", 2, "笔记"))).toBeUndefined();
     expect(searchAnchor(hit("title", 2, "分支"))).toBeUndefined();
+  });
+
+  it("anchors a Markdown answer hit on matching text the rendered answer contains", () => {
+    const anchor = (snippet: string, query: string) => searchAnchor(hit("message", 1, snippet, 12), query)?.text;
+    expect(anchor("…快速排序**选一个 pivot**，然后\n\n- 把数组分成两边再递归。…", "pivot")).toBe("选一个 pivot");
+    expect(anchor("…ally: **median-of-three** keeps the pivot stable…", " Median-of-three ")).toBe("median-of-three");
+    expect(anchor("…\n- partition the array around the pivot\n- recurse…", "partition")).toBe("partition the array around the pivot");
+    expect(anchor("…\n2. Take a random pivot element.\n…", "random")).toBe("Take a random pivot element.");
+    expect(anchor("…use `pivot = arr[0]` here…", "pivot")).toBe("pivot = arr");
+    expect(anchor("…see [the pivot rule](https://example.com/pivot) for…", "pivot rule")).toBe("the pivot rule");
+    expect(anchor("…first part.\n\nThe pivot is chosen…", "pivot")).toBe("The pivot is chosen");
+    expect(anchor("…## Pivot choice\nThe…", "pivot")).toBe("Pivot choice");
+    expect(anchor("…> quoted pivot line…", "pivot")).toBe("quoted pivot line");
+  });
+
+  it("falls back to the longest plain stretch when the query is not in the snippet verbatim", () => {
+    const anchor = (snippet: string, query: string) => searchAnchor(hit("message", 1, snippet, 12), query)?.text;
+    expect(anchor("…**the pivôt rule** matters…", "pivot")).toBe("the pivôt rule");
+    expect(anchor("…**", "pivot")).toBeUndefined();
+  });
+
+  it("shows Markdown snippets as plain text", () => {
+    expect(plainSnippet("…快速排序**选一个 pivot**，然后\n\n- 把数组分成两边再递归。…")).toBe("…快速排序选一个 pivot，然后 把数组分成两边再递归。…");
+    expect(plainSnippet("…see [the pivot rule](https://example.com/pivot), `code`, _emphasis_, *stress*, but 2*3 and snake_case…")).toBe("…see the pivot rule, code, emphasis, stress, but 2*3 and snake_case…");
+    expect(plainSnippet("## Heading\n> quoted\n1. first\n- second ~~old~~")).toBe("Heading quoted first second old");
   });
 });
 

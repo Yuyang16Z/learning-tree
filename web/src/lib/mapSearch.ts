@@ -33,11 +33,58 @@ export function mergeSearchResults(local: readonly TreeNode[], hits: readonly Se
   return { local: first, remote };
 }
 
-/** Message hits navigate to the passage; the anchor text must be verbatim, so ellipses are dropped. */
-export function searchAnchor(hit: SearchHit): SearchAnchor | undefined {
+// Snippets are windows of stored Markdown. These characters may become markup when the answer
+// is rendered, and line breaks may collapse, so an anchor never crosses one of them.
+const MARKUP = /[*_`#>[\]()|~<&!\\\r\n]/u;
+const MARKUP_RUNS = /[*_`#>[\]()|~<&!\\\r\n]+/gu;
+// A list item's marker at the start of its line is not part of the text it renders.
+const LINE_MARKER = /^\s*(?:[-+]|\d{1,9}[.)])\s+/u;
+
+const withoutEllipses = (snippet: string) => snippet.replace(/^…+/, "").replace(/…+$/, "");
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** The verbatim stretch around [start, end) that crosses no markup character or line break. */
+function plainRun(text: string, start: number, end: number): string {
+  let left = start;
+  let right = end;
+  while (left > 0 && !MARKUP.test(text[left - 1])) left -= 1;
+  while (right < text.length && !MARKUP.test(text[right])) right += 1;
+  const marker = left === 0 || text[left - 1] === "\n" || text[left - 1] === "\r" ? LINE_MARKER.exec(text.slice(left, start)) : null;
+  return text.slice(left + (marker?.[0].length ?? 0), right).trim();
+}
+
+/** The longest stretch of a snippet without markup or line breaks, without its list marker. */
+function longestPlainRun(text: string): string {
+  return text.split(MARKUP_RUNS).map(part => part.replace(LINE_MARKER, "").trim())
+    .reduce((longest, part) => part.length > longest.length ? part : longest, "");
+}
+
+/**
+ * Message hits navigate to the passage. The anchor must be text the rendered answer contains, so it
+ * is the match for `query` (case-insensitive) widened only across plain characters; when the match is
+ * not in the snippet verbatim (accents folded by the index), the snippet's longest plain stretch.
+ */
+export function searchAnchor(hit: SearchHit, query = ""): SearchAnchor | undefined {
   if (hit.kind !== "message" || hit.message_id == null) return undefined;
-  const text = hit.snippet.replace(/^…+/, "").replace(/…+$/, "").trim();
+  const snippet = withoutEllipses(hit.snippet);
+  const needle = query.trim();
+  const match = needle ? new RegExp(escapeRegExp(needle), "iu").exec(snippet) : null;
+  const text = match ? plainRun(snippet, match.index, match.index + match[0].length) : longestPlainRun(snippet);
   return { messageId: hit.message_id, ...(text ? { text } : {}) };
+}
+
+/** A snippet of stored Markdown as display text: markers dropped, link text kept, lines joined. */
+export function plainSnippet(snippet: string): string {
+  return snippet
+    .replace(/!?\[([^\]\n]*)\]\([^)\n]*\)/gu, "$1")
+    .replace(/^[ \t]*(?:#{1,6}|>+|[-+*]|\d{1,9}[.)])[ \t]+/gmu, "")
+    .replace(/\*\*|__|~~|`+/gu, "")
+    .replace(/(?<![\p{L}\p{N}*_])[*_](?=[^\s*_])|(?<=[^\s*_])[*_](?![\p{L}\p{N}*_])/gu, "")
+    .replace(/\s+/gu, " ")
+    .trim();
 }
 
 interface SearcherOptions {
