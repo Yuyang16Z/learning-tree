@@ -58,9 +58,9 @@ describe("retrieval scope switches in Settings", () => {
   });
 
   it("reads the switches again when shown: a failed read is retried, a failed save's message stays", async () => {
-    let loads = 0;
+    const reads: (RetrievalSettings | Error)[] = [new TypeError("Failed to fetch"), initial, elsewhere, new TypeError("Failed to fetch"), elsewhere];
     const store = createScopeStore({
-      load: async () => { if (++loads === 1) throw new TypeError("Failed to fetch"); return loads === 2 ? initial : elsewhere; },
+      load: async () => { const next = reads.shift()!; if (next instanceof Error) throw next; return next; },
       save: async () => { throw failure(500, "请求失败（500），请重试。"); },
     });
     await store.load();
@@ -72,6 +72,11 @@ describe("retrieval scope switches in Settings", () => {
     // Shown again: the latest settings replace the old ones, and the save is still reported as failed.
     await store.load();
     expect(store.get()).toEqual({ settings: elsewhere, saving: false, conflict: null, error: "请求失败（500），请重试。" });
+    // A newer failure is reported instead, and the next successful read clears it.
+    await store.load();
+    expect(store.get()).toEqual({ settings: elsewhere, saving: false, conflict: null, error: "Failed to fetch" });
+    await store.load();
+    expect(store.get()).toEqual({ settings: elsewhere, saving: false, conflict: null, error: null });
   });
 
   it("never lets a read that was running when a change started undo the saved change", async () => {

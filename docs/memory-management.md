@@ -122,7 +122,7 @@ then shows the latest settings and that your change was not saved; the outcome
 of a save is still shown after you switch to another Settings tab and back. The
 switches are read again each time the Memory tab is shown, so a read that failed
 is retried and a change made on another device appears; a failed save stays
-reported until your next change.
+reported until your next change or a newer failure.
 
 The same switches govern the answer model's read-only `search_learning_history`
 tool. It searches completed answers, notes and current facts of the current path
@@ -232,7 +232,7 @@ idempotent; database backups include them, learning-tree exports exclude
   保存带版本号，别处同时修改会重新载入最新设置而不是覆盖。保存期间不能关闭设置；遇到冲突时先
   提示正在重新载入，载入后显示最新设置并说明你的更改没有保存，切换设置标签页再回来也能看到结果。
   每次打开「记忆」标签页都会重新读取开关：读取失败会重试，其他设备上的修改也会显示；保存失败的
-  提示保留到下一次修改。
+  提示会保留，直到下一次修改或出现新的失败。
 - **结构化事实**：提炼出的事实带类型标签（定义、适用条件、纠正误解、待解决疑问、学习状态、
   结论）。新事实可以标记为修正某条当前路径上的旧事实，旧事实显示「已更新」并保留可删，
   但不再进入回答、搜索索引和模型的历史检索；用户手动编辑过的事实不会被自动替代。

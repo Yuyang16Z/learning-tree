@@ -10,8 +10,8 @@ export interface ScopeState {
   /** After a save conflicted: "reloading" until the latest settings arrive, then "reloaded". */
   conflict: "reloading" | "reloaded" | null;
   /**
-   * The last failed load or save, as the server or browser reported it. A later successful read
-   * clears a failed read; a failed save stays reported until the next change.
+   * The latest failed read or save, as the server or browser reported it. A successful read clears
+   * a read's failure but not a save's, which stays until the next change or a newer failure.
    */
   error: string | null;
 }
