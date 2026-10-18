@@ -405,7 +405,9 @@ def extract_and_save(
                 s.get(Memory, record["supersedes"]) if record["supersedes"] in replaceable else None
             )
             # Only a current, never user-edited fact on this path can be superseded;
-            # the old row stays stored and visible in Settings.
+            # the old row stays stored and visible in Settings. superseded_by alone
+            # records it: updated_at marks hand edits, so a fact made current again
+            # when its replacement is deleted can still be corrected later.
             if (
                 old is not None
                 and old.id != memory.id
@@ -416,6 +418,5 @@ def extract_and_save(
                 and old.updated_at is None
             ):
                 old.superseded_by = memory.id
-                old.updated_at = datetime.now(timezone.utc)
                 s.add(old)
         s.commit()

@@ -94,8 +94,9 @@ also receives up to twenty recent facts from the current learning path so it can
 mark a new fact as correcting an earlier one instead of restating it. The earlier
 fact is then tagged **Superseded**: it stays stored and listed until you delete
 it, but it no longer reaches answers, the search index or the model's history
-search. Only facts that were never edited by hand can be superseded, and only
-by a fact from the same learning path. Facts extracted by older versions read as
+search. Deleting the newer fact, or the branch or topic it came from, makes the
+earlier fact current again. Only facts that were never edited by hand can be
+superseded, and only by a fact from the same learning path. Facts extracted by older versions read as
 conclusions. Interpretation of types and corrections depends on the configured
 model; the tags are hints, not verified classifications.
 
@@ -232,7 +233,8 @@ idempotent; database backups include them, learning-tree exports exclude
   保存带版本号，别处同时修改会重新载入最新设置而不是覆盖。
 - **结构化事实**：提炼出的事实带类型标签（定义、适用条件、纠正误解、待解决疑问、学习状态、
   结论）。新事实可以标记为修正某条当前路径上的旧事实，旧事实显示「已更新」并保留可删，
-  但不再进入回答、搜索索引和模型的历史检索；用户手动编辑过的事实不会被自动替代。
+  但不再进入回答、搜索索引和模型的历史检索；删除新事实或它所在的分支、主题后，旧事实会恢复
+  为当前事实。用户手动编辑过的事实不会被自动替代。
 - **参考了哪些记忆**：每条回答下方列出实际进入提示的记忆编号及来源节点，来自其他分支或
   主题的会标注；点击可跳到来源节点。被压缩掉的记忆不会列出。该列表随回答保存，但不随
   学习树导出。保存的只有记录编号和范围，主题名称在显示时读取；记忆、来源节点或主题已删除

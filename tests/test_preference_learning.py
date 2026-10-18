@@ -454,7 +454,9 @@ def test_structured_fact_supersedes_a_current_path_fact_without_deleting_it(stor
     new = stored["修正后的结论"]
     assert (new.fact_type, new.terms, new.superseded_by) == ("misconception", ["结论"], None)
     assert stored["旧结论"].superseded_by == new.id
-    assert stored["旧结论"].updated_at is not None
+    # Supersession is not a hand edit: deleting the correction makes this fact current
+    # again, and it must stay open to a later correction.
+    assert stored["旧结论"].updated_at is None
     assert stored["旧结论"].content == "旧结论", "superseded facts are kept, never rewritten"
 
 

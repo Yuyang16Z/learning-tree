@@ -610,7 +610,7 @@ def build_synthetic(path: Path) -> None:
                     facts[text] = row
                     if text == _SUPERSEDED[1]:
                         old = facts[_SUPERSEDED[0]]
-                        old.superseded_by, old.updated_at = memory_id, created
+                        old.superseded_by = memory_id  # As the app records it.
                 turns[node_id] += 1
             session.commit()
     finally:

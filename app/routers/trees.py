@@ -39,6 +39,7 @@ from ..schemas import UNDERSTANDING_LEVELS, NodeOut, TreeIn, TreeOut, TreePatch,
 from ..search_index import excerpt, search_text
 from ..tool_results import portable_steps
 from ..tree_identity import record_node_id, record_tree_id
+from .memory_router import restore_superseded
 from .nodes import _CANCELLED_REQUESTS, _REQUEST_LOCK, discard_node_work, node_metadata
 
 router = APIRouter(prefix="/trees", tags=["trees"])
@@ -470,8 +471,10 @@ def delete_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
             session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory.id))
             memory_ids.append(memory.id)
             session.delete(memory)
-        # Other topics' answers keep no provenance (ids) pointing into this topic.
+        # No fact keeps pointing at a deleted replacement, and other topics' answers
+        # keep no provenance (ids) pointing into this topic.
         session.flush()
+        restore_superseded(session, memory_ids)
         scrub_sources(session, tree_ids=[tree_id], node_ids=ids, memory_ids=memory_ids)
         # One statement removes parents and children together; SQLite checks the
         # self-referencing parent key at the end of the statement. The triggers in

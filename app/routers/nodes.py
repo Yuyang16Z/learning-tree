@@ -67,6 +67,7 @@ from ..tool_results import (
     stored_text,
 )
 from ..tree_identity import record_node_id
+from .memory_router import restore_superseded
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
 _REQUEST_LOCK = threading.RLock()
@@ -477,8 +478,10 @@ def delete_node(node_id: int, session: Session = Depends(get_session)) -> dict:
             session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory.id))
             memory_ids.append(memory.id)
             session.delete(memory)
-        # Answers elsewhere keep no provenance pointing into the deleted subtree.
+        # Earlier facts these facts corrected become current again, and answers
+        # elsewhere keep no provenance pointing into the deleted subtree.
         session.flush()
+        restore_superseded(session, memory_ids)
         scrub_sources(session, node_ids=ids, memory_ids=memory_ids)
         # The full-text search_index rows of these messages, memories and notes are
         # removed by the SQLite triggers in app/search_index.py as the rows go.

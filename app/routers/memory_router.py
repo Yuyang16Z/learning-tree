@@ -213,6 +213,20 @@ def list_facts(
     )
 
 
+def restore_superseded(session: Session, deleted_ids) -> None:
+    """Facts that the deleted facts had superseded become current again.
+
+    Every path that deletes facts calls this in its own transaction; otherwise the
+    earlier fact would stay hidden behind a fact that no longer exists, or behind
+    an unrelated later fact that reuses its id. The search-index trigger re-indexes
+    the restored facts."""
+    ids = sorted(set(deleted_ids))
+    if ids:
+        session.execute(
+            update(Memory).where(Memory.superseded_by.in_(ids)).values(superseded_by=None)
+        )
+
+
 @router.post("/delete")
 def delete_facts(body: FactDeleteIn, session: Session = Depends(get_session)) -> dict:
     begin_memory_write(session)
@@ -223,6 +237,7 @@ def delete_facts(body: FactDeleteIn, session: Session = Depends(get_session)) ->
     )
     session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id.in_(ids)))
     session.execute(delete(Memory).where(Memory.id.in_(ids), Memory.kind == "fact"))
+    restore_superseded(session, ids)
     scrub_sources(session, memory_ids=ids)
     session.commit()
     return {"deleted": len(ids)}
@@ -266,6 +281,7 @@ def delete_memory(memory_id: int, session: Session = Depends(get_session)) -> di
         raise HTTPException(404, "记忆不存在")
     session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory_id))
     session.delete(m)
+    restore_superseded(session, [memory_id])
     scrub_sources(session, memory_ids=[memory_id])
     session.commit()
     return {"deleted": memory_id}

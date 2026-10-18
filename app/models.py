@@ -61,7 +61,7 @@ class Memory(SQLModel, table=True):
     # A later fact that corrects this one; superseded facts leave retrieval and the
     # search index but stay visible in Settings until deleted.
     superseded_by: int | None = None
-    updated_at: datetime | None = None  # Set by edits and supersession, not creation.
+    updated_at: datetime | None = None  # Set by hand edits only; never by supersession.
 
 
 class MemoryEmbedding(SQLModel, table=True):
