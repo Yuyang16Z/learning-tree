@@ -245,11 +245,15 @@ def build_context(
         line = f"node={node.id}：{node.title}"
         if estimate_text_tokens("\n".join(directory + [line])) <= directory_budget:
             directory.append(line)
-    base += "\n当前路径来源（部分目录）：\n" + "\n".join(directory)
+    # Headings only above kept entries: an empty one would claim omitted material.
+    if directory:
+        base += "\n当前路径来源（部分目录）：\n" + "\n".join(directory)
     memory_lines = []
     memory_limit = min(3500, available // 6)
     # Keep each sourced memory intact, including multiline qualifications.
     for line in re.split(r"(?m)(?=^- \[(?:记忆|偏好) \d+(?:；来源节点 \d+)?\] )", memory_note):
+        if not line.strip():
+            continue  # No memory at all splits into one empty piece.
         if estimate_text_tokens("\n".join(memory_lines + [line])) <= memory_limit:
             memory_lines.append(line)
     if memory_lines:
