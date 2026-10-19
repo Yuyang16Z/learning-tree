@@ -1058,6 +1058,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
         # Provider rounds (estimates, reported usage) collected by stream_chat/run_agent.
         usage: dict = {}
         context_stats: dict = {}
+        # Memory records that survived context assembly (ids and titles only).
+        kept_sources: list[dict] = []
         # The tool call in progress (numbered from 1) and complete texts by call index.
         call: dict = {"index": 0, "args": None}
         complete_texts: dict[int, str] = {}
@@ -1110,6 +1112,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 "requests": len(rounds),
                 "largest_request": largest(),
                 "compacted": bool(context_stats.get("compacted")),
+                "memory_count": len(kept_sources),
                 "tool_rounds": int(usage.get("tool_rounds") or 0),
                 # "time" or "tokens" when an agent budget ended the tool rounds early.
                 "tool_budget_stop": usage.get("tool_budget_stop"),

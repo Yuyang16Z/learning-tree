@@ -61,6 +61,8 @@ export interface AnswerDiagnostics {
   /** The request with the largest estimate: the context a single request carried. */
   largest_request?: RequestInput | null;
   compacted: boolean;
+  /** Memory records the answer was given (the "Referenced" line lists them); absent from older diagnostics. */
+  memory_count?: number;
   tool_rounds: number;
   /** The agent budget that ended the tool rounds early (time limit or tool-result size); null when none did. */
   tool_budget_stop?: 'time' | 'tokens' | null;

@@ -28,7 +28,7 @@ from app.calibration import (
 from app.context_budget import ContextPolicy, estimate_request_tokens, has_images
 from app.models import KnowledgeTree, Message, ModelCalibration, ModelConfig, Node
 from app.routers import models_router, nodes, trees
-from app.service import to_spec
+from app.service import MemoryNote, to_spec
 
 BASE_PROMPT = "你是帮助用户理解陌生知识的助教"
 
@@ -603,3 +603,33 @@ def test_diagnostics_report_the_largest_request_apart_from_the_sum_over_requests
     }
     assert report["largest_request"]["actual_input_tokens"] < 65536 < report["actual_input_tokens"]
     assert all(isinstance(value, (int, float, bool, type(None))) for value in leaves(report))
+
+
+def test_diagnostics_count_the_memories_the_answer_was_given(workspace):
+    """Decision F: the stored numbers include how many memory records reached the answer."""
+    client, _, monkeypatch = workspace
+
+    def source(memory_id):
+        return {
+            "memory_id": memory_id,
+            "source_node_id": 1,
+            "tree_id": 1,
+            "tree_title": "校准",
+            "scope": "path",
+        }
+
+    note = MemoryNote(
+        "以下是历史学习材料：\n【当前学习路径的相关记忆】\n"
+        "- [记忆 7；来源节点 1] 需要授权。\n- [记忆 8；来源节点 1] 先备份。",
+        # Record 9 was retrieved but is not in the note, so the answer never saw it.
+        [source(7), source(8), source(9)],
+    )
+    monkeypatch.setattr(nodes, "fetch_memory_note", lambda *args, **kwargs: note)
+    streaming_double(monkeypatch, estimated=3000, actual=2600)
+    events = ask(client)
+    report = next(event["diagnostics"] for event in events if "diagnostics" in event)
+    sources = next(event["sources"] for event in events if "sources" in event)
+    assert report["memory_count"] == len(sources) == 2
+    monkeypatch.setattr(nodes, "fetch_memory_note", lambda *args, **kwargs: "")
+    events = ask(client)
+    assert next(e["diagnostics"] for e in events if "diagnostics" in e)["memory_count"] == 0
