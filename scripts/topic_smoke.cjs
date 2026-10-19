@@ -351,8 +351,19 @@ with Session(engine) as session:
     kept_output = ToolResult(node_id=payload['peer_node'], request_id='synthetic-topic-keep', call_index=1, tool_name='fixture', content='Synthetic TOPIC-SURVIVES-418 tool output.')
     session.add(output)
     session.add(kept_output)
+    # A peer-topic answer that was given both facts, stored as earlier versions stored
+    # provenance (titles included); deleting the topic must scrub the entry into it.
+    peer_root = session.get(Node, payload['peer_node'])
+    peer_root.status = 'complete'
+    session.add(peer_root)
+    session.add(Message(node_id=peer_root.id, role='user', content='Synthetic TOPIC-SURVIVES-418 question.'))
+    peer_answer = Message(node_id=peer_root.id, role='assistant', content='Synthetic TOPIC-SURVIVES-418 answer.', answered_by='Demo (offline)', sources=[
+        {'memory_id': memory.id, 'source_node_id': payload['branch'], 'tree_id': tree.id, 'tree_title': tree.title, 'scope': 'other'},
+        {'memory_id': survivor.id, 'source_node_id': peer_root.id, 'tree_id': peer.id, 'tree_title': peer.title, 'scope': 'path'},
+    ])
+    session.add(peer_answer)
     session.commit()
-    print(json.dumps({'memory': memory.id, 'survivor': survivor.id, 'tool_result': output.id, 'kept_tool_result': kept_output.id}))
+    print(json.dumps({'memory': memory.id, 'survivor': survivor.id, 'tool_result': output.id, 'kept_tool_result': kept_output.id, 'peer_answer': peer_answer.id}))
 `], {
       cwd: path.resolve(__dirname, '..'), encoding: 'utf8',
       input: JSON.stringify({ tree: topic.id, peer: peerTopic.id, peer_node: peerTopic.root_node_id, document: document.id, message: originalRoot.messages[0].id, branch: branch.id }),
@@ -362,6 +373,8 @@ with Session(engine) as session:
     const beforeDeleteNodes = await api(`/trees/${topic.id}`);
     const beforeDeleteRoot = await api(`/nodes/${topic.root_node_id}`);
     const peerRoot = await api(`/nodes/${peerTopic.root_node_id}`);
+    const peerSources = peerRoot.messages.find(message => message.id === relatedIds.peer_answer).sources;
+    assert.deepEqual(peerSources.map(entry => [entry.tree_id, entry.tree_title]), [[topic.id, renamedTitle], [peerTopic.id, peerTopic.title]], 'The peer answer names both topics, with their live titles, before the deletion');
     const deletedKeys = [
       `bl-draft-v2:${topic.id}:${topic.root_node_id}`, `bl-draft-v2:${topic.id}:${branch.id}`,
       `bl-scroll-v2:${topic.id}:${topic.root_node_id}`, `bl-scroll-v2:${topic.id}:${branch.id}`,
@@ -439,7 +452,11 @@ with Session(engine) as session:
     const factsAfterDelete = await api('/memories/facts?q=TOPIC-DELETE-417');
     assert.equal(factsAfterDelete.total, 0);
     assert.equal((await api('/memories/facts?q=TOPIC-SURVIVES-418')).total, 1);
-    assert.deepEqual(await api(`/nodes/${peerTopic.root_node_id}`), peerRoot, 'Other conversations survive');
+    const peerAfterDelete = structuredClone(peerRoot);
+    const peerAnswer = peerAfterDelete.messages.find(message => message.id === relatedIds.peer_answer);
+    peerAnswer.sources = peerAnswer.sources.filter(entry => entry.tree_id !== topic.id);
+    assert.equal(peerAnswer.sources.length, 1);
+    assert.deepEqual(await api(`/nodes/${peerTopic.root_node_id}`), peerAfterDelete, 'Other conversations survive; only their provenance into the deleted topic goes');
     const deletionAudit = spawnSync(process.env.LEARNING_TREE_E2E_PYTHON, ['-c', `
 import json, os, sys
 from pathlib import Path
@@ -470,6 +487,10 @@ with Session(engine) as session:
             assert entry.get('tree_id') != payload['tree'] and 'tree_title' not in entry
             assert entry.get('source_node_id') not in payload['nodes']
             assert entry.get('memory_id') != payload['memory']
+    # The peer answer seeded with an entry into the topic keeps only its own fact, at rest.
+    assert session.get(Message, payload['peer_answer']).sources == [
+        {'memory_id': payload['survivor'], 'source_node_id': payload['peer_node'], 'tree_id': payload['peer'], 'scope': 'path'}
+    ], 'Deleting the topic scrubs stored provenance'
 with engine.connect() as connection:
     if connection.exec_driver_sql("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'search_index'").first():
         # The full-text index is derived data: triggers drop the deleted topic's rows.
@@ -477,14 +498,14 @@ with engine.connect() as connection:
         assert connection.exec_driver_sql("SELECT COUNT(*) FROM search_index WHERE node_id IN (%s)" % ','.join(str(i) for i in payload['nodes'])).scalar() == 0
 `], {
       cwd: path.resolve(__dirname, '..'), encoding: 'utf8',
-      input: JSON.stringify({ tree: topic.id, nodes: originalNodes.map(node => node.id), document: document.id, ...relatedIds }),
+      input: JSON.stringify({ tree: topic.id, peer: peerTopic.id, peer_node: peerTopic.root_node_id, nodes: originalNodes.map(node => node.id), document: document.id, ...relatedIds }),
     });
     assert.equal(deletionAudit.status, 0, deletionAudit.stderr);
     await page.reload();
     await sidebar.waitFor();
     assert(await page.evaluate(keys => keys.every(key => localStorage.getItem(key) === null), deletedKeys), 'Pagehide and reload cannot recreate deleted drafts');
     assert.equal(await page.evaluate(() => localStorage.getItem('bl-recovery')), null);
-    checks.push('Confirmed deletion removes the tree, nodes, messages, attachments, memories, vector cache, stored tool results and owned browser state without a hidden backup; other topics survive');
+    checks.push('Confirmed deletion removes the tree, nodes, messages, attachments, memories, vector cache, stored tool results, other answers\' stored provenance into it and owned browser state without a hidden backup; other topics survive');
 
     // A fresh topic covers the last-active archive path without restoring deletion.
     const lastTitle = 'Topic UI check · Last active topic';
