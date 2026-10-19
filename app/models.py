@@ -226,8 +226,9 @@ class Message(SQLModel, table=True):
     # Per-answer numbers (token estimates, usage, timings) and fixed labels such as the
     # budget that stopped tool rounds; never prompt text.
     diagnostics: dict | None = Field(default=None, sa_column=Column(JSON))
-    # Memory records the answer was given: [{memory_id, source_node_id, tree_id,
-    # tree_title, scope}]. Local provenance only; excluded from exports.
+    # Memory records the answer was given: [{memory_id, source_node_id, tree_id, scope}];
+    # topic titles are read from the live topic (app/answer_sources.py), and a tree_title
+    # that earlier rows stored is ignored. Local provenance only; excluded from exports.
     sources: list | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=_now)
 
