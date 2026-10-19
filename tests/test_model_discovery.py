@@ -355,3 +355,94 @@ def test_discover_route_never_sends_a_stored_key_to_another_endpoint(
     finally:
         app.dependency_overrides.clear()
         engine.dispose()
+
+
+def test_saving_a_changed_address_with_a_blank_key_keeps_the_stored_key_for_it(
+    tmp_path, monkeypatch
+):
+    """Only Detect withholds a stored key from an edited endpoint; saving the edit does not.
+
+    A blank key field means "keep the current key", also after the protocol or address
+    changed, so Test and later answers send that key to the new address. SECURITY.md and
+    docs/operations.md describe exactly this; asking for a key there is a product change.
+    """
+    from app.main import app
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'repoint.db'}", connect_args={"check_same_thread": False}
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            ModelConfig(
+                id=4,
+                label="Stored",
+                base_url="https://provider.test/v1",
+                llm_model="deepseek-chat",
+                api_key="stored-secret-key",
+            )
+        )
+        session.commit()
+    requests = []
+
+    def handler(request):
+        requests.append((request.url.host, request.headers.get("authorization")))
+        return httpx.Response(
+            200,
+            json={
+                "id": "ping",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "deepseek-chat",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "length",
+                        "message": {"role": "assistant", "content": "ok"},
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(
+        llm,
+        "_client",
+        lambda spec: OpenAI(
+            base_url=spec.base_url,
+            api_key=spec.api_key,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+            max_retries=0,
+        ),
+    )
+
+    def session_override():
+        with Session(engine) as session:
+            yield session
+
+    app.dependency_overrides[db.get_session] = session_override
+    try:
+        api = TestClient(app)
+        edited = {
+            "label": "Stored",
+            "protocol": "openai",
+            "base_url": "https://some-other-relay.test/v1",
+            "llm_model": "deepseek-chat",
+            "api_key": "",
+            "max_tokens": 4096,
+            "context_window": 32768,
+        }
+        detect = {key: edited[key] for key in ("protocol", "base_url", "llm_model", "api_key")}
+        detected = api.post("/models/discover", json={**detect, "config_id": 4})
+        assert detected.json()["note"] == DISCOVERY_NOTES["catalog_needs_key"]
+        assert requests == [], "Detect in the edited form sends nothing to the new address"
+        saved = api.put("/models/4", json=edited)
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["base_url"] == edited["base_url"]
+        assert "stored-secret-key" not in saved.text
+        with Session(engine) as session:
+            assert session.get(ModelConfig, 4).api_key == "stored-secret-key"
+        assert api.post("/models/4/test").json() == {"ok": True, "detail": "连接成功"}
+        assert requests == [("some-other-relay.test", "Bearer stored-secret-key")]
+    finally:
+        app.dependency_overrides.clear()
+        engine.dispose()
