@@ -12,7 +12,7 @@
   "long_path": {
     "compacted": true,
     "raw_estimate": 63398,
-    "estimated_input_tokens": 8956,
+    "estimated_input_tokens": 8944,
     "middle_condition_retained": true,
     "question_preserved": true,
     "quote_preserved": true,
@@ -25,7 +25,7 @@
   "current_image": {
     "compacted": true,
     "raw_estimate": 67582,
-    "estimated_input_tokens": 10642,
+    "estimated_input_tokens": 10630,
     "current_image_intact": true
   },
   "large_tool_result": {
