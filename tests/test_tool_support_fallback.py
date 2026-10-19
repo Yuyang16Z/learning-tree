@@ -137,3 +137,23 @@ def test_tools_the_user_selected_are_never_dropped_silently(setup, monkeypatch):
     assert events[-1]["status"] == "error"
     assert events[-1]["error"] == nodes.TOOLS_REJECTED_ERROR
     assert endpoint.requests == [True]
+
+
+def test_stop_during_a_rejected_tool_request_sends_no_plain_resend(setup, monkeypatch):
+    """Stop pressed while the first request (with implicit readers) is in flight: the
+    rejection is remembered, but no further request goes out for the stopped answer."""
+    client, endpoint = setup
+    monkeypatch.setattr(nodes, "assemble_tools", lambda *args: ([], {}))
+    original = endpoint.create
+
+    def create(**kwargs):
+        if "tools" in kwargs:
+            for generation in list(nodes._GENERATIONS.values()):
+                generation.stop.set()
+        return original(**kwargs)
+
+    endpoint.chat.completions.create = create
+    events = ask(client, 1, "停下来")
+    assert endpoint.requests == [True], "no plain request may follow Stop"
+    assert events[-1]["status"] == "interrupted", events[-1]
+    assert llm.TOOLS_UNSUPPORTED == {("http://127.0.0.1:11434/v1", "synthetic")}

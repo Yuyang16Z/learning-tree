@@ -137,10 +137,12 @@ TOOLS_REJECTED_ERROR = (
 )
 
 
-def _plain_on_rejected_tools(agent, spec: LLMSpec, plain):
+def _plain_on_rejected_tools(agent, spec: LLMSpec, plain, stopped=lambda: False):
     """Relay the agent's events, unless its first request is rejected for carrying tools:
     then remember the endpoint and answer through `plain()` instead. Only the implicit
-    read-only readers ride along here, and nothing was relayed before the rejection."""
+    read-only readers ride along here, and nothing was relayed before the rejection.
+    A Stop that arrived while the rejected request was in flight ends the answer here:
+    no further provider request is sent for it."""
     try:
         first = next(agent)
     except StopIteration:
@@ -149,6 +151,8 @@ def _plain_on_rejected_tools(agent, spec: LLMSpec, plain):
         if not rejects_tools(exc):
             raise
         remember_tools_unsupported(spec)
+        if stopped():
+            return
         yield from plain()
         return
     yield first
@@ -1507,7 +1511,9 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 if not tools_requested:
                     # Only implicit readers ride along: an endpoint without tool
                     # support still answers, without them.
-                    stream = _plain_on_rejected_tools(stream, spec, plain_answer)
+                    stream = _plain_on_rejected_tools(
+                        stream, spec, plain_answer, generation.stop.is_set
+                    )
             else:
                 stream = plain_answer()
             model_started = time.monotonic()
