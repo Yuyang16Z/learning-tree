@@ -52,6 +52,19 @@ Open **Settings → MCP tools**, test or enable a server, then select the tools 
 
 「联网搜索」一个勾选项包含搜索和网页正文阅读，模型按需要调用；长文可分段继续读。启用此预设后，输入框不再重复显示内置的「联网搜索」「读取网页」。未安装或停用此预设时，内置工具仍可使用。更新前让正在生成的回答完成，更新后重启应用并刷新页面。
 
+## Remote servers / 远程 MCP 服务
+
+Besides local programs, **Settings → MCP tools → Add MCP** can connect a remote MCP server over Streamable HTTP: choose **Remote HTTP**, enter its URL (for example `https://example.com/mcp`) and, when the server needs them, request headers such as `Authorization: Bearer <token>`.
+
+- **Credentials:** header values are stored in the local SQLite database like model keys, without encryption at rest. The API and Settings list header names only; when editing, leave a value blank to keep it, or remove the row to delete the header. Put credentials in headers, not in the URL, which Settings shows.
+- **Addresses:** the URL must use `http` or `https` without a user name or password. Before connecting, every address of its host must be public: loopback, private, link-local (including cloud metadata) and shared CGNAT (including Tailscale) addresses are refused unless **Allow private addresses** is checked, which is meant for a development server on this computer. Redirects are never followed. The client resolves the name again when it connects, so DNS rebinding after the check is not prevented.
+- **Errors:** **Test connection** reports fixed messages (refused address, rejected credentials, missing endpoint, redirect, unreachable, timeout) instead of raw errors, so no header value can appear in them. A failed tool call gets the same fixed messages, except that a call which timed out or lost its connection after it was sent is reported to the model as having an unknown outcome (the server may have run it), never as an unreachable server, so a tool with side effects is checked before it is called again.
+- **Sessions and tool lists:** like a local server, each remote server keeps one session. An expired or lost session reconnects once to list tools; a tool call is never repeated. A new connection answered with a redirect or a client error (no MCP endpoint at the URL, rejected credentials) is reported at once without that retry. A session reuses its tool list for 60 seconds; a server that sends `notifications/tools/list_changed` is listed again on the next question, and **Test connection** always lists afresh.
+- **Results:** the complete text of each call is stored with the answer (see [data locations](../../docs/operations.md#data-locations)); the model receives at most 24,000 characters per call and can page through the rest with `read_tool_result`.
+- **Trust:** a remote server receives the arguments of the calls the model makes to it, which can include parts of your question. Configure only servers you trust.
+
+除本机程序外，「设置 → MCP 工具 → 添加 MCP」还可以选择「远程 HTTP」，通过 Streamable HTTP 连接远程 MCP 服务：填写服务地址（如 `https://example.com/mcp`），需要时添加 `Authorization: Bearer <token>` 之类的请求头。请求头的值与模型密钥一样只保存在本机 SQLite 中（未加密），接口和设置页只显示名称；编辑时留空即保留原值。凭据请放在请求头里，不要写进地址。连接前会检查地址：只接受不含用户名和密码的 http(s) 地址，主机解析出的每个地址都必须是公网地址；本机、内网、链路本地和 Tailscale 等地址会被拒绝，除非勾选「允许内网地址」（仅用于这台电脑上的开发服务）。不会跟随重定向；连接时会再次解析域名，因此无法防止检查之后的 DNS 重绑定。「测试连接」只显示固定提示，不会回显原始错误或请求头；工具调用失败时同样只返回固定提示，但请求发出后超时或连接中断时，模型收到的是「执行结果未确认」（服务可能已经执行），而不是「无法连接」，以免直接重复调用有副作用的工具。已建立的会话过期或中断时，列出工具会重连一次，工具调用不会重复执行；新连接收到重定向或客户端错误（地址上没有 MCP 服务、凭据被拒）时直接报告，不再重试。每个服务的工具清单缓存 60 秒；服务发出 `notifications/tools/list_changed` 后下一次提问会重新获取，「测试连接」总是重新获取。远程服务会收到模型调用它时的参数，其中可能包含问题内容，请只配置可信的服务。
+
 ## Data and process boundaries / 数据与会话
 
 - **Learning files:** the project's `learning-materials/` directory is exposed for reading and writing. An existing legacy `学习资料/` directory remains accessible in place; files are never moved, merged or overwritten during this transition. Both libraries are excluded from Git except the public `learning-materials/README.md`. A symlink replacing either library root is rejected. Restart the app after upgrading to refresh cached MCP sessions.
@@ -72,7 +85,7 @@ The optional verifier checks all six services using a public example page and un
 These are recommendations, not installed presets:
 
 - **Programming study:** [Context7](https://context7.com/docs/overview) retrieves library documentation and examples for specific versions. This is the most direct addition when learning frameworks and APIs.
-- **Learning from real projects:** [GitHub's official MCP server](https://github.com/github/github-mcp-server) can read repositories, files and issues. Start with its read-only mode and the relevant repository tools; choose authentication and transport before integrating it with LearningTree.
+- **Learning from real projects:** [GitHub's official MCP server](https://github.com/github/github-mcp-server) can read repositories, files and issues. It can be added as a remote HTTP server with an `Authorization` header; start with its read-only mode and the relevant repository tools.
 - **Broader research:** [Tavily MCP](https://docs.tavily.com/documentation/mcp) offers search and page extraction. LearningTree's combined preset already supports search and reading, including optional Tavily search, so add the separate server only when its additional tools are needed.
 
 建议按学习任务选工具：先补技术文档，再按需接入开源项目阅读；现有网页、文件、浏览器能力继续使用。内置学习记忆与独立 Memory MCP 是两套存储，删除学习树只清理有明确归属的应用数据。共享 MCP 文件和知识图谱需要独立管理；下一步若要统一清理，应先给 MCP 产物记录所属学习树，再提供按树管理入口。

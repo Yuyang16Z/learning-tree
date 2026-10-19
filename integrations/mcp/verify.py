@@ -12,10 +12,12 @@ sys.path.insert(0, str(ROOT))
 from app import mcp_client
 
 CATALOG = json.loads(Path(__file__).with_name("catalog.json").read_text(encoding="utf-8"))
+# The managed presets are local programs; their identity matches registered rows.
 SPECS = {
     item["key"]: mcp_client.server_spec(
         str(Path(sys.executable).absolute()),
         [str(Path(__file__).with_name("launch.py")), item["key"]],
+        transport="stdio",
     )
     for item in CATALOG
 }

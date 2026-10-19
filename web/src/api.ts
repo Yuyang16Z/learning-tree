@@ -1,10 +1,17 @@
 import { readSSE } from "./lib/sse";
+import { toolReference, type ToolReference } from "./lib/toolSteps";
+import { parseSources } from "./lib/sourceLinks";
+import { reportPairingRequired } from "./lib/phonePairing";
 import { getLocale, translate } from "./i18n";
 import { localizeError } from "./i18n/workspace";
 import type {
+  AnswerDiagnostics,
+  AnswerSource,
   McpInput,
   McpServer,
   Memory,
+  ModelDiscovery,
+  ModelProtocol,
   MemoryFact,
   MemoryFactsPage,
   PreferenceProfile,
@@ -16,17 +23,24 @@ import type {
   PhoneAccess,
   ModelInput,
   NodeDetail,
+  RetrievalSettings,
+  ReturnSummary,
+  SearchHit,
   ThreadNode,
+  ToolResultPage,
   Tree,
   TreeNode,
   SourceAnchor,
   DocumentSummary,
   DocumentDetail,
+  Understanding,
 } from "./types";
 
 const API = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
 
 async function requestError(res: Response): Promise<Error> {
+  // Another device whose pairing is missing or was rotated: ask it to scan again.
+  reportPairingRequired(res.status, globalThis.location?.hostname);
   let detail: any;
   try { const data = await res.json(); detail = data.detail ?? data; } catch { detail = null; }
   const message = typeof detail === 'string' ? detail : detail?.message;
@@ -91,7 +105,11 @@ async function relay(res: Response, on: AskHandlers, start: AskMeta, signal?: Ab
       if (typeof obj.reasoning === 'string') on.onReasoning?.(obj.reasoning);
       if (obj.context_status === 'summarizing' || obj.context_status === 'ready') on.onContextStatus?.(obj.context_status);
       if (obj.tool_start) on.onToolStart?.(obj.tool_start.name, obj.tool_start.args);
-      if (obj.tool_end) on.onToolEnd?.(obj.tool_end.name, obj.tool_end.result);
+      if (obj.tool_end) on.onToolEnd?.(obj.tool_end.name, obj.tool_end.result, toolReference(obj.tool_end, obj));
+      if (obj.diagnostics && typeof obj.diagnostics === 'object' && !Array.isArray(obj.diagnostics)) on.onDiagnostics?.(obj.diagnostics as AnswerDiagnostics);
+      // Memory provenance is dispatched, never merged into the completion metadata.
+      const sources = parseSources(obj.sources);
+      if (sources) on.onSources?.(sources);
       if (obj.error) { failure = obj.error; meta = { ...meta, ...obj }; }
       if (obj.done) { completed = true; meta = { ...meta, ...obj }; }
     });
@@ -124,7 +142,11 @@ export interface AskHandlers {
   onReasoning?: (s: string) => void;
   onContextStatus?: (status: ContextStatus) => void;
   onToolStart?: (name: string, args: unknown) => void;
-  onToolEnd?: (name: string, result: string) => void;
+  /** `reference` points at the call's stored complete result when the preview is shorter. */
+  onToolEnd?: (name: string, result: string, reference: ToolReference) => void;
+  /** Numeric request/usage/timing summary, sent once before the answer ends. */
+  onDiagnostics?: (diagnostics: AnswerDiagnostics) => void;
+  onSources?: (sources: AnswerSource[]) => void;
 }
 
 export const api = {
@@ -161,6 +183,9 @@ export const api = {
   setDefaultModel: (id: number) => jsonPost(`${API}/models/${id}/default`, {}).then(j<ModelCfg>),
   testModel: (id: number) =>
     jsonPost(`${API}/models/${id}/test`, {}).then(j<{ ok: boolean; detail: string }>),
+  // Explicit only: the form asks the provider (or the approximate catalog) when the user clicks Detect.
+  discoverModel: (body: { protocol: ModelProtocol; base_url: string; llm_model: string; api_key?: string; config_id?: number }) =>
+    jsonPost(`${API}/models/discover`, body).then(j<ModelDiscovery>),
 
   listMcp: () => fetch(`${API}/mcp`).then(j<McpServer[]>),
   addMcp: (body: McpInput) => jsonPost(`${API}/mcp`, body).then(j<McpServer>),
@@ -203,6 +228,10 @@ export const api = {
     fetch(`${API}/memories/retrieval/status`, { signal }).then(j<MemoryRetrievalStatus>),
   prepareMemoryRetrieval: (signal?: AbortSignal) =>
     fetch(`${API}/memories/retrieval/prepare`, { method: "POST", signal }).then(j<MemoryRetrievalStatus>),
+  getRetrievalSettings: (signal?: AbortSignal) =>
+    fetch(`${API}/memories/retrieval/settings`, { signal }).then(j<RetrievalSettings>),
+  saveRetrievalSettings: (body: RetrievalSettings) =>
+    fetch(`${API}/memories/retrieval/settings`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(j<RetrievalSettings>),
   deleteMemory: (id: number) => fetch(`${API}/memories/${id}`, { method: "DELETE" }).then(j<unknown>),
   clearMemories: () => fetch(`${API}/memories`, { method: "DELETE" }).then(j<unknown>),
 
@@ -212,11 +241,17 @@ export const api = {
   createTree: (title: string, root_question?: string) =>
     jsonPost(`${API}/trees`, { title, root_question: root_question ?? null }).then(j<Tree>),
   getTree: (id: number, signal?: AbortSignal) => fetch(`${API}/trees/${id}`, { signal }).then(j<TreeNode[]>),
+  searchTree: (id: number, q: string, limit = 30, signal?: AbortSignal) =>
+    fetch(`${API}/trees/${id}/search?${new URLSearchParams({ q, limit: String(limit) })}`, { signal }).then(j<{ results: SearchHit[] }>).then(r => r.results),
   deleteTree: (id: number) => fetch(`${API}/trees/${id}`, { method: "DELETE" }).then(j<unknown>),
 
   getNode: (id: number) => fetch(`${API}/nodes/${id}`).then(j<NodeDetail>),
+  // One page of a tool call's stored complete result (the step shows a preview).
+  toolResult: (nodeId: number, callIndex: number, requestId: string, start = 0, signal?: AbortSignal) =>
+    fetch(`${API}/nodes/${nodeId}/tool-results/${callIndex}?${new URLSearchParams({ request_id: requestId, start: String(start), max_chars: "20000" })}`, { signal }).then(j<ToolResultPage>),
   getThread: (id: number) =>
-    fetch(`${API}/nodes/${id}/thread`).then(j<{ nodes: ThreadNode[] }>).then((r) => r.nodes),
+    fetch(`${API}/nodes/${id}/thread`).then(j<{ nodes: ThreadNode[] }>)
+      .then((r) => r.nodes.map(row => ({ ...row, sources: parseSources(row.sources) }))),
   // Explicit deletion only. Editing creates a separate version through ask(mode=revise).
   deleteNode: (id: number) => fetch(`${API}/nodes/${id}`, { method: "DELETE" }).then(j<{ deleted: number[] }>),
   branch: (nodeId: number, seed_text: string, anchor?: SourceAnchor) =>
@@ -232,8 +267,17 @@ export const api = {
   saveNote: (id: number, learning_note: string) => fetch(`${API}/nodes/${id}`, {
     method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ learning_note }),
   }).then(j<unknown>),
+  // Local excerpts of the branch being left; no model call. 404 outside a branch.
+  returnSummary: (id: number, signal?: AbortSignal) =>
+    fetch(`${API}/nodes/${id}/return-summary`, { signal }).then(j<ReturnSummary>),
+  // Sends only the mark, so the learning note is left as it is; null clears the mark.
+  setUnderstanding: (id: number, understanding: Understanding | null) => fetch(`${API}/nodes/${id}`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ understanding }),
+  }).then(j<unknown>),
 
   phoneAccess: (signal?: AbortSignal) => fetch(`${API}/phone-access`, { signal, cache: "no-store" }).then(j<PhoneAccess>),
+  // Only this computer may rotate; every paired phone must scan the new QR code.
+  rotatePhoneAccess: () => jsonPost(`${API}/phone-access/rotate`, {}).then(j<PhoneAccess>),
 
   changes: (since: string, signal?: AbortSignal) =>
     fetch(`${API}/changes?${new URLSearchParams({ since })}`, { signal, cache: "no-store" }).then(j<ChangeNotice>),

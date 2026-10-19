@@ -1,6 +1,7 @@
 """User-evidenced preference learning and stale-background-write safety, offline only."""
 
 import json
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
@@ -380,3 +381,145 @@ def test_cjk_relevance_keeps_older_related_automatic_preferences_in_prompt(store
     context = calls[0][3]
     assert context["existing"][0]["id"] == related.id
     assert context["existing_truncated"] and not context["manual_context_incomplete"]
+
+
+def test_extractor_normalizes_object_facts_and_sends_existing_facts_only_when_given(monkeypatch):
+    captured = []
+
+    def complete(spec, system, messages):
+        captured.append(json.loads(messages[0]["content"]))
+        return json.dumps(
+            {
+                "preferences": [],
+                "facts": [
+                    {
+                        "text": " 过拟合是训练集好而验证集差 ",
+                        "type": "definition",
+                        "terms": ["过拟合", 7, "", "验证集"],
+                        "supersedes": "12",
+                    },
+                    {"type": "condition"},
+                    {"text": "不认识的类型", "type": "rumour", "supersedes": True},
+                    "  字符串事实  ",
+                ],
+            }
+        )
+
+    monkeypatch.setattr(llm, "complete", complete)
+    existing = [{"id": 12, "text": "旧的过拟合说法"}]
+    result = llm.extract_memories(SPEC, QUESTION, "回答", {"enabled": False}, existing)
+    assert result["facts"] == [
+        {
+            "text": "过拟合是训练集好而验证集差",
+            "type": "definition",
+            "terms": ["过拟合", "验证集"],
+            "supersedes": 12,
+        },
+        {"text": "不认识的类型", "type": "conclusion", "terms": [], "supersedes": None},
+        "字符串事实",
+    ]
+    assert captured[0]["existing_facts"] == existing
+    llm.extract_memories(SPEC, QUESTION, "回答", {"enabled": False})
+    assert "existing_facts" not in captured[1]
+    assert "supersedes" in llm._EXTRACT_SYSTEM and "answer、引用、代码、转述" in llm._EXTRACT_SYSTEM
+
+
+def test_one_malformed_supersedes_value_keeps_the_rest_of_the_turn(monkeypatch):
+    replies = [
+        [
+            {"text": "保留的事实", "type": "definition"},
+            # str.isdigit() accepts superscripts and circled digits; int() does not.
+            {"text": "上标编号", "supersedes": "²"},
+            {"text": "全角编号", "supersedes": "１２"},
+        ],
+        [
+            {"text": "保留的事实", "type": "definition"},
+            # Decimal, but past int()'s 4,300-digit limit: only this item is dropped.
+            {"text": "超长编号", "supersedes": "1" * 5000},
+            {"text": "圈号编号", "supersedes": "①"},
+        ],
+    ]
+    monkeypatch.setattr(
+        llm, "complete", lambda *args: json.dumps({"preferences": [], "facts": replies.pop(0)})
+    )
+    kept = {"text": "保留的事实", "type": "definition", "terms": [], "supersedes": None}
+    first = llm.extract_memories(SPEC, QUESTION, "回答", {"enabled": False}, [])
+    assert first["facts"] == [
+        kept,
+        {"text": "上标编号", "type": "conclusion", "terms": [], "supersedes": None},
+        {"text": "全角编号", "type": "conclusion", "terms": [], "supersedes": 12},
+    ]
+    second = llm.extract_memories(SPEC, QUESTION, "回答", {"enabled": False}, [])
+    assert second["facts"] == [
+        kept,
+        {"text": "圈号编号", "type": "conclusion", "terms": [], "supersedes": None},
+    ]
+
+
+def test_structured_fact_supersedes_a_current_path_fact_without_deleting_it(store, monkeypatch):
+    calls = extract(monkeypatch, {"preferences": [], "facts": ["旧结论"]})
+    service.extract_and_save(SPEC, 1, 1, QUESTION, "回答")
+    old = rows(store, Memory)[0]
+    assert (old.fact_type, old.terms, old.superseded_by, old.updated_at) == (
+        "conclusion",
+        None,
+        None,
+        None,
+    )
+    calls = extract(
+        monkeypatch,
+        {
+            "preferences": [],
+            "facts": [
+                {
+                    "text": "修正后的结论",
+                    "type": "misconception",
+                    "terms": ["结论"],
+                    "supersedes": old.id,
+                }
+            ],
+        },
+    )
+    service.extract_and_save(SPEC, 1, 1, "第二个问题", "第二个回答")
+    assert calls[0][4] == [{"id": old.id, "text": "旧结论"}]
+    stored = {row.content: row for row in rows(store, Memory)}
+    new = stored["修正后的结论"]
+    assert (new.fact_type, new.terms, new.superseded_by) == ("misconception", ["结论"], None)
+    assert stored["旧结论"].superseded_by == new.id
+    # Supersession is not a hand edit: deleting the correction makes this fact current
+    # again, and it must stay open to a later correction.
+    assert stored["旧结论"].updated_at is None
+    assert stored["旧结论"].content == "旧结论", "superseded facts are kept, never rewritten"
+
+
+@pytest.mark.parametrize("target", ["sibling", "edited", "unknown"])
+def test_supersedes_only_applies_to_unedited_facts_on_the_current_path(store, monkeypatch, target):
+    with Session(store) as s:
+        sibling = Memory(kind="fact", content="兄弟分支事实", tree_id=1, source_node_id=2)
+        edited = Memory(
+            kind="fact",
+            content="用户改过的事实",
+            tree_id=1,
+            source_node_id=1,
+            updated_at=datetime.now(timezone.utc),
+        )
+        s.add_all([sibling, edited])
+        s.commit()
+        s.refresh(sibling)
+        s.refresh(edited)
+        victims = {"sibling": sibling.id, "edited": edited.id, "unknown": 999}
+    calls = extract(
+        monkeypatch,
+        {
+            "preferences": [],
+            "facts": [
+                {"text": "新事实", "type": "conclusion", "terms": [], "supersedes": victims[target]}
+            ],
+        },
+    )
+    service.extract_and_save(SPEC, 1, 1, QUESTION, "回答")
+    # The sibling fact is off the path, so the extractor never saw it as replaceable.
+    assert [row["text"] for row in calls[0][4]] == ["用户改过的事实"]
+    stored = rows(store, Memory)
+    assert all(row.superseded_by is None for row in stored)
+    assert "新事实" in [row.content for row in stored]

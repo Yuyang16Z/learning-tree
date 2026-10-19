@@ -16,6 +16,12 @@
 .lm-results button { display: block; width: 100%; padding: 9px 8px; border: 0; border-radius: 6px; background: transparent; text-align: left; font-size: 12px; }
 .lm-results button > span { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.6; }
 .lm-results button:hover { background: var(--panel); color: var(--text); }
+.lm-result-group { border-top: 1px dashed var(--border); margin-top: 4px; padding-top: 4px; }
+.learning-map .lm-unresolved-toggle { position: relative; }
+.lm-badge { position: absolute; top: 0; right: -2px; min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px; background: var(--u-open); color: var(--bg); font-size: 9px; font-weight: 600; line-height: 15px; text-align: center; font-variant-numeric: tabular-nums; }
+.lm-unresolved:focus { outline: none; }
+.lm-unresolved .lm-results { border-top: 0; margin-top: 0; padding-top: 0; }
+.lm-results .lm-result-snippet { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-top: 2px; color: var(--muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
 .lm-viewport { flex: 1; min-height: 0; overflow: hidden; position: relative; touch-action: none; cursor: grab; overscroll-behavior: contain; background-image: radial-gradient(var(--border-strong) .65px, transparent .65px); background-size: 18px 18px; }
 .lm-viewport.dragging { cursor: grabbing; }
 .lm-viewport.dragging * { cursor: grabbing; }
@@ -27,6 +33,11 @@
 .lm-card { position: absolute; border: 1px solid var(--border); border-radius: 11px; background: var(--bg); box-shadow: 0 2px 5px #00000003; overflow: hidden; cursor: default; }
 .lm-card.current { border-color: var(--teal); box-shadow: 0 0 0 2px color-mix(in srgb, var(--teal) 10%, transparent); }
 .lm-card.ancestor { border-color: color-mix(in srgb, var(--teal) 28%, var(--border)); }
+/* Understanding of the card's last node: a quiet edge stripe and tint; selection styling stays on top. */
+.lm-card.u-open, .lm-card.u-partial, .lm-card.u-clear { --u-mark: var(--u-clear); background: color-mix(in srgb, var(--u-mark) 5%, var(--bg)); }
+.lm-card.u-open { --u-mark: var(--u-open); }
+.lm-card.u-partial { --u-mark: var(--u-partial); }
+.lm-card.u-open::before, .lm-card.u-partial::before, .lm-card.u-clear::before { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 3px; background: var(--u-mark); pointer-events: none; }
 .learning-map .lm-topic { display: flex; align-items: flex-start; gap: 8px; width: 100%; height: 55px; padding: 12px 12px 0; border: 0; background: transparent; color: var(--text); text-align: left; }
 .lm-topic:hover .lm-title { color: var(--teal); }
 .lm-node-mark { display: block; flex: none; width: 6px; height: 6px; margin-top: 6px; border: 1px solid var(--border-strong); border-radius: 50%; }

@@ -3,6 +3,7 @@
 import asyncio
 import os
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -141,6 +142,17 @@ def test_tool_errors_and_large_output_are_bounded(server_spec):
     assert "已截断" in output
 
 
+def test_complete_output_is_returned_beside_the_bounded_text(server_spec):
+    spec, _ = server_spec
+    complete = []
+    output = mcp_client.call_tool(spec, "huge", {}, complete)
+    assert len(output) <= mcp_client.MAX_OUTPUT_CHARS and "已截断" in output
+    assert complete == ["large-output-" * 5000]
+    failed = []
+    error = mcp_client.call_tool(spec, "fails", {}, failed)
+    assert failed == [error] and "expected tool error" in error
+
+
 def test_binary_result_is_not_dumped_into_model_context():
     result = CallToolResult(
         content=[ImageContent(type="image", mimeType="image/png", data="A" * 500_000)]
@@ -158,7 +170,9 @@ def test_binary_result_is_not_dumped_into_model_context():
 
 def test_discovery_reads_all_pages_and_rejects_cycles():
     class PaginatedSession:
-        async def list_tools(self, cursor=None):
+        async def list_tools(self, *, params=None):
+            # Pages are requested with PaginatedRequestParams, never a positional cursor.
+            cursor = params.cursor if params is not None else None
             name = "first" if cursor is None else "second"
             return SimpleNamespace(
                 tools=[Tool(name=name, inputSchema={"type": "object"})],
@@ -170,11 +184,72 @@ def test_discovery_reads_all_pages_and_rejects_cycles():
     ] == ["first", "second"]
 
     class CyclicSession:
-        async def list_tools(self, cursor=None):
+        async def list_tools(self, *, params=None):
             return SimpleNamespace(tools=[], nextCursor="same")
 
     with pytest.raises(RuntimeError, match="重复"):
         asyncio.run(mcp_client._SessionWorker._list(CyclicSession()))
+
+
+CHANGING_SERVER = """
+from mcp.server.fastmcp import Context, FastMCP
+
+server = FastMCP("changing-tools")
+
+
+def added() -> str:
+    return "added"
+
+
+@server.tool()
+async def grow(ctx: Context) -> str:
+    server.add_tool(added)
+    await ctx.session.send_tool_list_changed()
+    return "grown"
+
+
+@server.tool()
+def quiet_grow() -> str:
+    server.add_tool(added, name="quietly_added")
+    return "grown quietly"
+
+
+server.run(transport="stdio")
+"""
+
+
+def test_tool_list_is_reused_until_a_change_announcement_refresh_or_expiry(tmp_path, monkeypatch):
+    script = tmp_path / "changing.py"
+    script.write_text(CHANGING_SERVER)
+    spec = {"command": sys.executable, "args": [str(script)]}
+    listings = []
+    original = mcp_client._SessionWorker._list
+
+    async def counting(session):
+        listings.append(threading.current_thread().name)
+        return await original(session)
+
+    monkeypatch.setattr(mcp_client._SessionWorker, "_list", staticmethod(counting))
+
+    def names(**kwargs):
+        return {tool["name"] for tool in mcp_client.list_tools(spec, **kwargs)}
+
+    try:
+        assert names() == {"grow", "quiet_grow"}
+        assert names() == {"grow", "quiet_grow"} and len(listings) == 1
+        # An unannounced change stays cached until a connection test refreshes it.
+        assert mcp_client.call_tool(spec, "quiet_grow", {}) == "grown quietly"
+        assert "quietly_added" not in names() and len(listings) == 1
+        assert "quietly_added" in names(refresh=True) and len(listings) == 2
+        # notifications/tools/list_changed marks the list stale for the next request.
+        assert mcp_client.call_tool(spec, "grow", {}) == "grown"
+        assert "added" in names() and len(listings) == 3
+        assert names() and len(listings) == 3
+        monkeypatch.setattr(mcp_client, "TOOLS_CACHE_SECONDS", 0.0)
+        assert names() and len(listings) == 4
+        assert set(listings) == {"learning-tree-mcp"}  # Listed by the session's own actor.
+    finally:
+        mcp_client.close_all()
 
 
 def test_parameters_expand_home_preserve_path_and_do_not_inherit_secrets(monkeypatch):

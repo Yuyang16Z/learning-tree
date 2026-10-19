@@ -18,9 +18,19 @@ import app.service as service
 from app import learning_summaries
 from app.context_budget import ContextPolicy, estimate_request_tokens
 from app.context_sources import SOURCE_TOOL_NAME
-from app.models import ContextSummary, KnowledgeTree, Message, ModelConfig, Node
+from app.models import (
+    ContextSummary,
+    KnowledgeTree,
+    Memory,
+    Message,
+    ModelConfig,
+    Node,
+    RetrievalSettings,
+)
 from app.routers import nodes, trees
+from app.search_index import HISTORY_TOOL_NAME
 from app.tool_catalog import SEARCH_TOOL_NAME, tool_definition_cost
+from app.tool_results import TOOL_RESULT_TOOL_NAME
 
 
 @pytest.fixture
@@ -116,22 +126,42 @@ def ask(client, question="继续解释条件。", **kwargs):
     ]
 
 
+def test_answer_requests_carry_the_stable_prompt_prefix_for_provider_caching(api, monkeypatch):
+    from app.context import BASE_SYSTEM
+
+    client, _, _ = api
+    received = []
+
+    def stream(spec, system, messages, **kwargs):
+        received.append((system, kwargs.get("cache_prefix")))
+        yield "text", "合成回答。"
+
+    monkeypatch.setattr(nodes, "stream_chat", stream)
+    assert ask(client)[-1]["status"] == "complete"
+    ((system, prefix),) = received
+    assert prefix == BASE_SYSTEM + "\n学习路径：祖先（node=1）"
+    assert system.startswith(prefix)
+    assert "SYNTHETIC_SIBLING_SECRET" not in prefix and "继续解释条件" not in prefix
+
+
 def _long_summary_history(engine):
     with Session(engine) as session:
         cfg = session.get(ModelConfig, 1)
         cfg.context_window = 20000
         session.add(cfg)
         message = session.get(Message, 2)
-        message.content = "Historical background to a synthetic learning question. " * 100
+        # Each message stays below the summary block limit; the count makes the
+        # token-scale estimate exceed the 20,000 window so compaction summarizes.
+        message.content = "Historical background to a synthetic learning question. " * 200
         session.add(message)
-        for index in range(3):
+        for index in range(9):
             session.add(Message(node_id=1, role="user", content=f"Earlier learning goal {index}?"))
             session.add(
                 Message(
                     node_id=1,
                     role="assistant",
                     content=(
-                        f"Background explanation {index}; only under the stated condition. " * 90
+                        f"Background explanation {index}; only under the stated condition. " * 180
                     ),
                 )
             )
@@ -174,6 +204,44 @@ def test_model_summary_is_only_resolved_once_after_tool_preflight_and_preserves_
     assert "SYNTHETIC_FOREIGN_SECRET" not in system
     with Session(engine) as session:
         assert session.get(Message, 2).content.startswith("Historical background")
+
+
+def test_model_summary_of_a_two_byte_script_history_is_used_not_discarded(api, monkeypatch):
+    """Cyrillic costs about 1.8 UTF-8 bytes per estimate unit. The byte budget handed to
+    the summary resolver follows the history's own density, so the resolver's output,
+    which fills that budget, fits the room and the paid model summary reaches the answer."""
+    client, engine, calls = api
+    with Session(engine) as session:
+        cfg = session.get(ModelConfig, 1)
+        cfg.context_window, cfg.max_tokens = 32768, 4096
+        session.add(cfg)
+        for index in range(12):
+            session.add(
+                Message(node_id=1, role="user", content=f"Вопрос {index}: когда действует правило?")
+            )
+            session.add(
+                Message(
+                    node_id=1,
+                    role="assistant",
+                    content=" ".join(
+                        f"Правило {index}.{part} действует только с явного разрешения владельца."
+                        for part in range(40)
+                    ),
+                )
+            )
+        session.commit()
+    generated = []
+
+    def provider(spec, payload, max_output_bytes):
+        generated.append(payload[0]["source_id"])
+        return f"covered:\n- Ранее объяснялось условие разрешения. [{payload[0]['source_id']}]"
+
+    monkeypatch.setattr(learning_summaries, "summarize_learning_context", provider)
+    events = ask(client, "Когда действует правило?")
+    assert events[-1]["status"] == "complete", events
+    assert len(generated) == 1, "one optional summary call per question"
+    _, system, _, _ = calls["agent"][0]
+    assert "模型摘要（node=1" in system and generated[0] in system
 
 
 @pytest.mark.parametrize("failure", ["error", "oversized", "empty"])
@@ -404,12 +472,12 @@ def test_long_history_uses_reader_and_rejects_sibling_and_foreign_sources(api, m
 def test_mandatory_overflow_saves_question_but_starts_no_model_or_mcp(api, overflow):
     client, engine, calls = api
     secret = "SYNTHETIC_PRIVATE_OVERFLOW"
-    question = secret * 500 if overflow == "question" else "请解释本次选文。"
+    question = secret * 2000 if overflow == "question" else "请解释本次选文。"
     if overflow == "quote":
         with Session(engine) as session:
             current = session.get(Node, 2)
             current.kind = "branch"
-            current.seed_text = secret * 500
+            current.seed_text = secret * 2000
             session.add(current)
             session.commit()
     events = ask(client, question, tools=["mcp_server_88"])
@@ -477,7 +545,7 @@ def test_large_recalled_memory_is_budgeted_with_history_and_source_tool_schema(a
     client, engine, calls = api
     memory = "以下是历史记忆：\n" + "\n".join(
         f"- [记忆 {index}；来源节点 1] 第 {index} 条合成条件只能在明确授权后使用。"
-        for index in range(200)
+        for index in range(600)
     )
     monkeypatch.setattr(nodes, "fetch_memory_note", lambda *args, **kwargs: memory)
     events = ask(client)
@@ -591,7 +659,7 @@ def test_compacted_history_can_complete_a_real_source_read_tool_round(api, monke
     client, engine, calls = api
     source = "".join(
         f"只有第{index}个条件得到明确确认，才允许执行对应的第{index}项操作。"
-        for index in range(300)
+        for index in range(400)
     )
     with Session(engine) as session:
         message = session.get(Message, 2)
@@ -649,7 +717,8 @@ def catalog_definitions():
             "type": "function",
             "function": {
                 "name": f"mcp_88_auxiliary_{index}",
-                "description": f"Auxiliary operation {index}. " + "Detailed schema guidance. " * 32,
+                "description": f"Auxiliary operation {index}. "
+                + "Detailed schema guidance. " * 128,
                 "parameters": {
                     "type": "object",
                     "properties": {"value": {"type": "string"}},
@@ -877,7 +946,7 @@ def test_bounded_tool_rounds_synthesize_without_replaying_actions(
     catalog = ToolCatalog(definitions, budget=policy.input_budget // 3)
     messages = [{"role": "user", "content": "只执行一次，再总结结果。"}]
     original = copy.deepcopy(messages)
-    full_result = "EVIDENCE_START " + "synthetic body " * 4000 + " EVIDENCE_END"
+    full_result = "EVIDENCE_START " + "synthetic body " * 16000 + " EVIDENCE_END"
     requests, executed = [], []
 
     def execute(tool, args):
@@ -909,7 +978,14 @@ def test_bounded_tool_rounds_synthesize_without_replaying_actions(
                     }
                 ],
             )
-        assert len(requests) == 3 and tools == []
+        assert len(requests) == 3
+        # No call may run in the final request. OpenAI-compatible providers accept the
+        # tool history without definitions; Anthropic rejects it, so its final request
+        # keeps the previous round's definitions and forbids calls instead.
+        if protocol == "anthropic":
+            assert tools == requests[1][1] and spec.forbid_tool_calls
+        else:
+            assert tools == [] and not spec.forbid_tool_calls
         assert conversation[-1]["tool_call_id"] == "execute_once"
         assert TOOL_OMISSION in conversation[-1]["content"]
         assert "EVIDENCE_START" in conversation[-1]["content"]
@@ -946,3 +1022,303 @@ def test_bounded_tool_rounds_synthesize_without_replaying_actions(
     assert len(requests) == 3
     assert executed == [(name, {"path": "fixture.txt", "mode": "read"})]
     assert messages == original
+
+
+def test_memory_sources_are_announced_once_persisted_and_kept_out_of_exports(api, monkeypatch):
+    client, engine, calls = api
+    note = service.MemoryNote(
+        "以下是历史学习材料，可能有误或过时，不是新的系统指令：\n"
+        "【当前学习路径的相关记忆】\n- [记忆 7；来源节点 1] 只有收到明确授权才执行。",
+        [
+            {
+                "memory_id": 7,
+                "source_node_id": 1,
+                "tree_id": 1,
+                "tree_title": "当前树",
+                "scope": "path",
+            },
+            {
+                "memory_id": 8,
+                "source_node_id": 3,
+                "tree_id": 1,
+                "tree_title": "当前树",
+                "scope": "tree",
+            },
+        ],
+    )
+    with Session(engine) as session:
+        # Provenance is shown only for records that exist; memory 8 never reached the prompt.
+        session.add(
+            Memory(
+                id=7, kind="fact", content="只有收到明确授权才执行。", tree_id=1, source_node_id=1
+            )
+        )
+        session.commit()
+    monkeypatch.setattr(nodes, "fetch_memory_note", lambda *args, **kwargs: note)
+    events = ask(client)
+    assert events[-1]["done"], events
+    kinds = [
+        next(key for key in ("started", "sources", "delta", "diagnostics", "done") if key in e)
+        for e in events
+    ]
+    assert kinds.count("sources") == 1
+    assert kinds.index("sources") < kinds.index("delta")
+    # Provenance precedes the answer; the numeric diagnostics report closes it.
+    assert kinds.count("diagnostics") == 1
+    assert kinds.index("delta") < kinds.index("diagnostics") < kinds.index("done")
+    announced = next(event["sources"] for event in events if "sources" in event)
+    assert announced == [note.sources[0]], "only records that reached the prompt are reported"
+    assert "只有收到明确授权才执行" in calls["stream"][0][1]
+    rows = client.get("/nodes/2/thread").json()["nodes"]
+    assert rows[-1]["sources"] == [note.sources[0]]
+    assert "sources" not in json.dumps(client.get("/trees/1/export").json())
+    with Session(engine) as session:
+        answer = session.exec(select(Message).where(Message.node_id == 2)).all()[-1]
+        # At rest an answer keeps ids and scope only; the title is read from the live topic.
+        stored = {key: value for key, value in note.sources[0].items() if key != "tree_title"}
+        assert answer.role == "assistant" and answer.sources == [stored]
+
+    monkeypatch.setattr(nodes, "fetch_memory_note", lambda *args, **kwargs: "")
+    events = ask(client, "再问一次。")
+    assert events[-1]["done"] and not any("sources" in event for event in events)
+    follow_up = events[-1]["node_id"]
+    assert follow_up != 2
+    assert client.get(f"/nodes/{follow_up}/thread").json()["nodes"][-1]["sources"] is None
+
+
+def test_memory_recall_and_history_search_share_one_scope_snapshot(api, monkeypatch):
+    client, engine, calls = api
+    with Session(engine) as session:
+        session.add(RetrievalSettings(include_siblings=True, include_other_trees=True))
+        session.commit()
+    read = nodes.read_retrieval_settings
+
+    def read_then_concurrent_save(session):
+        scopes = read(session)
+        with Session(engine) as writer:  # A save from another window lands now.
+            row = writer.get(RetrievalSettings, 1)
+            row.include_other_trees = False
+            writer.add(row)
+            writer.commit()
+        return scopes
+
+    monkeypatch.setattr(nodes, "read_retrieval_settings", read_then_concurrent_save)
+    snapshots = []
+    make = nodes.make_history_search
+
+    def capture(engine_, tree_id, path, snapshot, **kwargs):
+        snapshots.append(dict(snapshot))
+        return make(engine_, tree_id, path, snapshot, **kwargs)
+
+    monkeypatch.setattr(nodes, "make_history_search", capture)
+    events = ask(client)
+    assert events[-1]["done"], events
+    assert snapshots == [{"include_siblings": True, "include_other_trees": True}]
+    assert calls["memory"][-1]["scopes"] == snapshots[0], "recall used the same snapshot"
+
+
+def _synthetic_tool(name="synthetic_tool", padding=0):
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": "Synthetic selected tool " + "x" * padding,
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+
+
+def test_history_search_joins_tool_rounds_and_reads_only_the_path_by_default(api, monkeypatch):
+    client, engine, calls = api
+    readbacks = []
+    monkeypatch.setattr(
+        nodes, "assemble_tools", lambda session, requested: ([_synthetic_tool()], {})
+    )
+
+    def agent(spec, system, messages, tools, execute, **kwargs):
+        names = [item["function"]["name"] for item in tools]
+        assert HISTORY_TOOL_NAME in names and SOURCE_TOOL_NAME in names
+        readbacks.append(execute(HISTORY_TOOL_NAME, {"query": "明确许可"}))
+        readbacks.append(execute(HISTORY_TOOL_NAME, {"query": "SYNTHETIC"}))
+        readbacks.append(execute(HISTORY_TOOL_NAME, {"query": "SYNTHETIC", "scope": "tree"}))
+        readbacks.append(execute(HISTORY_TOOL_NAME, {"query": "SYNTHETIC", "scope": "all"}))
+        yield {"type": "delta", "text": "已查过学习记录。"}
+
+    monkeypatch.setattr(nodes, "run_agent", agent)
+    events = ask(client, tools=["mcp_server_88"])
+    assert events[-1]["done"], events
+    on_path, missing, siblings, everything = (json.loads(raw) for raw in readbacks)
+    assert on_path["ok"] and [(r["kind"], r["message_id"]) for r in on_path["results"]] == [
+        ("message", 2)
+    ]
+    assert missing["ok"] and missing["results"] == []
+    assert siblings["error"] == everything["error"] == "scope_not_enabled"
+    assert "SECRET" not in "".join(readbacks)
+
+
+def test_widened_recall_offers_history_search_without_other_tools(api, monkeypatch):
+    client, engine, calls = api
+    with Session(engine) as session:
+        session.add(RetrievalSettings(include_siblings=True))
+        session.commit()
+    readbacks = []
+
+    def agent(spec, system, messages, tools, execute, **kwargs):
+        # Any tool round also offers the reader of this answer's complete tool results.
+        assert [item["function"]["name"] for item in tools] == [
+            HISTORY_TOOL_NAME,
+            TOOL_RESULT_TOOL_NAME,
+        ]
+        readbacks.append(
+            json.loads(execute(HISTORY_TOOL_NAME, {"query": "SYNTHETIC", "scope": "tree"}))
+        )
+        readbacks.append(
+            json.loads(execute(HISTORY_TOOL_NAME, {"query": "SYNTHETIC", "scope": "all"}))
+        )
+        yield {"type": "delta", "text": "查到了兄弟分支。"}
+
+    monkeypatch.setattr(nodes, "run_agent", agent)
+    events = ask(client)
+    assert events[-1]["done"], events
+    assert not calls["stream"] and calls["discover"] == [[]]
+    assert [(r["node_id"], r["node_title"]) for r in readbacks[0]["results"]] == [(3, "兄弟分支")]
+    assert readbacks[1]["error"] == "scope_not_enabled"
+
+
+def test_compaction_without_tools_offers_the_readers(api, monkeypatch):
+    client, engine, calls = api
+    make_history_long(engine)
+    seen = []
+
+    def agent(spec, system, messages, tools, execute, **kwargs):
+        seen.append([item["function"]["name"] for item in tools])
+        yield {"type": "delta", "text": "已按原文检查。"}
+
+    monkeypatch.setattr(nodes, "run_agent", agent)
+    events = ask(client)
+    assert events[-1]["done"], events
+    assert seen == [[SOURCE_TOOL_NAME, HISTORY_TOOL_NAME, TOOL_RESULT_TOOL_NAME]]
+
+
+def test_history_search_stays_pinned_in_a_tool_catalog(api, monkeypatch):
+    client, engine, calls = api
+    selected = [_synthetic_tool(f"mcp_88_tool_{index}", padding=600) for index in range(40)]
+    monkeypatch.setattr(nodes, "assemble_tools", lambda session, requested: (selected, {}))
+
+    def agent(spec, system, messages, tools, execute, **kwargs):
+        names = [item["function"]["name"] for item in tools]
+        assert (
+            SEARCH_TOOL_NAME in names and HISTORY_TOOL_NAME in names and SOURCE_TOOL_NAME in names
+        )
+        assert len(names) < len(selected)
+        assert "tool_catalog" in kwargs
+        yield {"type": "delta", "text": "目录模式下仍可检索记录。"}
+
+    monkeypatch.setattr(nodes, "run_agent", agent)
+    events = ask(client, tools=["mcp_server_88"])
+    assert events[-1]["done"], events
+
+
+def test_demo_mode_never_registers_history_search(api, monkeypatch):
+    client, engine, calls = api
+    with Session(engine) as session:
+        session.add(RetrievalSettings(include_siblings=True, include_other_trees=True))
+        session.add(
+            ModelConfig(id=2, label="Demo", base_url="mock", llm_model="mock", api_key="mock")
+        )
+        session.commit()
+    events = ask(client, config_id=2)
+    assert events[-1]["done"], events
+    assert not calls["agent"] and len(calls["stream"]) == 1 and calls["discover"] == [[]]
+
+
+def test_thinking_endpoint_completes_a_real_history_search_round(api, monkeypatch):
+    """A DeepSeek-style thinking endpoint, through the route and the real tool loop.
+
+    Widened recall offers search_learning_history. Once a request ends on a tool result,
+    the endpoint rejects it unless every assistant message carries reasoning_content,
+    including the ancestor's earlier answer on the path.
+    """
+    import httpx
+    from openai import OpenAI
+
+    import app.llm as llm
+
+    client, engine, calls = api
+    with Session(engine) as session:
+        session.add(RetrievalSettings(include_siblings=True))
+        session.commit()
+    bodies = []
+
+    def frame(delta, finish=None):
+        chunk = {
+            "id": "chat_test",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "synthetic",
+            "choices": [{"index": 0, "finish_reason": finish, "delta": delta}],
+        }
+        return "data: " + json.dumps(chunk) + "\n\n"
+
+    def handler(request):
+        body = json.loads(request.content)
+        bodies.append(body)
+        messages = body["messages"]
+        assistants = [m for m in messages if m["role"] == "assistant"]
+        if messages[-1]["role"] != "user" and any("reasoning_content" not in m for m in assistants):
+            message = "The `reasoning_content` in the thinking mode must be passed back to the API."
+            return httpx.Response(400, json={"error": {"message": message}})
+        if len(bodies) == 1:
+            call = {
+                "index": 0,
+                "id": "call_history",
+                "type": "function",
+                "function": {
+                    "name": HISTORY_TOOL_NAME,
+                    "arguments": json.dumps({"query": "许可", "scope": "path"}),
+                },
+            }
+            frames = [
+                frame({"role": "assistant", "content": None, "reasoning_content": "先回查。"}),
+                frame({"tool_calls": [call]}),
+                frame({}, "tool_calls"),
+            ]
+        else:
+            frames = [
+                frame({"role": "assistant", "content": None, "reasoning_content": "整理。"}),
+                frame({"content": "需要明确许可。"}),
+                frame({}, "stop"),
+            ]
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content="".join(frames) + "data: [DONE]\n\n",
+        )
+
+    monkeypatch.setattr(llm, "_STREAM_OPTIONS_UNSUPPORTED", set())
+    monkeypatch.setattr(
+        llm,
+        "_client",
+        lambda spec: OpenAI(
+            base_url=spec.base_url,
+            api_key=spec.api_key,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+            max_retries=0,
+        ),
+    )
+    monkeypatch.setattr(nodes, "run_agent", llm.run_agent)
+    events = ask(client)
+    assert events[-1].get("done") is True, events[-1]
+    assert "".join(event.get("delta", "") for event in events) == "需要明确许可。"
+    assert len(bodies) == 2 and not calls["agent"]
+    assert [tool["function"]["name"] for tool in bodies[0]["tools"]][0] == HISTORY_TOOL_NAME
+    replayed = [m for m in bodies[1]["messages"] if m["role"] == "assistant"]
+    assert [(m["content"], m["reasoning_content"]) for m in replayed] == [
+        ("只有获得明确许可才执行。", ""),
+        (None, "先回查。"),
+    ]
+    with Session(engine) as session:
+        answer = session.exec(
+            select(Message).where(Message.node_id == 2, Message.role == "assistant")
+        ).one()
+        assert answer.status == "complete" and answer.content == "需要明确许可。"

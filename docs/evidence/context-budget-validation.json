@@ -1,15 +1,18 @@
 {
   "scope": "Synthetic deterministic validation; no private data, model API, or answer-quality claims.",
-  "estimator": "UTF-8 bytes plus metadata and fixed image reservations; not provider token counts.",
+  "estimator": "Character-class token estimate (CJK 0.7, visible ASCII 0.33, whitespace 0.1, other non-ASCII 1.0 units per character, x1.15 safety factor) plus metadata and fixed image reservations; not provider token counts.",
   "policy": {
     "window_tokens": 32768,
     "output_tokens": 4096,
-    "input_budget": 27034
+    "calibration": 1.0,
+    "compaction_ratio": 0.6,
+    "input_budget": 27034,
+    "compaction_budget": 16220
   },
   "long_path": {
     "compacted": true,
-    "raw_estimate": 225117,
-    "estimated_input_tokens": 13321,
+    "raw_estimate": 63398,
+    "estimated_input_tokens": 8944,
     "middle_condition_retained": true,
     "question_preserved": true,
     "quote_preserved": true,
@@ -21,13 +24,13 @@
   },
   "current_image": {
     "compacted": true,
-    "raw_estimate": 229309,
-    "estimated_input_tokens": 17513,
+    "raw_estimate": 67582,
+    "estimated_input_tokens": 10630,
     "current_image_intact": true
   },
   "large_tool_result": {
-    "raw_estimate": 420576,
-    "estimated_input_tokens": 26824,
+    "raw_estimate": 120002,
+    "estimated_input_tokens": 15351,
     "omission_disclosed": true,
     "call_id_preserved": true,
     "original_result_unchanged": true

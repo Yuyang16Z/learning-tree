@@ -23,6 +23,7 @@ from .models import (
     PreferenceLearningState,
     PreferenceProfile,
     PreferenceSupplement,
+    RetrievalSettings,
 )
 
 router = APIRouter(prefix="/changes", tags=["changes"])
@@ -36,6 +37,7 @@ _SCOPES = {
     PreferenceProfile: "memory",
     PreferenceSupplement: "memory",
     PreferenceLearningState: "memory",
+    RetrievalSettings: "memory",
 }
 
 

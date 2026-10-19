@@ -19,9 +19,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from .context_budget import ContextPolicy, text_tokens
-from .context_compaction import summarize_sources
+from .context_compaction import _terms, summarize_sources
 from .models import ContextSummary, KnowledgeTree, Message, Node
-from .summary_generation import SUMMARY_PROMPT_VERSION, summarize_learning_context
+from .summary_generation import (
+    SUMMARY_PROMPT_VERSION,
+    fits_input_budget,
+    summarize_learning_context,
+)
 
 BLOCK_TARGET = 8000
 BLOCK_MAX = 24000
@@ -42,7 +46,14 @@ def _hash(value) -> str:
     return hashlib.sha256(_json(value).encode()).hexdigest()
 
 
+# Learner marks are not source content. Leaving them out keeps summary keys stable,
+# so marking a node never forces a new (billable) summary or rejects one in flight.
+_NODE_MARKS = frozenset({"understanding"})
+
+
 def _snapshot(record) -> dict:
+    if isinstance(record, Node):
+        return record.model_dump(mode="json", exclude=set(_NODE_MARKS))
     return record.model_dump(mode="json")
 
 
@@ -213,20 +224,30 @@ def _render(sources, blocks, summaries, query: str, budget: int) -> str | None:
     chosen = []
     covered = set()
     used = 0
-    # Favor later path context when all cached summaries do not fit together.
-    for block in reversed(blocks):
+    query_terms = _terms(query)
+    ranked = sorted(
+        enumerate(blocks),
+        key=lambda item: (_relevance(item[1], query_terms), item[0]),
+        reverse=True,
+    )
+    # Leave room for original sentences from blocks that have no valid summary.
+    # A cached summary must never crowd all of that evidence out.
+    has_uncached = any(block.key not in summaries for block in blocks)
+    excerpt_reserve = min(budget // 3, 1200) if has_uncached else 0
+    for index, block in ranked:
         content = summaries.get(block.key)
         if not content:
             continue
         text = block.heading + content
         cost = text_tokens(text) + (2 if chosen else 0)
-        if used + cost > budget:
+        if used + cost > budget - excerpt_reserve:
             continue
-        chosen.insert(0, text)
+        chosen.append((index, text))
         covered.update(record["source_id"] for record in block.records)
         used += cost
     if not chosen:
         return None
+    chosen = [text for _, text in sorted(chosen)]
     remaining = []
     for node, messages in sources:
         local_node = Node(**node.model_dump())
@@ -245,6 +266,16 @@ def _render(sources, blocks, summaries, query: str, budget: int) -> str | None:
             chosen.append(heading[2:] + excerpts)
     result = "\n\n".join(chosen)
     return result if text_tokens(result) <= budget else None
+
+
+def _relevance(block: _Block, query_terms: set[str]) -> int:
+    """Rank immutable source blocks locally; the cached summary stays query-independent."""
+    if not query_terms:
+        return 0
+    return max(
+        (len(query_terms & _terms(record["text"])) for record in block.records),
+        default=0,
+    )
 
 
 def summarize_history(
@@ -276,7 +307,12 @@ def summarize_history(
     ):
         return None
     model_fingerprint = _hash([spec.protocol, spec.base_url, spec.llm_model])
-    hard_limit = min(BLOCK_MAX, max(0, ContextPolicy.from_spec(spec).input_budget - 4000))
+    # Block partition and eligibility are UTF-8 byte limits. They come from the
+    # uncalibrated budget, read as one byte per estimate unit: conservative, since
+    # ordinary text costs at most about 0.6 unit per byte, and stable, so a learned
+    # calibration ratio never re-keys cached blocks or switches summaries off. The
+    # calibrated budget gates each summary request itself (fits_input_budget).
+    hard_limit = min(BLOCK_MAX, max(0, ContextPolicy.from_spec(spec).raw_input_budget - 4000))
     blocks = _blocks(sources, model_fingerprint, hard_limit)
     namespace = _namespace(engine)
     summaries = {}
@@ -289,13 +325,26 @@ def summarize_history(
             if row:
                 summaries[block.key] = row.content
     candidate = None
+    query_terms = _terms(query)
+    # Score and size-check outside the shared claim lock; only the claim is atomic.
+    # A block whose request the calibrated budget would refuse never takes this
+    # question's one model call, nor starts a failure cooldown.
+    ranked_missing = sorted(
+        (
+            (index, block)
+            for index, block in enumerate(blocks)
+            if block.key not in summaries
+            and MIN_INPUT_BYTES <= block.input_bytes <= hard_limit
+            and budget >= block.output_limit + text_tokens(block.heading)
+            and fits_input_budget(spec, block.records, block.output_limit)
+        ),
+        key=lambda item: (-_relevance(item[1], query_terms), item[0]),
+    )
     with _LOCK:
-        for block in blocks:
+        # Spend the one optional model call on the old block most relevant to
+        # this question. Equal-scoring blocks keep chronological cache fill.
+        for _, block in ranked_missing:
             state_key = (namespace, block.key)
-            if block.key in summaries or not MIN_INPUT_BYTES <= block.input_bytes <= hard_limit:
-                continue
-            if budget < block.output_limit + text_tokens(block.heading):
-                continue
             if state_key in _INFLIGHT or time.monotonic() < _FAILURES.get(state_key, 0):
                 continue
             _INFLIGHT.add(state_key)

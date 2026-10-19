@@ -24,13 +24,16 @@ The images use synthetic content and the offline demo model. They demonstrate th
 - Select text to copy it, request a quick explanation or create a branch from an answer. Return to the exact source passage when you finish.
 - Branch titles summarize the first question you ask, rather than copying the source answer. A new empty branch shows “New branch”.
 - Save your understanding and bring it into the main conversation as an editable draft.
+- Mark the open question **Not yet**, **Roughly** or **Can explain** in the bar above the conversation, beside **Back to source** in a branch. The map colours topic cards by your marks, and **Not understood** in the map header lists the questions still marked Not yet.
+- Returning from a branch shows a short recap above the composer: sentences picked locally from the branch's answers (corrections, conditions, definitions and open questions first), your reflection and your mark. It is an extract, not an AI summary, and it is never stored.
 - Edit a question as a new version, retry interrupted answers, and keep the original record.
 - Answers keep generating on the server when a page closes or a connection drops, and the page reconnects on its own. Other open windows see new questions, branches, settings and running answers within a few seconds.
-- Open the same workspace on your phone through a private Tailscale network: **Settings → Phone access** shows the one-time setup command and a QR code. On touch screens, selection actions dock at the bottom and text fields avoid iOS focus zoom. See [phone access](docs/operations.md#phone-access).
+- Open the same workspace on your phone through a private Tailscale network: **Settings → Phone access** shows the one-time setup command and a QR code that pairs the phone with this computer's access token. On touch screens, selection actions dock at the bottom and text fields avoid iOS focus zoom. See [phone access](docs/operations.md#phone-access).
 - Copy a question or answer from its compact action bar. One attachment button accepts both images and documents, including a mixed selection.
 - Attach PDFs, Word `.docx` files or text documents to a question; preview parsed text, retain the original and keep references through follow-ups, retries and revisions. See [formats, limits and how text reaches the model](docs/documents.md).
 - Budget long conversations per model: keep recent full turns, extract cited source sentences from older context, and let the agent reread eligible originals when needed.
-- Recall relevant learning memories with local multilingual search, while keeping topic facts within the current learning path and user preferences separate.
+- Recall relevant learning memories with local multilingual search, while keeping topic facts within the current learning path and user preferences separate. Optionally widen recall to sibling branches or other topics; widened facts are labelled with their origin, and each answer shows which memories it referenced.
+- Search a topic from the learning map: titles and quotes match instantly, and full-text matches in completed answers, notes and facts jump to the passage.
 - Edit preferences in one text area, and manage topic memories with search, topic filters, pagination, inline corrections, selected deletion and links to their source conversations.
 - Switch **English / 中文** in **Settings → 语言 / Language**. Labels change immediately; your conversations and notes keep their original language.
 - Connect OpenAI-compatible Chat Completions or native Anthropic Messages. Optional MCP tools add combined web search and reading, local files, memory, browser actions, thinking steps and time lookup.
@@ -79,7 +82,7 @@ Build and run the app in a container, publishing the port on loopback only (the 
 docker compose up --build
 ```
 
-Open **http://127.0.0.1:8099**. Chats, documents and settings live in the `learning-tree-data` volume (`/data/learning_tree.db`); the image contains only source code and locked dependencies and runs as a non-root user. MCP presets and optional semantic models are not installed in the image. To reach the container under another host name, set `ALLOWED_HOSTS` (see [SECURITY.md](SECURITY.md)). CI builds the image and runs `scripts/docker_smoke.py` against it with the mock model.
+Open **http://127.0.0.1:8099**. Chats, documents and settings live in the `learning-tree-data` volume (`/data/learning_tree.db`); the image contains only source code and locked dependencies and runs as a non-root user. MCP presets and optional semantic models are not installed in the image. To reach the container under another host name, set `ALLOWED_HOSTS` (see [SECURITY.md](SECURITY.md)); devices that use it pair once: open **Settings → Phone access** at http://127.0.0.1:8099 on the Docker host, enter their address under **Open at another address**, then scan the QR code or open the pairing link on each device. The token stays in the volume (`/data/phone-access-token`), so pairings survive image upgrades; on a private network you fully control, `ACCESS_TOKEN_MODE=off` turns the check off instead. CI builds the image and runs `scripts/docker_smoke.py` against it with the mock model.
 
 ### Optional semantic memory
 
@@ -100,8 +103,8 @@ No `.env` is needed for normal use. Configure models in Settings. To select anot
 | OpenAI-compatible | Uses Chat Completions; use the base URL and model ID provided by your service. |
 | Anthropic | Native Messages, streaming, images and tool calls. Official base URL: `https://api.anthropic.com`. Output limit defaults to 4,096 tokens. |
 | Editing an API key | Leaving it empty retains the existing key. |
-| Context budget | Set the actual context window and answer reserve in **Advanced**. Long chats can make one extra summary call to the selected model, reuse cached summaries, and fall back to local excerpts. No model download is required. |
-| Optional MCP | Follow the [MCP guide](integrations/mcp/README.md) to install and register six presets, or configure your own server. |
+| Context budget | Set the actual context window and answer reserve in **Advanced**, or use **Detect** to ask the provider (with an approximate built-in catalog as fallback). Long chats can make one extra summary call to the selected model, reuse cached summaries, and fall back to local excerpts. No model download is required. |
+| Optional MCP | Follow the [MCP guide](integrations/mcp/README.md) to install and register six presets, or configure your own local command or remote HTTP server. |
 | Web search | DDGS by default; `TAVILY_API_KEY` opts into Tavily. Errors are reported explicitly. |
 | Learning memory | Keyword retrieval works in the basic installation. Optional local vectors and reranking add semantic retrieval; `MEMORY_RETRIEVAL_MODE=lexical` disables them. |
 
@@ -109,11 +112,11 @@ Capabilities depend on the provider and model. Native OpenAI Responses and Gemin
 
 Each branch's first question triggers one short background title request with the question and a source excerpt, without tools or images. Failures keep a question-based label. Established, custom and imported titles are preserved.
 
-Memory facts are limited to valid sources on the active path. Optional semantic retrieval combines BM25 and E5 with reciprocal rank fusion (RRF), then BGE reranking. Preferences use a separate budget, and recent conversation context is retained. This searches built-in memory, not MCP graphs or learning files; relevance is not a truth check. See the [memory architecture](docs/architecture.md#learning-memory-retrieval).
+Memory facts are limited to valid sources on the active path unless you widen the scope in **Settings → Memory**; widened facts are kept in labelled sections with a smaller budget. Extracted facts carry a type and can mark an earlier fact as superseded. Optional semantic retrieval combines BM25 and E5 with reciprocal rank fusion (RRF), then BGE reranking. Preferences use a separate budget, and recent conversation context is retained. This searches built-in memory, not MCP graphs or learning files; relevance is not a truth check. See the [memory architecture](docs/architecture.md#learning-memory-retrieval).
 
 In **Settings → Memory**, existing preferences initially appear together without modifying stored records. Saving makes that profile user-managed: AI never overwrites it. A separate, collapsible **AI additions** section can continue learning explicit preferences, with source links, global/topic scope, protected manual edits and pending conflict suggestions. A switch controls future learning; deleting additions prevents replay from the same question. All Settings tabs share a stable frame with internal scrolling. Fact corrections keep their original source and refresh their retrieval cache; searching all topics in Settings does not expand the sources available to a conversation. See [memory management](docs/memory-management.md).
 
-Long-context handling is separate from memory retrieval: it budgets each request, including tool results, and combines cached model summaries with cited original excerpts without rewriting stored messages. A long conversation can make at most one extra summary call per question, adding provider cost and a short preparation wait; failures fall back to local excerpts. Estimates are conservative local approximations, not exact provider token counts; compression can omit or misinterpret relevant material. See [context budgets, source rereading and limits](docs/context-budget.md).
+Long-context handling is separate from memory retrieval: it budgets each request, including tool results, and combines cached model summaries with cited original excerpts without rewriting stored messages. A long conversation can make at most one extra summary call per question, adding provider cost and a short preparation wait; failures fall back to local excerpts. Estimates come from a local character-class token estimator calibrated per model from reported provider usage (a conservative approximation, not exact provider token counts); compression can omit or misinterpret relevant material. See [context budgets, source rereading and limits](docs/context-budget.md).
 
 ## Development and checks
 
@@ -158,7 +161,7 @@ Chats, notes, document originals and parsed text, model keys and tool configurat
 
 Existing memory IDs and content are preserved. SQLite adds a rebuildable `MemoryEmbedding` cache keyed by memory and model revision, with a content hash to detect stale text; deleting memories or their source nodes removes the associated cache entries. Public model weights live in `.runtime/retrieval/models/`. Deleting a memory does not delete the original conversation: the same information may still appear in active-path chat history. Local retrieval does not send text to a separate retrieval service; selected memories still accompany the prompt sent to your configured answer model.
 
-The API has no account authentication; configured MCP servers can execute local programs. Supplied commands bind to `127.0.0.1`. Internet or shared-server deployment requires additional access controls and is outside this release's scope; reach it from a phone only through a private network such as [Tailscale Serve](docs/operations.md#phone-access). See [security policy](SECURITY.md).
+The API has no user accounts: requests from this computer need no credentials, and requests from other devices or host names need the phone-access token that **Settings → Phone access** hands out through its QR code. Configured MCP servers can execute local programs. Supplied commands bind to `127.0.0.1`. Internet or shared-server deployment requires additional access controls and is outside this release's scope; reach it from a phone only through a private network such as [Tailscale Serve](docs/operations.md#phone-access). See [security policy](SECURITY.md).
 
 Databases, keys, `.env`, private learning files, backups and generated artifacts are excluded from Git. Only synthetic examples are included in this repository.
 

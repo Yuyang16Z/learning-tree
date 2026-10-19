@@ -327,6 +327,122 @@ with Session(engine) as session:
     assert.equal(await page.getByRole('dialog').count(), 0);
     assert.equal((await api('/memories/preferences')).content, storedProfile.content);
     checks.push('An AI addition opens its original source topic and leaves core preferences unchanged');
+
+    // Stored provenance can outlive its source: a deleted topic or node must not empty the workspace.
+    const goneTopic = await api('/trees', { title: 'Memory UI check · Deleted source' });
+    const goneNode = (await api(`/trees/${goneTopic.id}`))[0].id;
+    assert((await fetch(`${base}/api/trees/${goneTopic.id}`, { method: 'DELETE' })).ok);
+    const ownRoot = roots[0][0].id;
+    const peerRoot = roots[1][0].id;
+    const referenced = [
+      { memory_id: 901, source_node_id: goneNode, tree_id: goneTopic.id, tree_title: goneTopic.title, scope: 'other' },
+      { memory_id: 902, source_node_id: 999902, tree_id: trees[0].id, tree_title: trees[0].title, scope: 'tree' },
+      { memory_id: 903, source_node_id: 999903, tree_id: trees[1].id, tree_title: trees[1].title, scope: 'other' },
+      { memory_id: 904, source_node_id: peerRoot, tree_id: trees[1].id, tree_title: trees[1].title, scope: 'other' },
+    ];
+    await page.route(`**/api/nodes/${ownRoot}/thread`, async route => {
+      const response = await route.fetch();
+      const body = await response.json();
+      body.nodes = body.nodes.map(row => row.node_id === ownRoot
+        ? { ...row, question: 'Which memories shaped this answer?', answer: 'A synthetic answer with stored provenance.', status: 'complete', sources: referenced }
+        : row);
+      await route.fulfill({ response, json: body });
+    });
+    await page.reload();
+    await page.getByRole('heading', { name: trees[0].title, exact: true, level: 1 }).waitFor();
+    const chips = page.locator('.chat-sources .chat-source-link');
+    await poll(async () => await chips.count() === 4, 'stored sources render as chips');
+    for (const index of [0, 1]) {
+      assert(await chips.nth(index).isDisabled(), 'A chip whose topic or node no longer exists cannot be opened');
+      assert.equal(await chips.nth(index).getAttribute('title'), 'Source deleted');
+    }
+    assert(await chips.nth(2).isEnabled() && await chips.nth(3).isEnabled());
+    await chips.nth(2).click();
+    await page.locator('.notice').filter({ hasText: 'This source was deleted.' }).waitFor();
+    assert.equal(await page.getByRole('heading', { level: 1 }).innerText(), trees[0].title, 'A missing source node leaves the current topic open');
+    assert.equal(await page.evaluate(() => localStorage.getItem('bl-tree')), JSON.stringify(trees[0].id));
+    assert.equal(await chips.count(), 4, 'The conversation stays in place');
+    await chips.nth(3).click();
+    await page.getByRole('heading', { name: trees[1].title, exact: true, level: 1 }).waitFor();
+    await page.unroute(`**/api/nodes/${ownRoot}/thread`);
+    checks.push('Referenced chips whose topic or node was deleted are disabled or report the deletion and keep the current topic; live sources still open');
+
+    // Malformed stored data must not blank the app: bad source entries are dropped, and a value
+    // that still breaks the conversation shows a fallback while the rest of the workspace works.
+    const ownThread = `**/api/nodes/${ownRoot}/thread`;
+    let storedRow = { sources: [null, referenced[3], { memory_id: 'x', scope: 'path' }] };
+    await page.route(ownThread, async route => {
+      const response = await route.fetch();
+      const body = await response.json();
+      body.nodes = body.nodes.map(row => row.node_id === ownRoot
+        ? { ...row, question: 'Which memories shaped this answer?', answer: 'A synthetic answer.', status: 'complete', ...storedRow }
+        : row);
+      await route.fulfill({ response, json: body });
+    });
+    await page.reload();
+    await page.getByRole('heading', { name: trees[0].title, exact: true, level: 1 }).waitFor();
+    await poll(async () => await chips.count() === 1, 'only the well-formed source is shown');
+    // React cannot render an object as text, so no field-level guard (such as the number checks
+    // of the diagnostics block) keeps this row from throwing. The check asserts the fallback itself,
+    // so it fails, rather than passing on a normal render, if the boundary stops catching it.
+    storedRow = { question: { text: 'A question stored as an object' } };
+    await page.reload();
+    const fallback = page.locator('.chat-pane > .chat-error[role="alert"]').filter({ hasText: 'This conversation could not be displayed.' });
+    await fallback.waitFor();
+    const reload = fallback.getByRole('button', { name: 'Reload', exact: true });
+    assert(await reload.isEnabled(), 'The fallback offers Reload');
+    assert.equal(await page.locator('.chat-pane .chat-turn, .chat-pane .chat-compose-box').count(), 0, 'The fallback replaces the conversation');
+    await Promise.all([page.waitForEvent('load'), reload.click()]);
+    await fallback.waitFor();
+    const sidebar = page.locator('.sidebar');
+    await sidebar.getByRole('button', { name: trees[1].title, exact: true }).click();
+    await page.getByRole('heading', { name: trees[1].title, exact: true, level: 1 }).waitFor();
+    assert.equal(await fallback.count(), 0, 'Another topic opens normally');
+    await page.unroute(ownThread);
+    checks.push('A stored answer that cannot be displayed shows a fallback with a working Reload instead of a blank page; other topics still open');
+
+    // On a phone the map starts closed and its toggle sits in the conversation header, which the
+    // fallback replaces: the fallback must keep the toggle so another question can still be opened.
+    const pair = await api('/trees/import', {
+      format: 'branch-learning', version: 1, tree: { title: 'Memory UI check · Fallback' },
+      nodes: [
+        { id: 1, parent_id: null, title: 'Why do parsers need grammars?', kind: 'root', status: 'complete' },
+        { id: 2, parent_id: 1, title: 'What is a grammar rule?', kind: 'branch', status: 'complete', seed_text: 'grammar', source_node_id: 1, source_message_id: 2 },
+      ],
+      messages: [
+        { id: 1, node_id: 1, role: 'user', content: 'Why do parsers need grammars?' },
+        { id: 2, node_id: 1, role: 'assistant', content: 'A grammar says which token sequences form a valid program.', answered_by: 'Demo (offline)' },
+        { id: 3, node_id: 2, role: 'user', content: 'What is a grammar rule?' },
+        { id: 4, node_id: 2, role: 'assistant', content: 'A rule rewrites one symbol as a sequence of symbols.', answered_by: 'Demo (offline)' },
+      ],
+    });
+    const pairNodes = await api(`/trees/${pair.id}`);
+    const pairBranch = pairNodes.find(node => node.parent_id !== null);
+    const branchThread = `**/api/nodes/${pairBranch.id}/thread`;
+    await page.route(branchThread, async route => {
+      const response = await route.fetch();
+      const body = await response.json();
+      body.nodes = body.nodes.map(row => row.node_id === pairBranch.id ? { ...row, question: { text: 'A question stored as an object' } } : row);
+      await route.fulfill({ response, json: body });
+    });
+    await page.evaluate(({ treeId, nodeId }) => localStorage.setItem(`bl-node:${treeId}`, JSON.stringify(nodeId)), { treeId: pair.id, nodeId: pairBranch.id });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.reload();
+    await page.getByRole('heading', { name: trees[0].title, exact: true, level: 1 }).waitFor();
+    await page.getByRole('button', { name: 'Open topic list', exact: true }).click();
+    await sidebar.getByRole('button', { name: pair.title, exact: true }).click();
+    await fallback.waitFor();
+    const learningMap = page.locator('.app > .learning-map');
+    assert.equal(await learningMap.count(), 0, 'The map starts closed on a phone');
+    await page.locator('.chat-pane').getByRole('button', { name: 'Show learning tree', exact: true }).click();
+    await learningMap.waitFor();
+    await learningMap.getByRole('button', { name: 'Why do parsers need grammars?', exact: true }).click();
+    await page.locator('.chat-question').filter({ hasText: 'Why do parsers need grammars?' }).waitFor();
+    assert.equal(await fallback.count(), 0, 'The question opened from the map is displayed');
+    assert.equal(await learningMap.count(), 0, 'Choosing a question closes the map on a phone');
+    await page.unroute(branchThread);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    checks.push('On a phone the fallback keeps the learning-tree toggle, so another question of the topic can be opened from the map');
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ ok: true, checks }, null, 2));
   } finally {

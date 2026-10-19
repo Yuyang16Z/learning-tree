@@ -38,6 +38,40 @@ def client(spec) -> Anthropic:
     )
 
 
+# Base URLs whose provider answered HTTP 400 to cache_control; remembered per process.
+_CACHE_CONTROL_UNSUPPORTED: set[str] = set()
+# The stable head gets its own system breakpoint from this length on; shorter heads
+# stay in one string. This only skips a split that rarely pays: a request below the
+# model's cacheable minimum (512 to 4,096 tokens, tools included) is processed
+# without caching and without a cache write, so a marker never costs anything there.
+CACHE_PREFIX_MIN_CHARS = 1024
+
+
+def _cache_rejected(exc: Exception) -> bool:
+    # Inspected only; provider error text is never logged or returned to a client.
+    return getattr(exc, "status_code", None) == 400 and "cache_control" in str(exc)
+
+
+def _without_cache(kwargs: dict) -> dict:
+    plain = {key: value for key, value in kwargs.items() if key != "cache_control"}
+    if isinstance(plain.get("system"), list):
+        plain["system"] = "".join(block["text"] for block in plain["system"])
+    return plain
+
+
+def _open_stream(api, spec, kwargs: dict):
+    """Enter a message stream; a proxy that rejects cache markers gets one plain retry."""
+    manager = api.messages.stream(**kwargs)
+    try:
+        return manager, manager.__enter__()
+    except Exception as exc:
+        if "cache_control" not in kwargs or not _cache_rejected(exc):
+            raise
+        _CACHE_CONTROL_UNSUPPORTED.add(spec.base_url)
+        manager = api.messages.stream(**_without_cache(kwargs))
+        return manager, manager.__enter__()
+
+
 def _image(url: str) -> dict:
     if url.startswith("data:"):
         match = re.fullmatch(r"data:(image/(?:jpeg|png|gif|webp));base64,(.+)", url, re.S)
@@ -122,7 +156,22 @@ def messages(conversation: list[dict]) -> tuple[str, list[dict]]:
 def _kwargs(spec, conversation: list[dict], tools: list[dict] | None = None) -> dict:
     system, converted = messages(conversation)
     kwargs = {"model": spec.llm_model, "max_tokens": spec.max_tokens, "messages": converted}
-    if system:
+    prefix = getattr(spec, "cache_prefix", None)
+    # Only answer requests supply a prefix; summaries and titles stay unmarked.
+    caching = bool(prefix) and spec.base_url not in _CACHE_CONTROL_UNSUPPORTED
+    if caching:
+        # The top-level marker caches the request up to its last block (tools, system
+        # and the conversation so far), whatever the length of the stable head.
+        kwargs["cache_control"] = {"type": "ephemeral"}
+    if caching and system and len(prefix) >= CACHE_PREFIX_MIN_CHARS and system.startswith(prefix):
+        # Block 1 is the stable head (rules and path) with its own breakpoint, which
+        # stays valid when only the per-turn tail of the system prompt changes.
+        remainder = system[len(prefix) :]
+        kwargs["system"] = [
+            {"type": "text", "text": prefix, "cache_control": {"type": "ephemeral"}},
+            *([{"type": "text", "text": remainder}] if remainder else []),
+        ]
+    elif system:
         kwargs["system"] = system
     if tools:
         kwargs["tools"] = [
@@ -133,6 +182,9 @@ def _kwargs(spec, conversation: list[dict], tools: list[dict] | None = None) -> 
             }
             for item in tools
         ]
+        if getattr(spec, "forbid_tool_calls", False):
+            # A final round must answer; its tools only keep the tool history valid.
+            kwargs["tool_choice"] = {"type": "none"}
     return kwargs
 
 
@@ -144,6 +196,37 @@ def _check_stop(reason: str | None, *, tools: bool = False) -> None:
         if reason == "max_tokens":
             raise RuntimeError("回答达到输出上限，可在模型设置里提高最大输出后重试。")
         raise RuntimeError(f"模型回答未完整结束（{reason or '连接中断'}），可以重试。")
+
+
+def _usage_parts(usage) -> dict:
+    return {
+        "input": getattr(usage, "input_tokens", None),
+        "creation": getattr(usage, "cache_creation_input_tokens", None),
+        "read": getattr(usage, "cache_read_input_tokens", None),
+        "output": getattr(usage, "output_tokens", None),
+    }
+
+
+def _counts(parts: dict) -> dict:
+    """Input, cached and output tokens; None for a count the provider did not report."""
+    output = parts.get("output")
+    counts = {"output_tokens": None if output is None else int(output)}
+    if all(parts.get(key) is None for key in ("input", "creation", "read")):
+        # A proxy that sends no input counts reported nothing, not zero tokens.
+        return {"input_tokens": None, "cached_input_tokens": None, **counts}
+    # Total input is the sum of uncached, cache-creation and cache-read tokens.
+    read = int(parts.get("read") or 0)
+    creation = int(parts.get("creation") or 0)
+    return {
+        "input_tokens": int(parts.get("input") or 0) + creation + read,
+        "cached_input_tokens": read,
+        **counts,
+    }
+
+
+def usage_counts(usage) -> dict:
+    """Normalize a final message's usage into input/cached/output token counts."""
+    return _counts(_usage_parts(usage))
 
 
 def _thinking(spec) -> dict:
@@ -163,14 +246,25 @@ def _thinking(spec) -> dict:
 def stream_chat(
     spec, system: str, history: list[dict], deep: bool = False
 ) -> Iterator[tuple[str, str]]:
+    """Yield (kind, text) chunks; the generator returns the usage counts when reported."""
     kwargs = _kwargs(spec, [{"role": "system", "content": system}, *history])
     if deep:
         kwargs["thinking"] = _thinking(spec)
     stopped, reason = False, None
+    parts: dict | None = None
     with client(spec) as api:
-        with api.messages.create(**kwargs, stream=True) as stream:
+        try:
+            stream = api.messages.create(**kwargs, stream=True)
+        except Exception as exc:
+            if "cache_control" not in kwargs or not _cache_rejected(exc):
+                raise
+            _CACHE_CONTROL_UNSUPPORTED.add(spec.base_url)
+            stream = api.messages.create(**_without_cache(kwargs), stream=True)
+        with stream:
             for event in stream:
-                if event.type == "content_block_start" and event.content_block.type == "text":
+                if event.type == "message_start":
+                    parts = _usage_parts(event.message.usage)
+                elif event.type == "content_block_start" and event.content_block.type == "text":
                     if event.content_block.text:
                         yield "text", event.content_block.text
                 elif event.type == "content_block_delta":
@@ -180,24 +274,53 @@ def stream_chat(
                         yield "reasoning", event.delta.thinking
                 elif event.type == "message_delta":
                     reason = event.delta.stop_reason or reason
+                    delta_usage = getattr(event, "usage", None)
+                    if delta_usage is not None:
+                        # Delta counts are cumulative; the start event's output count
+                        # is a placeholder, so later values replace earlier ones.
+                        parts = parts or {}
+                        for key, value in _usage_parts(delta_usage).items():
+                            if value is not None:
+                                parts[key] = value
                 elif event.type == "message_stop":
                     stopped = True
             if not stopped:
                 raise RuntimeError("模型连接在回答完成前断开，可以重试。")
             _check_stop(reason)
+    return _counts(parts) if parts else None
 
 
-def chat_once(spec, conversation: list[dict], tools: list[dict], deep: bool = False) -> dict:
+def chat_once(spec, conversation: list[dict], tools: list[dict], deep: bool = False):
+    """Stream one tool-capable turn: yield (kind, text) chunks, then return the result dict.
+
+    Tool calls are only final once the message is complete and its stop reason
+    was accepted, so the caller sees them in the returned dict, never mid-stream.
+    """
     kwargs = _kwargs(spec, conversation, tools)
     if deep:
         kwargs["thinking"] = _thinking(spec)
+    stopped = False
     with client(spec) as api:
-        # Streaming internally avoids SDK limits on long non-streaming requests.
-        with api.messages.stream(**kwargs) as stream:
-            stopped = any(event.type == "message_stop" for event in stream)
+        manager, stream = _open_stream(api, spec, kwargs)
+        try:
+            for event in stream:
+                # One helper event family only; raw deltas would double the text.
+                if event.type == "text":
+                    yield "text", event.text
+                elif event.type == "thinking":
+                    yield "reasoning", event.thinking
+                elif event.type == "content_block_start" and event.content_block.type == "text":
+                    # Helper text events cover deltas only; some proxies start a block
+                    # with text, which the final message (and the history) still holds.
+                    if event.content_block.text:
+                        yield "text", event.content_block.text
+                elif event.type == "message_stop":
+                    stopped = True
             if not stopped:
                 raise RuntimeError("模型连接在回答完成前断开，可以重试。")
             response = stream.get_final_message()
+        finally:
+            manager.__exit__(None, None, None)
     _check_stop(response.stop_reason, tools=bool(tools))
     calls = [
         {"id": block.id, "name": block.name, "args": block.input}
@@ -217,11 +340,22 @@ def chat_once(spec, conversation: list[dict], tools: list[dict], deep: bool = Fa
         "_anthropic_content": [
             block.model_dump(mode="json", exclude_none=True) for block in response.content
         ],
+        "usage": usage_counts(response.usage),
     }
 
 
 def complete(spec, system: str, history: list[dict]) -> str:
     return "".join(value for kind, value in stream_chat(spec, system, history) if kind == "text")
+
+
+def model_limits(spec) -> dict:
+    """Published limits for the configured model id, from the provider's model info."""
+    with client(spec) as api:
+        info = api.models.retrieve(spec.llm_model)
+    return {
+        "context_window": getattr(info, "max_input_tokens", None),
+        "max_output_tokens": getattr(info, "max_tokens", None),
+    }
 
 
 def test_connection(spec) -> None:

@@ -8,9 +8,12 @@ import pytest
 from app.context_budget import (
     HISTORY_OMISSION,
     SYSTEM_OMISSION,
+    TOOL_OMISSION,
     ContextBudgetExceeded,
     ContextPolicy,
+    _trim_result,
     estimate_request_tokens,
+    estimate_text_tokens,
     fit_request,
 )
 
@@ -58,11 +61,110 @@ def tool_group(size=20000, *, native=False):
     ]
 
 
+def filler(prefix: str, units: int, char: str = "x") -> str:
+    """The longest prefix + char*n whose token estimate stays within units."""
+    low, high = 0, max(1, units * 4)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if estimate_text_tokens(prefix + char * mid) <= units:
+            low = mid
+        else:
+            high = mid - 1
+    return prefix + char * low
+
+
+def test_estimator_counts_character_classes_not_bytes():
+    chinese = "只有满足条件才能执行。" * 100
+    english = ("explain the condition carefully " * 125).strip()
+    assert estimate_text_tokens("") == 0
+    # CJK text costs far less than its three bytes per character.
+    assert 600 <= estimate_text_tokens(chinese) <= 1300
+    assert estimate_text_tokens(chinese) < len(chinese.encode("utf-8")) / 3
+    # ASCII prose costs roughly a token per three characters, whitespace almost nothing.
+    assert 800 <= estimate_text_tokens(english) <= 1500
+    assert estimate_text_tokens(" " * 1000) < estimate_text_tokens("x" * 1000) / 2
+    # Other non-ASCII code points stay conservative at about one unit each.
+    assert estimate_text_tokens("🙂" * 100) >= 100
+    assert estimate_text_tokens("é" * 100) >= 100
+    # Request estimates use the same scale as the text estimator.
+    assert estimate_request_tokens("", [{"role": "user", "content": chinese}]) < 1500
+
+
+@pytest.mark.parametrize("text,minimum_chars", [("中" * 10000, 1000), ("x" * 10000, 2200)])
+def test_trimmed_tool_results_are_sliced_by_characters_and_fit_the_token_budget(
+    text, minimum_chars
+):
+    trimmed = _trim_result(text, 1000)
+    assert estimate_text_tokens(trimmed) <= 1000
+    assert TOOL_OMISSION in trimmed
+    assert trimmed.startswith(text[0]) and trimmed.endswith(text[-1])
+    # A byte-based slice would keep roughly a third of these characters.
+    assert len(trimmed) - len(TOOL_OMISSION) >= minimum_chars
+    assert _trim_result(text, 10).count(TOOL_OMISSION) == 1
+    assert _trim_result(text, 100000) == text
+
+
 def test_policy_reserves_output_and_estimation_headroom():
     spec = SimpleNamespace(context_window=8192, max_tokens=1024)
     policy = ContextPolicy.from_spec(spec)
     assert policy.window_tokens == 8192 and policy.output_tokens == 1024
     assert 0 < policy.input_budget < policy.window_tokens - policy.output_tokens
+    assert policy.compaction_budget == int(policy.input_budget * 0.6) < policy.input_budget
+    assert ContextPolicy(8192, 1024, compaction_ratio=1.0).compaction_budget == policy.input_budget
+    assert ContextPolicy(8192, 1024, compaction_ratio=0.25).compaction_budget == int(
+        policy.input_budget * 0.25
+    )
+
+
+def test_compaction_ratio_comes_from_settings_without_changing_the_hard_budget(monkeypatch):
+    from app.config import settings
+
+    spec = SimpleNamespace(context_window=8192, max_tokens=1024)
+    monkeypatch.setattr(settings, "context_compaction_ratio", 0.5)
+    policy = ContextPolicy.from_spec(spec)
+    assert policy.compaction_ratio == 0.5
+    assert policy.compaction_budget == int(policy.input_budget * 0.5)
+    assert policy.input_budget == ContextPolicy(8192, 1024).input_budget
+
+
+def test_history_between_threshold_and_hard_limit_is_compacted_but_fits_the_request():
+    from app.context import build_context
+
+    ancestors, current = synthetic_path()
+    policy = ContextPolicy(window_tokens=8192, output_tokens=1024)
+    # Between the compaction budget (60%) and the hard budget: compact early so
+    # follow-ups and tool results keep room, while the request itself still fits.
+    ancestors[0][1][1].content = filler("早期背景", int(policy.input_budget * 0.8), char="x")
+    diagnostics = {}
+    system, messages = build_context(
+        ancestors, current, [], "继续解释。", policy=policy, diagnostics=diagnostics
+    )
+    assert diagnostics["raw_estimate"] < policy.input_budget
+    assert diagnostics["compacted"] is True
+    assert diagnostics["estimated_input_tokens"] <= policy.compaction_budget
+    fitted = fit_request(system, messages, policy=policy)
+    assert not fitted.compressed
+    assert fitted.system == system and fitted.messages == messages
+    small = ContextPolicy(window_tokens=8192, output_tokens=1024, compaction_ratio=1.0)
+    lax = {}
+    build_context(ancestors, current, [], "继续解释。", policy=small, diagnostics=lax)
+    assert lax["compacted"] is False, "a ratio of 1.0 restores the hard limit as the threshold"
+
+
+def test_calibration_shrinks_but_never_enlarges_the_input_budget():
+    raw = ContextPolicy(8192, 1024).input_budget
+    assert ContextPolicy(8192, 1024, calibration=2.0).input_budget == raw // 2
+    assert ContextPolicy(8192, 1024, calibration=0.5).input_budget == raw
+    spec = SimpleNamespace(context_window=8192, max_tokens=1024, calibration=1.6)
+    assert ContextPolicy.from_spec(spec).input_budget == int(raw / 1.6)
+    assert (
+        ContextPolicy.from_spec(SimpleNamespace(context_window=8192, max_tokens=1024)).input_budget
+        == raw
+    )
+    # The request estimate itself stays pure; only the policy applies the ratio.
+    assert estimate_request_tokens(
+        "x", [{"role": "user", "content": "y"}]
+    ) == estimate_request_tokens("x", [{"role": "user", "content": "y"}])
 
 
 def test_short_request_is_preserved_as_a_separate_copy():
@@ -246,12 +348,12 @@ def test_three_tool_rounds_reclaim_optional_system_before_trimming_results(proto
         [], current, [], question, policy=policy, tool_defs=tools, protocol=protocol
     )
     room = (
-        policy.input_budget
+        policy.compaction_budget
         - policy.tool_reserve
         - 32
         - estimate_request_tokens(core, initial_messages, tools, protocol)
     )
-    memory_note = "OPTIONAL_HISTORY:" + "x" * (room - len("OPTIONAL_HISTORY:") - 1)
+    memory_note = filler("OPTIONAL_HISTORY:", room)
     diagnostics = {}
     system, messages = build_context(
         [],
@@ -273,7 +375,7 @@ def test_three_tool_rounds_reclaim_optional_system_before_trimming_results(proto
             "type": "function",
             "function": {"name": "lookup", "arguments": '{"q":"a distinct source"}'},
         }
-        assistant = {"role": "assistant", "content": "explanation " * 60, "tool_calls": [call]}
+        assistant = {"role": "assistant", "content": "explanation " * 400, "tool_calls": [call]}
         if protocol == "anthropic":
             assistant["_anthropic_content"] = [
                 {
@@ -380,6 +482,25 @@ def test_anthropic_native_blocks_are_not_double_counted_with_mirrored_fields():
     messages[1]["tool_calls"][0]["function"]["arguments"] = '{"q":"' + "镜像参数" * 10000 + '"}'
     assert estimate_request_tokens("系统", messages, protocol="anthropic") == original_count
     assert estimate_request_tokens("系统", messages, protocol="openai") > original_count
+
+
+def test_reasoning_content_is_counted_where_it_is_sent():
+    messages = [{"role": "user", "content": "查询"}, *tool_group(size=20)]
+    reasoning = "先确认来源，再比较两个条件。" * 800
+    echoed = copy.deepcopy(messages)
+    echoed[1]["reasoning_content"] = reasoning
+    # OpenAI-compatible thinking endpoints receive the field back on assistant turns.
+    assert estimate_request_tokens("系统", echoed) == estimate_request_tokens(
+        "系统", messages
+    ) + estimate_text_tokens(reasoning)
+    # The Anthropic adapter never sends it, so it costs nothing there.
+    assert estimate_request_tokens("系统", echoed, protocol="anthropic") == (
+        estimate_request_tokens("系统", messages, protocol="anthropic")
+    )
+    policy = ContextPolicy(8192, 1024)
+    assert estimate_text_tokens(reasoning) > policy.input_budget
+    with pytest.raises(ContextBudgetExceeded):
+        fit_request("系统", echoed, policy=policy)
 
 
 def test_no_input_capacity_returns_actionable_budget_error():
@@ -541,7 +662,7 @@ def test_long_path_compaction_preserves_conditions_quote_question_and_original_r
 
     ancestors, current = synthetic_path()
     condition = "只有事先得到明确授权，才允许修改外部系统。"
-    ancestors[0][1][1].content = "早期普通背景。" * 500 + condition + "末尾普通背景。" * 500
+    ancestors[0][1][1].content = "早期普通背景。" * 2000 + condition + "末尾普通背景。" * 2000
     current.seed_text = "本次引用原文不能丢失。"
     current.learning_note = "我还不理解这里的适用条件。"
     original_nodes = [node.model_dump() for node, _ in ancestors] + [current.model_dump()]
@@ -571,7 +692,7 @@ def test_changed_source_does_not_reuse_stale_compacted_claim():
     ancestors, current = synthetic_path()
     old_condition = "只有批准甲条件，才允许执行。"
     new_condition = "只有批准乙条件，才允许执行。"
-    ancestors[0][1][1].content = "合成背景。" * 1000 + old_condition
+    ancestors[0][1][1].content = "合成背景。" * 3000 + old_condition
     policy = ContextPolicy(window_tokens=8192, output_tokens=1024)
     first = build_context(ancestors, current, [], "执行前提是什么？", policy=policy)
     assert old_condition in context_text(*first)
@@ -603,7 +724,7 @@ def test_compaction_excludes_foreign_tree_sources_even_if_they_match_query():
     from app.models import Message, Node
 
     ancestors, current = synthetic_path()
-    ancestors[0][1][1].content = "普通背景。" * 1000
+    ancestors[0][1][1].content = "普通背景。" * 3000
     forbidden = "其他知识树的授权秘密。"
     ancestors.insert(
         0,
@@ -661,7 +782,7 @@ def test_multiline_memory_is_kept_or_omitted_as_one_record_with_its_conditions()
 
     _, current = synthetic_path(length=1)
     claim = "允许删除已有文件。"
-    condition = "只有" + "完整备份已经得到确认，" * 70 + "才执行删除。"
+    condition = "只有" + "完整备份已经得到确认，" * 300 + "才执行删除。"
     record = f"- [记忆 42；来源节点 1] {claim}\n  {condition}"
     memory = "【当前路径历史记忆】\n" + record
     system, messages = build_context(
@@ -696,3 +817,78 @@ def test_context_diagnostics_report_estimates_without_private_source_text():
     assert diagnostics["estimated_input_tokens"] == estimate_request_tokens(system, messages)
     assert diagnostics["estimated_input_tokens"] <= policy.input_budget
     assert private_marker not in json.dumps(diagnostics)
+
+
+def test_compacted_context_adds_no_empty_memory_or_directory_heading():
+    """A heading promising omitted memories or a source directory needs entries under it."""
+    from app.context import build_context
+
+    ancestors, current = synthetic_path(length=12)
+    for _, messages in ancestors:
+        messages[1].content = "较早的解释与条件。" * 300
+    policy = ContextPolicy(window_tokens=32768, output_tokens=4096)
+    diagnostics = {}
+    system, _ = build_context(
+        ancestors, current, [], "继续解释", memory_note="", policy=policy, diagnostics=diagnostics
+    )
+    assert diagnostics["compacted"] and "当前路径来源（部分目录）：\nnode=1：" in system
+    assert "历史记忆" not in system, "no memory was retrieved, so none can have been omitted"
+    note = "以下是历史学习材料：\n【当前学习路径的相关记忆】\n- [记忆 3；来源节点 1] 需要授权。"
+    system, _ = build_context(ancestors, current, [], "继续解释", memory_note=note, policy=policy)
+    assert (
+        "历史记忆（可能省略条目）：\n" in system and "- [记忆 3；来源节点 1] 需要授权。" in system
+    )
+    # Mandatory input between the compaction share and the hard budget leaves no room
+    # for directory lines or memories: their headings go too.
+    current.seed_text = filler("", int(policy.input_budget * 0.8), "引")
+    system, _ = build_context(ancestors, current, [], "继续解释", memory_note=note, policy=policy)
+    assert "当前路径来源" not in system and "历史记忆" not in system
+    assert current.seed_text in system
+
+
+def test_tool_definitions_are_estimated_a_fixed_number_of_times_per_build(monkeypatch):
+    """The schema cost is the same for every history unit. Serializing the definitions
+    again for each unit made compaction on long paths with many MCP tools several
+    times slower; the count must not grow with the units the builder considers."""
+    import app.context_budget as budget
+    from app.context import build_context
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": f"mcp_1_tool_{index}",
+                "description": "Synthetic remote tool. " * 30,
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for index in range(40)
+    ]
+    serialized = []
+    original = budget._json_tokens
+
+    def counting(value):
+        if value is tools:
+            serialized.append(value)
+        return original(value)
+
+    monkeypatch.setattr(budget, "_json_tokens", counting)
+    counts = []
+    for length in (10, 120):
+        ancestors, current = synthetic_path(length=length)
+        # One large old answer forces compaction; every short recent unit gets costed.
+        ancestors[0][1][1].content = "早期背景与条件。" * 7000
+        serialized.clear()
+        diagnostics = {}
+        system, messages = build_context(
+            ancestors,
+            current,
+            [],
+            "继续解释",
+            policy=ContextPolicy(window_tokens=65536, output_tokens=4096),
+            tool_defs=tools,
+            diagnostics=diagnostics,
+        )
+        assert diagnostics["compacted"] and len(messages) > length // 2
+        counts.append(len(serialized))
+    assert counts[0] == counts[1] <= 3, counts

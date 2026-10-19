@@ -56,6 +56,23 @@ def test_large_catalog_remains_bounded_with_pinned_readers_and_compact_builtins(
     assert tool_definition_cost(catalog.definitions) == expected
 
 
+def test_mcp_prefixed_web_tools_are_preloaded_without_matching_lookalikes():
+    definitions = [
+        tool("mcp_12_web_search", "Search the web"),
+        tool("mcp_12_read_webpage", "Read a page"),
+        tool("mcp_3_prefetch", "Looks similar but is not the web reader"),
+        tool("mcp_4_fetch_notes", "Suffix match must not count either"),
+        tool("web_search_history", "Neither does a longer bare name"),
+    ]
+    definitions += [tool(f"mcp_{index}", f"Remote operation {index}", 600) for index in range(120)]
+    catalog = ToolCatalog(definitions, budget=2400)
+    loaded = names(catalog)
+    assert {"mcp_12_web_search", "mcp_12_read_webpage"} <= set(loaded)
+    assert not {"mcp_3_prefetch", "mcp_4_fetch_notes", "web_search_history"} & set(loaded)
+    assert tool_definition_cost(catalog.definitions) <= 2400
+    assert json.loads(catalog.search({"query": "mcp_3_prefetch"}))["loaded"] == ["mcp_3_prefetch"]
+
+
 def test_exact_search_loads_complete_schema_for_the_next_round_without_changing_it():
     selected = tool("mcp_files_read", "Read a local document", 500)
     catalog = ToolCatalog([selected], budget=3000)

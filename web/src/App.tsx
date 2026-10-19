@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, isStreamLost, type AskHandlers, type AskMeta, type ChangeNotice, type ContextStatus } from "./api";
 import { useI18n } from "./i18n";
 import { localizeError } from "./i18n/workspace";
 import type {
+  AnswerDiagnostics,
+  AnswerSource,
   McpInput,
   McpServer,
   ModelCfg,
@@ -14,14 +16,20 @@ import type {
   SourceAnchor,
   NavigationAnchor,
   DocumentSummary,
+  Understanding,
 } from "./types";
 import { Sidebar } from "./components/Sidebar";
-import { ChatPane } from "./components/ChatPane";
+import { ChatPane, MapToggle } from "./components/ChatPane";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { LearningMap } from "./components/LearningMap";
 import { NavigationGate, readSaved, saveValue, clearLegacyRecovery, removeWorkspace, onWorkspaceDeletion, orphanedWorkspaceTrees, orphanedWorkspaceNodes, deletionAffectsRequest } from "./lib/workspace";
 import { mergePendingTitles, pollPendingTitles } from "./lib/titlePolling";
 import { resumeAnswer } from "./lib/answerStream";
 import { keepIfSame, planRefresh, watchChanges } from "./lib/changeFeed";
+import { restoreUnderstanding, withUnderstanding } from "./lib/understanding";
+import { finishToolStep, startToolStep } from "./lib/toolSteps";
+import { locateSource } from "./lib/sourceLinks";
+import { onPairingRequired } from "./lib/phonePairing";
 import { SettingsModal } from "./components/SettingsModal";
 import { NewTreeModal } from "./components/NewTreeModal";
 import { AddModelModal } from "./components/AddModelModal";
@@ -49,6 +57,8 @@ export default function App() {
   const [live, setLive] = useState("");
   const [liveReasoning, setLiveReasoning] = useState("");
   const [liveSteps, setLiveSteps] = useState<ToolStep[]>([]);
+  const [liveDiagnostics, setLiveDiagnostics] = useState<AnswerDiagnostics | null>(null);
+  const [liveSources, setLiveSources] = useState<AnswerSource[]>([]);
   const [contextStatus, setContextStatus] = useState<ContextStatus | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
@@ -72,6 +82,9 @@ export default function App() {
   const streamTargetRef = useRef<number | null>(null);
   const requestRef = useRef<{ from: number; origin: number; tree: number; requestId: string } | null>(null);
   const [notice, setNoticeState] = useState<{ message: string } | null>(null);
+  // Set when this phone's pairing is missing or was rotated on the computer.
+  const [pairingRequired, setPairingRequired] = useState(false);
+  useEffect(() => onPairingRequired(() => setPairingRequired(true)), []);
   function setNotice(message: string | null) {
     // A new event restarts the timer even when its wording is unchanged.
     setNoticeState(message === null ? null : { message });
@@ -176,7 +189,8 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function selectTree(id: number, list?: Tree[]) {
+  /** Open a topic at `focus` when it exists there, else at its saved or first node. */
+  async function selectTree(id: number, list?: Tree[], focus?: number) {
     const ticket = navigation.current.next();
     const mapTicket = ++mapRevision.current;
     treeRef.current = id;
@@ -199,7 +213,7 @@ export default function App() {
       const tr = (list ?? trees).find(t => t.id === id);
       const saved = readSaved<number | null>(`bl-node:${id}`, null);
       const root = tr?.root_node_id ?? nodes.find(n => n.parent_id == null)?.id;
-      const selected = nodes.find(n => n.id === saved)?.id ?? root ?? nodes[0]?.id;
+      const selected = nodes.find(n => n.id === focus)?.id ?? nodes.find(n => n.id === saved)?.id ?? root ?? nodes[0]?.id;
       if (selected) await selectNode(selected);
     } catch (e) {
       if (navigation.current.current(ticket)) setErr(String((e as Error).message ?? e));
@@ -289,6 +303,21 @@ export default function App() {
     catch (e) { if ((e as { status?: number }).status === 404) return; throw e; }
     if (navigation.current.current(ticket) && focusRef.current === nodeId && treeRef.current === treeId && !abortRef.current)
       setThread(keepIfSame(rows));
+  }
+
+  // Show the learner's mark at once in the conversation and the map; restore it if the save fails.
+  async function changeUnderstanding(nodeId: number, value: Understanding | null) {
+    const previous = (thread.find(row => row.node_id === nodeId) ?? treeNodes.find(node => node.id === nodeId))?.understanding ?? null;
+    const isRow = (row: ThreadNode) => row.node_id === nodeId;
+    const isNode = (node: TreeNode) => node.id === nodeId;
+    setThread(rows => withUnderstanding(rows, isRow, value));
+    setTreeNodes(nodes => withUnderstanding(nodes, isNode, value));
+    try { await api.setUnderstanding(nodeId, value); }
+    catch (error) {
+      setThread(rows => restoreUnderstanding(rows, isRow, value, previous));
+      setTreeNodes(nodes => restoreUnderstanding(nodes, isNode, value, previous));
+      throw error;
+    }
   }
 
   // Stop an answer started in another window or on another device.
@@ -401,7 +430,7 @@ export default function App() {
     requestRef.current = { from: fromId, origin, tree: treeId, requestId };
     streamTargetRef.current = null;
     setPendingQuestion(payload.question); setSendingImages(payload.images ?? []); setSendingDocuments(payload.documents ?? []);
-    setLive(''); setLiveReasoning(''); setLiveSteps([]); setContextStatus(null);
+    setLive(''); setLiveReasoning(''); setLiveSteps([]); setLiveDiagnostics(null); setLiveSources([]); setContextStatus(null);
     setStreaming(true); setStreamFromId(origin); setErr(null);
     let succeeded = false;
     let accepted = false;
@@ -418,13 +447,10 @@ export default function App() {
         if (abortRef.current === ctrl && contextStatusRequestRef.current === requestId && !ctrl.signal.aborted)
           setContextStatus(status);
       },
-      onToolStart: name => setLiveSteps(s => [...s, { tool: name, result: null }]),
-      onToolEnd: (name, result) => setLiveSteps(s => {
-        const copy = [...s];
-        const index = copy.map(x => x.result === null).lastIndexOf(true);
-        if (index >= 0) copy[index] = { tool: name, result };
-        return copy;
-      }),
+      onToolStart: name => setLiveSteps(s => startToolStep(s, name)),
+      onToolEnd: (name, result, reference) => setLiveSteps(s => finishToolStep(s, name, result, reference)),
+      onDiagnostics: setLiveDiagnostics,
+      onSources: sources => setLiveSources(sources),
     };
     let unreachable = false;
     try {
@@ -478,7 +504,7 @@ export default function App() {
       }
       abortRef.current = null; requestRef.current = null; streamTargetRef.current = null;
       setStreaming(false); setStreamFromId(null); setLive(''); setLiveReasoning('');
-      setLiveSteps([]); setPendingQuestion(null); setSendingImages([]); setSendingDocuments([]);
+      setLiveSteps([]); setLiveDiagnostics(null); setLiveSources([]); setPendingQuestion(null); setSendingImages([]); setSendingDocuments([]);
     }
     return succeeded;
   }
@@ -607,9 +633,18 @@ export default function App() {
     await loadMcp();
   }
 
+  // Stored provenance can outlive its source: check it before leaving this view, and stay put if it is gone.
   async function openMemorySource(treeId: number, nodeId: number | null) {
-    await selectTree(treeId);
-    if (nodeId !== null && treeRef.current === treeId) await selectNode(nodeId);
+    const ticket = navigation.current.peek();
+    const sameTopic = treeId === treeRef.current;
+    let found: "found" | "deleted";
+    try { found = await locateSource({ treeId, nodeId }, id => sameTopic ? refreshTree(id) : api.getTree(id)); }
+    catch (e) { if (navigation.current.current(ticket)) setErr(String((e as Error).message ?? e)); return; }
+    // The learner went elsewhere meanwhile.
+    if (!navigation.current.current(ticket)) return;
+    if (found === "deleted") { setNotice(t("这条来源已删除。", "This source was deleted.")); return; }
+    if (!sameTopic) await selectTree(treeId, undefined, nodeId ?? undefined);
+    else if (nodeId !== null) await selectNode(nodeId);
   }
 
   function startResize(e: React.MouseEvent) {
@@ -634,6 +669,18 @@ export default function App() {
 
   const activeTree = trees.find((t) => t.id === activeTreeId) ?? null;
   const focused = thread[thread.length - 1];
+  const toggleMap = () => { setSidebarOpen(false); setRightOpen(o => { saveValue("bl-map-open", !o); return !o; }); };
+  // Replaces the whole conversation pane, header included, so it keeps the header's map toggle:
+  // on a phone the map starts closed and is the way to open another question.
+  const conversationFallback = <main className="center chat-pane">
+    <header className="chat-header">
+      <div className="chat-heading"><span className="chat-heading-dot" /><h1>{activeNodeId != null ? activeTree?.title ?? "" : t("学习空间", "Learning space")}</h1></div>
+      <div className="chat-header-actions"><MapToggle open={rightOpen} onToggle={toggleMap} /></div>
+    </header>
+    <div className="chat-error" role="alert">{t("这段对话暂时无法显示。可以从学习树打开其他问题，或重新载入页面。", "This conversation could not be displayed. Open another question from the learning tree, or reload the page.")} <button type="button" className="chat-error-reload" onClick={() => window.location.reload()}>{t("重新载入", "Reload")}</button></div>
+  </main>;
+  const topicIds = useMemo(() => new Set(trees.map(tree => tree.id)), [trees]);
+  const mapNodeIds = useMemo(() => new Set(treeNodes.map(node => node.id)), [treeNodes]);
 
   return (
     <div className={`app${sidebarOpen ? ' sidebar-visible' : ''}`}>
@@ -657,8 +704,11 @@ export default function App() {
         onImport={() => importRef.current?.click()}
       />
       <div className="workspace-main">
+      {pairingRequired && <div className="pairing-required" role="alert">{t("这台设备需要重新配对：请在电脑上打开「设置 → 手机访问」，用手机扫描二维码。", "This device needs to be paired again: open Settings → Phone access on the computer and scan the QR code with your phone.")}</div>}
       {notice && <div className="notice" role="status"><span>{localizeError(notice.message, locale)}</span><button onClick={() => setNotice(null)} aria-label={t("关闭提示", "Dismiss notification")}>×</button></div>}
       {busyNavigation && <div className="loading-line" aria-label={t("正在加载", "Loading")} />}
+      {/* Stored answers are rendered from data: a value that breaks the conversation must not blank the app. */}
+      <ErrorBoundary resetKey={`${activeTreeId}:${activeNodeId}`} fallback={conversationFallback}>
       <ChatPane
         thread={thread}
         activeTreeId={activeTreeId}
@@ -673,6 +723,11 @@ export default function App() {
         live={live}
         liveReasoning={liveReasoning}
         liveSteps={liveSteps}
+        liveDiagnostics={liveDiagnostics}
+        liveSources={liveSources}
+        onOpenSource={(treeId, nodeId) => void openMemorySource(treeId, nodeId)}
+        topicIds={topicIds}
+        mapNodeIds={mapNodeIds}
         contextStatus={contextStatus}
         reconnecting={reconnecting}
         pendingQuestion={pendingQuestion}
@@ -689,14 +744,16 @@ export default function App() {
         onAsk={onAsk}
         onStop={onStop}
         onStopNode={nodeId => void stopNode(nodeId)}
+        onUnderstandingChange={changeUnderstanding}
         onBranch={onBranch}
         onDeleteNode={onDeleteNode}
         rightOpen={rightOpen}
-        onToggleRight={() => { setSidebarOpen(false); setRightOpen(o => { saveValue("bl-map-open", !o); return !o; }); }}
+        onToggleRight={toggleMap}
         onAddMock={addMock}
         mcpServers={mcpServers.filter((s) => s.enabled)}
         onTestMcp={(id) => api.testMcp(id)}
       />
+      </ErrorBoundary>
       </div>
       {compactLayout && rightOpen && <button className="map-scrim" onClick={() => setRightOpen(false)} aria-label={t("关闭学习树面板", "Close learning tree panel")} />}
       {rightOpen && <div className="splitter" onMouseDown={startResize} />}
@@ -704,7 +761,7 @@ export default function App() {
         <LearningMap
           nodes={treeNodes}
           activeId={activeNodeId}
-          onSelect={id => { if (compactLayout) setRightOpen(false); void selectNode(id); }}
+          onSelect={(id, anchor) => { if (compactLayout) setRightOpen(false); void selectNode(id, anchor); }}
           onDelete={onDeleteNode}
           deleteDisabled={streaming}
           onCollapse={() => { setRightOpen(false); saveValue("bl-map-open", false); }}

@@ -27,6 +27,22 @@ class ModelConfig(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now)
 
 
+class ModelCalibration(SQLModel, table=True):
+    """Learned ratio between provider-reported and locally estimated input tokens.
+
+    Side data outside the change feed: it is updated after answers, so it must not
+    make every open window reload the model list. Label, key, window and reserve edits
+    keep it; it is deleted with its model or when an edit switches the model's protocol,
+    address or name, and writes require the model to exist (ids are reused)."""
+
+    config_id: int = Field(primary_key=True)
+    samples: int = 0
+    ratio: float = 1.0
+    estimated_total: int = 0
+    actual_total: int = 0
+    updated_at: datetime = Field(default_factory=_now)
+
+
 class Memory(SQLModel, table=True):
     """Long-term memory: global user preferences/habits or topic-specific facts.
 
@@ -38,6 +54,22 @@ class Memory(SQLModel, table=True):
     tree_id: int | None = Field(default=None, index=True)  # Unset for global preferences.
     source_node_id: int | None = None
     created_at: datetime = Field(default_factory=_now)
+    # Structured facts: definition | condition | misconception | open_question |
+    # learner_state | conclusion. Legacy rows read as conclusions.
+    fact_type: str = Field(
+        default="conclusion", sa_column=Column(String, nullable=False, default="conclusion")
+    )
+    terms: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    # A later fact that corrects this one; superseded facts leave retrieval and the
+    # search index but stay visible in Settings until deleted.
+    superseded_by: int | None = None
+    updated_at: datetime | None = None  # Set by hand edits only; never by supersession.
+    # "extracted": written by automatic extraction. "legacy": stored before origins
+    # were recorded, when hand edits left no trace, so it may hold the user's own
+    # correction. Only extracted facts never edited by hand can be superseded.
+    origin: str = Field(
+        default="legacy", sa_column=Column(String, nullable=False, default="legacy")
+    )
 
 
 class MemoryEmbedding(SQLModel, table=True):
@@ -89,6 +121,18 @@ class PreferenceLearningState(SQLModel, table=True):
     revision: str = Field(default_factory=lambda: uuid4().hex)
 
 
+class RetrievalSettings(SQLModel, table=True):
+    """Singleton: wider memory scopes are opt-in; revisions detect concurrent saves.
+
+    The current learning path is always searched. Siblings and other topics only
+    contribute labelled, separately budgeted facts after the user turns them on."""
+
+    id: int = Field(default=1, primary_key=True)
+    include_siblings: bool = False
+    include_other_trees: bool = False
+    revision: str = Field(default_factory=lambda: uuid4().hex)
+
+
 class PreferenceExtraction(SQLModel, table=True):
     """Content-free processed-input ledger retained after preference deletion."""
 
@@ -99,14 +143,25 @@ class PreferenceExtraction(SQLModel, table=True):
 
 
 class McpServer(SQLModel, table=True):
-    """A user-configured stdio MCP server whose tools are available to agent turns when enabled."""
+    """A user-configured MCP server whose tools are available to agent turns when enabled.
+
+    stdio servers are local programs (command/args); http servers are remote Streamable
+    HTTP endpoints (url/headers). Header values are credentials: they stay in this table
+    and are never returned by the API, logged or exported."""
 
     id: int | None = Field(default=None, primary_key=True)
     label: str  # Display name, e.g. "fetch" or "filesystem".
-    command: str  # Launch command, e.g. "uvx", "npx" or "python".
+    command: str  # Launch command, e.g. "uvx", "npx" or "python"; empty for http servers.
     args: list | None = Field(default=None, sa_column=Column(JSON))  # E.g. ["mcp-server-fetch"].
     enabled: bool = True
     created_at: datetime = Field(default_factory=_now)
+    transport: Literal["stdio", "http"] = Field(
+        default="stdio", sa_column=Column(String, nullable=False, default="stdio")
+    )
+    url: str | None = None  # Streamable HTTP endpoint, e.g. "https://example.com/mcp".
+    headers: dict | None = Field(default=None, sa_column=Column(JSON))  # Name -> value.
+    # Opt-in for loopback, private, link-local and CGNAT addresses (a local dev server).
+    allow_private: bool = False
 
 
 class KnowledgeTree(SQLModel, table=True):
@@ -145,6 +200,9 @@ class Node(SQLModel, table=True):
     source_start: int | None = None
     source_end: int | None = None
     learning_note: str | None = None
+    # The learner's own mark for this node: open | partial | clear; NULL = not marked.
+    # Not source content: it never changes answers, titles, summaries or request state.
+    understanding: str | None = None
     revision_of: int | None = None
     request_id: str | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_now)
@@ -164,8 +222,34 @@ class Message(SQLModel, table=True):
     document_ids: list[str] | None = Field(default=None, sa_column=Column(JSON))
     # Deep thinking: assistant reasoning from the model's reasoning_content field.
     reasoning: str | None = None
-    # Tool steps: [{"tool":..,"args":..,"result":..}] for collapsible frontend display.
+    # Tool steps for collapsible display: [{"tool", "result" (a 3,000-character preview),
+    # "truncated", "call_index", "request_id"}]; the last two locate the ToolResult row.
     steps: list | None = Field(default=None, sa_column=Column(JSON))
+    # Per-answer numbers (token estimates, usage, timings) and fixed labels such as the
+    # budget that stopped tool rounds; never prompt text.
+    diagnostics: dict | None = Field(default=None, sa_column=Column(JSON))
+    # Memory records the answer was given: [{memory_id, source_node_id, tree_id, scope}];
+    # topic titles are read from the live topic (app/answer_sources.py), and a tree_title
+    # that earlier rows stored is ignored. Local provenance only; excluded from exports.
+    sources: list | None = Field(default=None, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=_now)
+
+
+class ToolResult(SQLModel, table=True):
+    """The complete text one tool call returned during an answer, for paging.
+
+    Bound to the node and request that produced it; `call_index` counts the answer's
+    tool calls from 1. Side data outside the change feed: deleted with its node or
+    topic and never exported. `truncated` marks text cut at the storage limit."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    node_id: int = Field(foreign_key="node.id", index=True)
+    request_id: str = Field(index=True)
+    call_index: int
+    tool_name: str
+    arguments: dict | None = Field(default=None, sa_column=Column(JSON))
+    content: str
+    truncated: bool = False
     created_at: datetime = Field(default_factory=_now)
 
 

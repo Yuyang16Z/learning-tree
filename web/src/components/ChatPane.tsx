@@ -8,11 +8,17 @@ import { clearAcceptedDraft, isEmptyDraft, moveFollowupDraft, type ChatDraft as 
 import { documentMetadata, DocumentUploadQueue } from "../lib/documentUploads";
 import { ATTACHMENT_ACCEPT, attachmentKind, ImageAttachmentQueue, MAX_IMAGES, readImage } from "../lib/attachments";
 import { copyText } from "../lib/clipboard";
-import { hasManagedWebSearch, managedMcpPreset, selectedChatTools } from "../lib/chatTools";
+import { hasManagedWebSearch, selectedChatTools } from "../lib/chatTools";
 import { matchesDeletedWorkspace, onWorkspaceDeletion, type WorkspaceDeletion } from "../lib/workspace";
+import { fullResultSource, toolStepLabel, type FullResultSource } from "../lib/toolSteps";
+import { diagnosticsText } from "../lib/answerDiagnostics";
+import { sourceLink, type SourceView } from "../lib/sourceLinks";
+import { locatePassage } from "../lib/passage";
 import { DocumentCards } from "./DocumentCards";
 import { ChatTurnNavigator, turnKey } from "./ChatTurnNavigator";
-import type { DocumentSummary, McpServer, ModelCfg, ThreadNode, ToolStep } from "../types";
+import { markTarget, toggleUnderstanding, UNDERSTANDING_LEVELS, UNDERSTANDING_TEXT } from "../lib/understanding";
+import { followReturnTrip, hasReturnContent, returnTitle, type ReturnTrip } from "../lib/returnTrip";
+import type { AnswerDiagnostics, AnswerSource, DocumentSummary, McpServer, ModelCfg, ReturnExcerptCategory, ReturnSummary, ThreadNode, ToolStep, Understanding } from "../types";
 import "./ChatPane.css";
 
 type Anchor = { source_message_id?: number; source_start?: number; source_end?: number; learning_note?: string };
@@ -29,6 +35,14 @@ interface Props {
   live: string;
   liveReasoning: string;
   liveSteps: ToolStep[];
+  liveDiagnostics?: AnswerDiagnostics | null;
+  /** Memory records the running answer was given; shown as a compact "Referenced" line. */
+  liveSources?: AnswerSource[];
+  /** Open a memory source after checking that it still exists; it may live in another topic. */
+  onOpenSource?: (treeId: number, nodeId: number | null) => void;
+  /** Topics and open-map nodes that exist, so chips for deleted sources render disabled. */
+  topicIds?: ReadonlySet<number>;
+  mapNodeIds?: ReadonlySet<number>;
   contextStatus: ContextStatus | null;
   /** The local answer's connection dropped and is being reattached. */
   reconnecting?: boolean;
@@ -46,6 +60,8 @@ interface Props {
   onStop: () => void;
   /** Stop an answer that another window or device is generating. */
   onStopNode?: (nodeId: number) => void;
+  /** Save the learner's mark for a node; rejects (after restoring the old mark) when it fails. */
+  onUnderstandingChange?: (nodeId: number, value: Understanding | null) => Promise<void>;
   onBranch: (seed: string, fromNodeId: number, anchor?: Anchor, onCreated?: (nodeId: number) => void) => Promise<void>;
   onDeleteNode: (id: number) => void;
   onNavigate: (id: number, anchor?: Destination) => Promise<void>;
@@ -66,6 +82,7 @@ type SelectionCard = {
 const draftKeyFor = (tree: number | null, node: number | null) => `bl-draft-v2:${tree}:${node}`;
 const scrollKeyFor = (tree: number | null, node: number | null) => `bl-scroll-v2:${tree}:${node}`;
 const markdownPlugins = [remarkGfm];
+const NO_IDS: ReadonlySet<number> = new Set();
 const draftCache = new Map<string, Draft>();
 const noteDraftCache = new Map<string, string>();
 const deletedWorkspaces: WorkspaceDeletion[] = [];
@@ -100,15 +117,105 @@ function ReasoningBlock({ text }: { text: string }) {
   if (!text) return null;
   return <details className="chat-reasoning"><summary>{t("思考过程", "Reasoning")}</summary><div>{text}</div></details>;
 }
-function ToolSteps({ steps, mcpServers }: { steps: ToolStep[]; mcpServers: McpServer[] }) {
-  const { t } = useI18n();
-  const toolLabels: Record<string, string> = { fetch: t("读取网页", "Read webpage"), web_search: t("联网搜索", "Web search"), search_available_tools: t("查找可用工具", "Find available tools"), read_learning_source: t("回查学习记录", "Read learning history"), read_document_source: t("查阅文档", "Read document") };
-  for (const server of mcpServers) {
-    if (managedMcpPreset(server) !== "web-research") continue;
-    toolLabels[`mcp_${server.id}_web_search`] = t("联网搜索", "Web search");
-    toolLabels[`mcp_${server.id}_read_webpage`] = t("读取网页", "Read webpage");
+/** A truncated step's preview, replaced by the stored complete text page by page on request. */
+function FullToolResult({ preview, source }: { preview: string; source: FullResultSource }) {
+  const { t, locale } = useI18n();
+  const [text, setText] = useState<string | null>(null);
+  const [next, setNext] = useState<number | null>(null);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function load(start: number) {
+    setLoading(true);
+    setError(null);
+    try {
+      const page = await api.toolResult(source.nodeId, source.callIndex, source.requestId, start);
+      setText(current => (start === 0 ? "" : current ?? "") + page.text);
+      setNext(page.next_start);
+      setTotal(page.total_chars);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("完整结果暂时无法读取。", "The full result could not be loaded."));
+    } finally {
+      setLoading(false);
+    }
   }
-  return <>{steps.map((step, i) => <details className="chat-reasoning" key={i}><summary>{toolLabels[step.tool] ?? step.tool}{step.result === null ? t(" · 进行中", " · Running") : t(" · 已完成", " · Done")}</summary>{step.result !== null && <div>{step.result}</div>}</details>)}</>;
+  const busy = loading ? t("读取中…", "Loading…") : null;
+  return <>
+    <div>{text ?? preview}</div>
+    <p className="chat-tool-full">
+      {text === null && <button type="button" className="btn" disabled={loading} onClick={() => void load(0)}>{busy ?? t("查看完整结果", "View full result")}</button>}
+      {text !== null && next !== null && <button type="button" className="btn" disabled={loading} onClick={() => void load(next)}>{busy ?? t("继续加载（已显示 {shown}/{total} 字）", "Load more ({shown} of {total} characters)", { shown: text.length, total })}</button>}
+      {error && <span className="test-bad" role="alert">{localizeError(error, locale)}</span>}
+    </p>
+  </>;
+}
+function ToolSteps({ steps, mcpServers, nodeId }: { steps: ToolStep[]; mcpServers: McpServer[]; nodeId?: number | null }) {
+  const { t } = useI18n();
+  return <>{steps.map((step, i) => {
+    const source = fullResultSource(step, nodeId);
+    return <details className="chat-reasoning" key={i}><summary>{toolStepLabel(step.tool, t, mcpServers)}{step.result === null ? t(" · 进行中", " · Running") : t(" · 已完成", " · Done")}</summary>{step.result !== null && (source ? <FullToolResult preview={step.result} source={source} /> : <div>{step.result}</div>)}</details>;
+  })}</>;
+}
+/** Numbers only, collapsed by default: how the requests were budgeted and what the provider reported. */
+function DiagnosticsBlock({ data }: { data?: AnswerDiagnostics | null }) {
+  const { t, locale } = useI18n();
+  if (!data || !data.timings_ms) return null;
+  const n = (value: number | null | undefined) => value == null ? "–" : value.toLocaleString(locale === "en" ? "en-US" : "zh-CN");
+  // Context is one request's input; with tool rounds the sum over requests is a line of its own.
+  const { summary, total } = diagnosticsText(data, t, n);
+  const timing = (label: string, ms: number | undefined) => `${label} ${((ms ?? 0) / 1000).toFixed(2)} s`;
+  return <details className="chat-reasoning chat-diagnostics"><summary>{summary}</summary><div>
+    {total && <>{total}{"\n"}</>}
+    {t("输出 {tokens} tokens", "Output {tokens} tokens", { tokens: n(data.output_tokens) })} · {data.compacted ? t("历史已压缩", "History compacted") : t("历史完整", "Full history")} · {t("校准系数 {ratio}", "Calibration ratio {ratio}", { ratio: (data.calibration_ratio ?? 1).toFixed(2) })}{"\n"}
+    {[timing(t("检索", "Retrieval"), data.timings_ms.retrieval), timing(t("整理", "Summary"), data.timings_ms.summary), timing(t("模型", "Model"), data.timings_ms.model), timing(t("工具", "Tools"), data.timings_ms.tools), timing(t("总计", "Total"), data.timings_ms.total)].join(" · ")}
+  </div></details>;
+}
+function SourcesLine({ sources, view, onNavigate, onOpenSource }: { sources: AnswerSource[]; view: SourceView; onNavigate: (id: number) => void; onOpenSource?: (treeId: number, nodeId: number | null) => void }) {
+  const { t } = useI18n();
+  if (!sources.length) return null;
+  return <div className="chat-sources"><span>{t("参考了：", "Referenced: ")}</span>{sources.map(source => {
+    const label = source.scope === "other"
+      ? t("「{title}」记忆 {id}", "“{title}” memory {id}", { title: source.tree_title, id: source.memory_id })
+      : source.scope === "tree" ? t("其他分支记忆 {id}", "Other-branch memory {id}", { id: source.memory_id }) : t("记忆 {id}", "Memory {id}", { id: source.memory_id });
+    const link = sourceLink(source, view);
+    const title = link.kind === "open" ? t("打开来源节点 {node}", "Open source node {node}", { node: link.nodeId })
+      : link.kind === "deleted" ? t("来源已删除", "Source deleted") : t("没有可打开的来源节点", "No source node to open");
+    // The opener checks the source again, since it may be deleted after this list was drawn.
+    return <button type="button" key={source.memory_id} className={`chat-source-link${link.kind === "deleted" ? " is-deleted" : ""}`} disabled={link.kind !== "open"} title={title} onClick={() => {
+      if (link.kind !== "open") return;
+      if (onOpenSource) onOpenSource(link.treeId, link.nodeId);
+      else onNavigate(link.nodeId);
+    }}>{label}</button>;
+  })}</div>;
+}
+/** The learner's own mark for a node. Arrow keys move focus only; a click or Space saves. */
+function UnderstandingControl({ value, disabled, saving, onChange }: { value: Understanding | null; disabled: boolean; saving: boolean; onChange: (value: Understanding | null) => void }) {
+  const { t } = useI18n();
+  const options = useRef<(HTMLButtonElement | null)[]>([]);
+  const focusable = value ? UNDERSTANDING_LEVELS.indexOf(value) : 0;
+  const move = (event: React.KeyboardEvent, index: number) => {
+    const last = UNDERSTANDING_LEVELS.length - 1;
+    const targets: Record<string, number> = { ArrowRight: index + 1, ArrowDown: index + 1, ArrowLeft: index - 1, ArrowUp: index - 1, Home: 0, End: last };
+    const target = targets[event.key];
+    if (target === undefined) return;
+    event.preventDefault();
+    options.current[(target + last + 1) % (last + 1)]?.focus();
+  };
+  return <div className="chat-understanding" role="radiogroup" aria-label={t("理解", "Understanding")} aria-busy={saving || undefined}>
+    <span className="chat-understanding-label" aria-hidden="true">{t("理解", "Understanding")}</span>
+    {UNDERSTANDING_LEVELS.map((level, index) => <button key={level} ref={element => { options.current[index] = element; }} type="button" role="radio" aria-checked={value === level} tabIndex={index === focusable ? 0 : -1} disabled={disabled} className={`u-${level}${value === level ? " is-checked" : ""}`} title={value === level ? t("再次点击可取消标记", "Click again to clear the mark") : undefined} onKeyDown={event => move(event, index)} onClick={() => onChange(toggleUnderstanding(value, level))}>{t(...UNDERSTANDING_TEXT[level])}</button>)}
+  </div>;
+}
+/** Shown above the composer after returning from a branch; a local extract, never an AI summary. */
+function ReturnCard({ summary, onDismiss }: { summary: ReturnSummary; onDismiss: () => void }) {
+  const { t } = useI18n();
+  const categories: Record<ReturnExcerptCategory, string> = { correction: t("纠正", "Correction"), condition: t("条件", "Condition"), definition: t("定义", "Definition"), question: t("待解决", "Open question"), explanation: t("解释", "Explanation") };
+  return <section className="chat-return-card" aria-labelledby="chat-return-title">
+    <div className="chat-return-head"><h2 id="chat-return-title">{t("从分支「{title}」回来", "Back from “{title}”", { title: returnTitle(summary, t("新分支", "New branch")) })}</h2>{summary.understanding && <span className={`chat-return-mark u-${summary.understanding}`}>{t(...UNDERSTANDING_TEXT[summary.understanding])}</span>}<button type="button" className="chat-return-dismiss" onClick={onDismiss} aria-label={t("关闭分支回顾", "Dismiss branch recap")} title={t("关闭", "Dismiss")}>×</button></div>
+    {summary.excerpts.length > 0 && <ul>{summary.excerpts.map((excerpt, index) => <li key={`${excerpt.message_id}:${index}`}><span className="chat-return-category">{categories[excerpt.category] ?? excerpt.category}</span>{excerpt.text}</li>)}</ul>}
+    {summary.note && <p className="chat-return-note"><span>{t("我的理解", "My reflection")}</span>{summary.note}</p>}
+    <p className="chat-return-hint">{t("从分支回答原文中本地摘录，不是 AI 总结。", "Sentences picked locally from the branch’s answers; not an AI summary.")}</p>
+  </section>;
 }
 function ImageStrip({ images }: { images: string[] }) {
   const { t } = useI18n();
@@ -117,6 +224,13 @@ function ImageStrip({ images }: { images: string[] }) {
 function Icon({ name }: { name: "tree" | "attachment" | "tools" | "export" | "arrow" | "copy" | "check" }) {
   const paths = { tree: <><path d="M6 4v14m0-9h8a4 4 0 0 0 4-4" /><circle cx="6" cy="19" r="2" /><circle cx="18" cy="4" r="2" /></>, attachment: <path d="m21 11-8.4 8.4a6 6 0 0 1-8.5-8.5L13 2a4 4 0 0 1 5.7 5.7l-8.8 8.8a2 2 0 0 1-2.8-2.8l8.1-8.1" />, tools: <><path d="M4 7h16M4 17h16" /><circle cx="9" cy="7" r="2" fill="var(--bg)" /><circle cx="15" cy="17" r="2" fill="var(--bg)" /></>, export: <><path d="M12 3v12m-4-4 4 4 4-4M4 15v5h16v-5" /></>, arrow: <><path d="M12 19V5m-5 5 5-5 5 5" /></>, copy: <><rect x="8" y="8" width="12" height="13" rx="2" /><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" /></>, check: <path d="m5 12 4 4L19 6" /> };
   return <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
+}
+
+/** Shows or hides the learning map; also in App's fallback for a conversation that cannot render. */
+export function MapToggle({ open, onToggle }: { open: boolean; onToggle: () => void }) {
+  const { t } = useI18n();
+  const label = open ? t("收起学习树", "Hide learning tree") : t("展开学习树", "Show learning tree");
+  return <button className={`chat-icon-button ${open ? "is-active" : ""}`} onClick={onToggle} aria-label={label} title={label}><Icon name="tree" /></button>;
 }
 
 function CopyButton({ text, label, visibleLabel }: { text: string; label: string; visibleLabel?: string }) {
@@ -157,14 +271,8 @@ function textRange(element: HTMLElement, start: number, end: number) {
   return null;
 }
 function markSource(element: HTMLElement, anchor: Destination) {
-  const content = element.textContent ?? "";
-  let start = anchor.start ?? -1;
-  let end = anchor.end ?? -1;
-  if (start < 0 || end <= start || end > content.length || (anchor.text && content.slice(start, end) !== anchor.text)) {
-    start = anchor.text ? content.indexOf(anchor.text) : -1;
-    end = start + (anchor.text?.length ?? 0);
-  }
-  const range = start >= 0 && end > start ? textRange(element, start, end) : null;
+  const passage = locatePassage(element.textContent ?? "", anchor);
+  const range = passage ? textRange(element, passage.start, passage.end) : null;
   if (range) {
     const highlightApi = window as unknown as { Highlight?: new (...ranges: Range[]) => unknown; CSS?: { highlights?: Map<string, unknown> } };
     if (highlightApi.Highlight && highlightApi.CSS?.highlights) highlightApi.CSS.highlights.set("learning-source", new highlightApi.Highlight(range));
@@ -181,7 +289,9 @@ export function ChatPane(props: Props) {
   const { locale, t } = useI18n();
   const translationRef = useRef(t);
   translationRef.current = t;
-  const { thread, treeTitle, hasNode, loading = false, activeNodeId, activeTreeId, focusedSeed, live, liveReasoning, liveSteps, contextStatus, reconnecting = false, pendingQuestion, sendingImages, sendingDocuments, streaming, showStream, err, models, activeModelId, onModelChange, onOpenSettings, onAsk, onStop, onStopNode, onBranch, onNavigate, navigationAnchor, rightOpen, onToggleRight, onAddMock, mcpServers, onExport, onNew } = props;
+  const { thread, treeTitle, hasNode, loading = false, activeNodeId, activeTreeId, focusedSeed, live, liveReasoning, liveSteps, liveDiagnostics = null, liveSources = [], onOpenSource, topicIds = NO_IDS, mapNodeIds = NO_IDS, contextStatus, reconnecting = false, pendingQuestion, sendingImages, sendingDocuments, streaming, showStream, err, models, activeModelId, onModelChange, onOpenSettings, onAsk, onStop, onStopNode, onUnderstandingChange, onBranch, onNavigate, navigationAnchor, rightOpen, onToggleRight, onAddMock, mcpServers, onExport, onNew } = props;
+  const openSource = (id: number) => void onNavigate(id);
+  const sourceView: SourceView = { activeTreeId, topicIds, nodeIds: mapNodeIds, canOpenTopics: !!onOpenSource };
   const nearestBranch = [...thread].reverse().find(node => node.seed_text && (node.source_node_id ?? node.parent_id) != null);
   const noteKey = `bl-note-draft-v2:${activeTreeId}:${nearestBranch?.node_id ?? "none"}`;
   const draftKey = draftKeyFor(activeTreeId, activeNodeId);
@@ -215,6 +325,11 @@ export function ChatPane(props: Props) {
   const [noteSaving, setNoteSaving] = useState(false);
   const [noteError, setNoteError] = useState<string | null>(null);
   const [savedNotes, setSavedNotes] = useState<Record<string, string>>({});
+  const [savingMarks, setSavingMarks] = useState<number[]>([]);
+  const savingMarksRef = useRef(new Set<number>());
+  const [returnTrip, setReturnTrip] = useState<ReturnTrip | null>(null);
+  const returnCountRef = useRef(0);
+  const [returnSummary, setReturnSummary] = useState<{ nonce: number; summary: ReturnSummary } | null>(null);
   const [, setUploadVersion] = useState(0);
   const activeNoteKeyRef = useRef(noteKey);
   activeNoteKeyRef.current = noteKey;
@@ -293,6 +408,25 @@ export function ChatPane(props: Props) {
     setNoteError(null);
   }, [noteKey, nearestBranch?.learning_note]);
 
+  // A return from a branch lands on its source node; going anywhere else ends it.
+  useEffect(() => {
+    setReturnTrip(trip => followReturnTrip(trip, { treeId: activeTreeId, nodeId: activeNodeId }));
+  }, [activeTreeId, activeNodeId]);
+
+  // One local read per return. A failed read shows no card: the navigation itself already happened.
+  const returnNonce = returnTrip?.nonce;
+  const returnFrom = returnTrip?.fromNodeId;
+  useEffect(() => {
+    setReturnSummary(null);
+    if (returnNonce === undefined || returnFrom === undefined) return;
+    const controller = new AbortController();
+    api.returnSummary(returnFrom, controller.signal).then(
+      summary => { if (!controller.signal.aborted) setReturnSummary({ nonce: returnNonce, summary }); },
+      () => { /* Optional card; nothing to report. */ },
+    );
+    return () => controller.abort();
+  }, [returnNonce, returnFrom]);
+
   useLayoutEffect(() => {
     const followup = followupRef.current;
     if (followup?.targetKey === draftKey) {
@@ -352,7 +486,9 @@ export function ChatPane(props: Props) {
     }
     if (navigationAnchor && navigationAnchor.nodeId === activeNodeId && navigationAnchor.nonce !== anchorNonceRef.current) {
       const selector = navigationAnchor.messageId ? `[data-message-id="${navigationAnchor.messageId}"]` : `[data-answer-node="${activeNodeId}"]`;
-      const answer = el.querySelector<HTMLElement>(selector);
+      // A passage this conversation does not show falls back to the node's turn, so the
+      // anchor is used once instead of firing on a later, unrelated reload.
+      const answer = el.querySelector<HTMLElement>(selector) ?? el.querySelector<HTMLElement>(`[data-turn-node="${activeNodeId}"]`);
       if (answer) {
         let parent = answer.parentElement;
         while (parent && parent !== el) { if (parent instanceof HTMLDetailsElement) parent.open = true; parent = parent.parentElement; }
@@ -543,6 +679,7 @@ export function ChatPane(props: Props) {
     sendingRef.current = true;
     let accepted = false;
     setLocalError(null);
+    setReturnTrip(null);  // Asking a question ends the return recap.
     if (retry) setRetryingNodeId(retry.node_id);
     stickToBottom.current = true;
     setAwayFromBottom(false);
@@ -596,6 +733,18 @@ export function ChatPane(props: Props) {
       if (activeNoteKeyRef.current === key) setNoteError(error instanceof Error ? error.message : t("保存失败，理解草稿已保留。", "Could not save. Your reflection draft has been kept."));
     } finally { setNoteSaving(false); }
   }
+  async function markUnderstanding(nodeId: number, value: Understanding | null) {
+    if (!onUnderstandingChange || savingMarksRef.current.has(nodeId)) return;
+    const key = draftKey;
+    savingMarksRef.current.add(nodeId);
+    setSavingMarks([...savingMarksRef.current]);
+    try { await onUnderstandingChange(nodeId, value); }
+    catch { if (activeKeyRef.current === key) setLocalError(t("理解标记没有保存，已恢复原来的标记。", "Your understanding mark was not saved; the previous mark is back.")); }
+    finally {
+      savingMarksRef.current.delete(nodeId);
+      setSavingMarks([...savingMarksRef.current]);
+    }
+  }
   async function returnToSource(withNote = false) {
     if (!nearestBranch || branchSource == null) return;
     if (withNote && learningNote) {
@@ -604,6 +753,8 @@ export function ChatPane(props: Props) {
       const next = { ...prior, text: [prior.text, t("关于「{quote}」，{intro}：\n{note}\n\n请接着解释原来的问题。", "About “{quote}”, {intro}:\n{note}\n\nPlease continue explaining the original question.", { quote: nearestBranch.seed_text ?? "", intro: personalNote ? t("我的理解是", "my understanding is") : t("这是一份整理草稿（请帮我检查）", "here is a draft summary (please check it)"), note: learningNote })].filter(Boolean).join("\n\n") };
       try { writeDraft(next); } catch { setStorageError(true); return; }
     }
+    // Remember the branch being left; its recap card appears once the source is shown.
+    setReturnTrip({ nonce: ++returnCountRef.current, treeId: activeTreeId, fromNodeId: activeNodeId ?? nearestBranch.node_id, branchNodeId: nearestBranch.node_id, sourceNodeId: branchSource, arrived: false });
     await onNavigate(branchSource, { messageId: nearestBranch.source_message_id ?? undefined, start: nearestBranch.source_start ?? undefined, end: nearestBranch.source_end ?? undefined, text: nearestBranch.seed_text ?? undefined });
     if (withNote) textareaRef.current?.focus();
   }
@@ -615,13 +766,20 @@ export function ChatPane(props: Props) {
   const attachmentsBusy = draftUploads.length > 0 || pendingImages > 0;
   const visibleThread = thread.filter(node => node.question !== null && !(showStream && (node.node_id === retryingNodeId || (node.status === "pending" && node.node_id === activeNodeId))));
   const focusBusy = !streaming && thread[thread.length - 1]?.node_id === activeNodeId && thread[thread.length - 1]?.status === "pending";
+  // One mark, for the open question, in the source bar area: inside a branch's source bar,
+  // else in a bar of its own.
+  const markFor = onUnderstandingChange ? markTarget(thread, activeNodeId, showStream ? retryingNodeId : null) : null;
+  const markSaving = !!markFor && savingMarks.includes(markFor.row.node_id);
+  const marks = markFor ? <UnderstandingControl value={markFor.row.understanding ?? null} disabled={markFor.answering || markSaving} saving={markSaving} onChange={value => void markUnderstanding(markFor.row.node_id, value)} /> : null;
+  const recap = returnTrip?.arrived && returnSummary?.nonce === returnTrip.nonce && hasReturnContent(returnSummary.summary) ? returnSummary.summary : null;
 
   return <main className="center chat-pane">
     <header className="chat-header">
       <div className="chat-heading"><span className="chat-heading-dot" /><h1>{hasNode ? treeTitle : t("学习空间", "Learning space")}</h1>{nearestBranch && <span className="chat-mode-label">{t("分支", "Branch")}</span>}</div>
-      <div className="chat-header-actions">{onExport && hasNode && <button className="chat-icon-button" onClick={onExport} aria-label={t("导出学习记录", "Export learning history")} title={t("导出学习记录", "Export learning history")}><Icon name="export" /></button>}<button className={`chat-icon-button ${rightOpen ? "is-active" : ""}`} onClick={onToggleRight} aria-label={rightOpen ? t("收起学习树", "Hide learning tree") : t("展开学习树", "Show learning tree")} title={rightOpen ? t("收起学习树", "Hide learning tree") : t("展开学习树", "Show learning tree")}><Icon name="tree" /></button></div>
+      <div className="chat-header-actions">{onExport && hasNode && <button className="chat-icon-button" onClick={onExport} aria-label={t("导出学习记录", "Export learning history")} title={t("导出学习记录", "Export learning history")}><Icon name="export" /></button>}<MapToggle open={rightOpen} onToggle={onToggleRight} /></div>
     </header>
-    {nearestBranch && <div className="chat-source-bar"><span title={nearestBranch.seed_text ?? ""}>↳ {nearestBranch.seed_text}</span><button onClick={() => void returnToSource()}>{t("返回出处 ↗", "Back to source ↗")}</button><button onClick={() => setNoteOpen(open => !open)} aria-expanded={noteOpen}>{t("我的理解", "My reflection")}{personalNote ? " ·" : ""}</button>{learningNote && <button className="chat-note-return" onClick={() => void returnToSource(true)} title={t("把这段理解放回原问题的草稿，可继续编辑", "Add this reflection to the original question’s draft to continue editing")}>{t("带着理解继续", "Continue with reflection")}</button>}</div>}
+    {nearestBranch && <div className={`chat-source-bar${marks ? " has-marks" : ""}`}><span title={nearestBranch.seed_text ?? ""}>↳ {nearestBranch.seed_text}</span><button onClick={() => void returnToSource()}>{t("返回出处 ↗", "Back to source ↗")}</button><button onClick={() => setNoteOpen(open => !open)} aria-expanded={noteOpen}>{t("我的理解", "My reflection")}{personalNote ? " ·" : ""}</button>{learningNote && <button className="chat-note-return" onClick={() => void returnToSource(true)} title={t("把这段理解放回原问题的草稿，可继续编辑", "Add this reflection to the original question’s draft to continue editing")}>{t("带着理解继续", "Continue with reflection")}</button>}{marks}</div>}
+    {!nearestBranch && marks && <div className="chat-mark-bar">{marks}</div>}
     {nearestBranch && noteOpen && <div className="chat-note-panel"><label htmlFor="personal-learning-note">{t("我的理解", "My reflection")}</label><textarea id="personal-learning-note" disabled={noteSaving} value={noteDraft} onChange={event => updateNote(event.target.value)} rows={3} maxLength={4000} placeholder={t("用自己的话，记下这次弄懂的事…", "Write what you learned in your own words…")} /><div className="chat-note-actions">{noteError && <span role="alert">{localizeError(noteError, locale)}</span>}<button onClick={() => setNoteOpen(false)}>{t("收起", "Collapse")}</button><button className="chat-explain-button" onClick={() => void savePersonalNote()} disabled={noteSaving || noteDraft.trim() === personalNote.trim()}>{noteSaving ? t("保存中…", "Saving…") : t("保存理解", "Save reflection")}</button></div></div>}
     {(err || localError || storageError) && <div className="chat-error" role="alert">{localizeError(err || localError || t("浏览器存储空间不足，当前草稿尚未保存。可移除附图后重试。", "Browser storage is full. This draft has not been saved. Remove attachments and try again."), locale)}</div>}
     {!hasNode ? <div className="chat-empty"><div className="chat-empty-mark"><Icon name="tree" /></div><h2>{t("从一个好奇开始", "Start with curiosity")}</h2><p>{t("把不懂的地方，慢慢学明白。", "Follow your questions, one idea at a time.")}</p>{onNew && <button className="chat-primary" onClick={onNew}>{t("新建学习树", "New learning tree")}</button>}</div> : <>
@@ -636,19 +794,20 @@ export function ChatPane(props: Props) {
           <div className="chat-messages" onPointerUp={captureSelection} onKeyUp={(event) => { if (event.shiftKey) captureSelection(); }}>
             {!loading && !visibleThread.length && !showStream && <div className="chat-welcome"><span className="chat-eyebrow">{focusedSeed ? t("从这里展开", "Explore from here") : t("新的起点", "A fresh start")}</span><h2>{focusedSeed ? `「${focusedSeed}」` : treeTitle}</h2><p>{t("想先弄懂什么？", "What would you like to understand first?")}</p></div>}
             {visibleThread.map((node, index) => <section className="chat-turn" data-turn-node={node.node_id} data-turn-key={turnKey(node, index)} key={turnKey(node, index)}>
-              <div className="chat-question"><ImageStrip images={node.images ?? []} /><DocumentCards documents={node.documents ?? []} /><div>{node.question}</div><div className="chat-question-actions"><CopyButton text={node.question ?? ""} label={t("复制问题", "Copy question")} /><button onClick={() => editNode(node)} disabled={streaming || attachmentsBusy || node.status === "pending"} title={t("编辑后生成新版本，保留原有问答与分支", "Create a new version while keeping the original conversation and branches")}>{t("编辑", "Edit")}</button></div></div>
-              {node.answer != null && <div className="chat-answer"><div className="chat-answer-label"><span className="chat-answer-dot" />{node.answered_by ?? "AI"}{node.status === "error" || node.status === "interrupted" ? <span>{t("· 未完成", "· Incomplete")}</span> : null}</div><ReasoningBlock text={node.reasoning ?? ""} /><ToolSteps steps={node.steps ?? []} mcpServers={mcpServers} /><div className="chat-markdown" data-answer-node={node.node_id} data-message-id={node.answer_message_id ?? undefined} tabIndex={0}><Markdown text={node.answer} /></div>{node.answer.trim() && <div className="chat-answer-actions"><CopyButton text={node.answer} label={t("复制回答", "Copy answer")} /><button onClick={() => void branchAnswer(node)} disabled={branching || streaming || loading} title={t("从这条回答展开一个新的问题", "Explore a new question from this answer")}><Icon name="tree" />{t("新分支", "New branch")}</button></div>}</div>}
+              <div className="chat-question"><ImageStrip images={node.images ?? []} /><DocumentCards documents={node.documents ?? []} /><div data-message-id={node.question_message_id ?? undefined}>{node.question}</div><div className="chat-question-actions"><CopyButton text={node.question ?? ""} label={t("复制问题", "Copy question")} /><button onClick={() => editNode(node)} disabled={streaming || attachmentsBusy || node.status === "pending"} title={t("编辑后生成新版本，保留原有问答与分支", "Create a new version while keeping the original conversation and branches")}>{t("编辑", "Edit")}</button></div></div>
+              {node.answer != null && <div className="chat-answer"><div className="chat-answer-label"><span className="chat-answer-dot" />{node.answered_by ?? "AI"}{node.status === "error" || node.status === "interrupted" ? <span>{t("· 未完成", "· Incomplete")}</span> : null}</div><ReasoningBlock text={node.reasoning ?? ""} /><ToolSteps steps={node.steps ?? []} mcpServers={mcpServers} nodeId={node.node_id} /><div className="chat-markdown" data-answer-node={node.node_id} data-message-id={node.answer_message_id ?? undefined} tabIndex={0}><Markdown text={node.answer} /></div><SourcesLine sources={node.sources ?? []} view={sourceView} onNavigate={openSource} onOpenSource={onOpenSource} />{node.answer.trim() && <div className="chat-answer-actions"><CopyButton text={node.answer} label={t("复制回答", "Copy answer")} /><button onClick={() => void branchAnswer(node)} disabled={branching || streaming || loading} title={t("从这条回答展开一个新的问题", "Explore a new question from this answer")}><Icon name="tree" />{t("新分支", "New branch")}</button></div>}<DiagnosticsBlock data={node.diagnostics} /></div>}
               {node.status === "pending" && <div className="chat-retry chat-remote-answer" role="status"><span className="chat-answer-dot is-loading" /><span>{t("正在回答，完成前会自动更新", "Responding. This updates automatically until it finishes.")}</span>{onStopNode && <button onClick={() => onStopNode(node.node_id)}>{t("停止", "Stop")}</button>}</div>}
               {!!node.attempts?.length && <details className="chat-reasoning chat-prior-attempts"><summary>{t("之前的未完成回答（{count}）", "Previous incomplete responses ({count})", { count: node.attempts.length })}</summary>{node.attempts.map(attempt => <div className="chat-markdown" data-answer-node={node.node_id} data-message-id={attempt.message_id} key={attempt.message_id}><Markdown text={attempt.content || t("未收到内容", "No content received")} /></div>)}</details>}
               {(node.status === "error" || node.status === "interrupted") && <div className="chat-retry"><span>{node.status === "interrupted" ? t("回答已停止", "Response stopped") : t("这次回答未完成", "This response is incomplete")}</span><button onClick={() => void send(node)} disabled={streaming || noModel}>{t("重试", "Retry")}</button>{node.error && <details><summary>{t("详情", "Details")}</summary><p>{localizeError(node.error, locale)}</p></details>}</div>}
             </section>)}
-            {showStream && <section className="chat-turn chat-live"><div className="chat-question"><ImageStrip images={sendingImages} /><DocumentCards documents={sendingDocuments} /><div>{pendingQuestion}</div></div><div className="chat-answer"><div className="chat-answer-label" role="status"><span className="chat-answer-dot is-loading" />{reconnecting ? t("连接中断，正在重新连接…", "Connection lost. Reconnecting…") : contextStatus === "summarizing" && !live ? t("正在整理上下文…", "Organizing context…") : t("正在回答", "Responding")}</div><ReasoningBlock text={liveReasoning} /><ToolSteps steps={liveSteps} mcpServers={mcpServers} /><div className="chat-markdown" aria-live="polite" aria-busy="true">{live ? <Markdown text={live} /> : <span className="chat-typing">•••</span>}</div></div></section>}
+            {showStream && <section className="chat-turn chat-live"><div className="chat-question"><ImageStrip images={sendingImages} /><DocumentCards documents={sendingDocuments} /><div>{pendingQuestion}</div></div><div className="chat-answer"><div className="chat-answer-label" role="status"><span className="chat-answer-dot is-loading" />{reconnecting ? t("连接中断，正在重新连接…", "Connection lost. Reconnecting…") : contextStatus === "summarizing" && !live ? t("正在整理上下文…", "Organizing context…") : t("正在回答", "Responding")}</div><ReasoningBlock text={liveReasoning} /><ToolSteps steps={liveSteps} mcpServers={mcpServers} /><div className="chat-markdown" aria-live="polite" aria-busy="true">{live ? <Markdown text={live} /> : <span className="chat-typing">•••</span>}</div><SourcesLine sources={liveSources} view={sourceView} onNavigate={openSource} onOpenSource={onOpenSource} /><DiagnosticsBlock data={liveDiagnostics} /></div></section>}
           </div>
         </div>
         <ChatTurnNavigator turns={visibleThread} scrollRef={scrollRef} scopeKey={scrollKey} onJump={() => { stickToBottom.current = false; setAwayFromBottom(true); setSelection(null); selectionRequestRef.current++; }} />
         {awayFromBottom && <button className="chat-latest" onClick={() => { if (scrollRef.current) scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); stickToBottom.current = true; }}>{t("↓ 最新", "↓ Latest")}</button>}
       </div>
       <div className="chat-compose-area">
+        {recap && <ReturnCard summary={recap} onDismiss={() => setReturnTrip(null)} />}
         {noModel && <div className="chat-model-empty"><span>{t("连接模型，开始学习", "Connect a model to start learning")}</span><button onClick={onOpenSettings}>{t("设置模型", "Model settings")}</button><button onClick={onAddMock}>{t("体验演示", "Try demo")}</button></div>}
         <div className="chat-compose-box">
           {displayDraft.revisionId && <div className="chat-revision"><span>{t("编辑为新版本", "Edit as a new version")} <small>{t("原记录会保留", "The original stays saved")}</small></span><button onClick={cancelRevision} disabled={streaming || attachmentsBusy}>{t("取消", "Cancel")}</button></div>}

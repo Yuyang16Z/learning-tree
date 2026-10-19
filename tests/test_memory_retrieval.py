@@ -793,3 +793,317 @@ def test_branch_creation_and_deletion_leave_no_orphan_nodes(session, deletion):
         remaining_ids = {node.id for node in remaining}
         assert created[0]["id"] not in remaining_ids, "deletion must discover the committed child"
         assert all(node.parent_id is None or node.parent_id in remaining_ids for node in remaining)
+
+
+def test_superseded_facts_are_not_recalled_but_their_replacement_is(session):
+    old = remember(session, "旧说法：schema 校验在工具执行之后进行。")
+    new = remember(session, "修正：schema 校验在执行工具之前进行。")
+    old.superseded_by = new.id
+    session.add(old)
+    session.commit()
+    backend = Backend([old.content, new.content])
+
+    result = retrieve_memory(session, 1, [1], query="schema 校验", backend=backend)
+
+    assert ids(result) == {new.id}
+    assert old.content not in result.text and new.content in result.text
+    assert old.content not in sum(backend.document_calls, []), "superseded facts are never embedded"
+
+    # Supersession recorded while ranking runs is honoured by the final revalidation.
+    class SupersedeDuringRerank(Backend):
+        def rerank(self, query, documents):
+            with Session(session.get_bind()) as writer:
+                row = writer.get(Memory, new.id)
+                row.superseded_by = old.id
+                writer.add(row)
+                writer.commit()
+            return super().rerank(query, documents)
+
+    late = retrieve_memory(
+        session, 1, [1], query="schema 校验", backend=SupersedeDuringRerank([new.content])
+    )
+    assert not late.facts
+
+
+def test_wider_scopes_are_opt_in_and_labelled_with_their_origin(session):
+    path = remember(session, "当前路径：schema 校验先于工具执行。")
+    sibling = remember(session, "兄弟分支：schema 校验可以放在中间件里。", source_node_id=3)
+    other = remember(session, "另一棵树：schema 校验要考虑版本兼容。", tree_id=2, source_node_id=4)
+    pending = remember(session, "生成中的 schema 校验说明。", source_node_id=5)
+    contents = [path.content, sibling.content, other.content, pending.content]
+
+    default = retrieve_memory(session, 1, [1, 2], query="schema 校验", backend=Backend(contents))
+    assert ids(default) == {path.id}
+    assert "同主题其他分支" not in default.text and "其他主题" not in default.text
+
+    backend = Backend(contents)
+    siblings = retrieve_memory(
+        session,
+        1,
+        [1, 2],
+        query="schema 校验",
+        config=RetrievalConfig(include_siblings=True),
+        backend=backend,
+    )
+    assert ids(siblings) == {path.id, sibling.id}
+    assert "【同一主题其他分支的相关记忆（仅供参考）】" in siblings.text
+    assert (
+        f"- [记忆 {sibling.id}；来源节点 3] （同主题其他分支「兄弟分支」）{sibling.content}"
+        in siblings.text
+    )
+    assert f"- [记忆 {path.id}；来源节点 1] {path.content}" in siblings.text
+    assert siblings.text.index("【当前学习路径的相关记忆】") < siblings.text.index("【同一主题")
+    evaluated = sum(backend.document_calls, [])
+    assert other.content not in evaluated and pending.content not in evaluated
+    assert other.content not in siblings.text and pending.content not in siblings.text
+
+    both = retrieve_memory(
+        session,
+        1,
+        [1, 2],
+        query="schema 校验",
+        config=RetrievalConfig(include_siblings=True, include_other_trees=True),
+        backend=Backend(contents),
+    )
+    assert ids(both) == {path.id, sibling.id, other.id}
+    assert "【其他学习主题的相关记忆（仅供参考）】" in both.text
+    assert f"- [记忆 {other.id}；来源节点 4] （其他主题「另一棵树」）{other.content}" in both.text
+    assert [hit.scope for hit in both.facts] == ["path", "tree", "other"]
+    assert both.facts[2].tree_id == 2 and both.facts[2].tree_title == "另一棵树"
+
+    only_other = retrieve_memory(
+        session,
+        1,
+        [1, 2],
+        query="schema 校验",
+        config=RetrievalConfig(include_other_trees=True),
+        backend=Backend(contents),
+    )
+    assert ids(only_other) == {path.id, other.id}
+    assert sibling.content not in only_other.text
+
+
+def test_wider_hits_share_a_smaller_budget_and_never_displace_path_facts(session):
+    path_facts = [remember(session, f"路径事实 {i}：schema 校验规则 {i}。") for i in range(10)]
+    sibling_facts = [
+        remember(session, f"兄弟事实 {i}：schema 校验补充 {i}。", source_node_id=3)
+        for i in range(10)
+    ]
+    contents = [memory.content for memory in path_facts + sibling_facts]
+    result = retrieve_memory(
+        session,
+        1,
+        [1],
+        query="schema 校验",
+        config=RetrievalConfig(include_siblings=True),
+        backend=Backend(contents),
+    )
+    path_ids = {memory.id for memory in path_facts}
+    sibling_ids = {memory.id for memory in sibling_facts}
+    assert len(ids(result) & path_ids) == 8
+    assert len(ids(result) & sibling_ids) == 4
+    assert [hit.scope for hit in result.facts] == ["path"] * 8 + ["tree"] * 4
+    tight = retrieve_memory(
+        session,
+        1,
+        [1],
+        query="schema 校验",
+        config=RetrievalConfig(include_siblings=True, wider_char_budget=120),
+        backend=Backend(contents),
+    )
+    assert len(ids(tight) & path_ids) == 8
+    assert 0 < len(ids(tight) & sibling_ids) < 4
+    assert sum(len(hit.content) for hit in tight.facts if hit.scope == "tree") <= 120
+
+
+class LexicalOnly(Backend):
+    def embed_query(self, query):
+        raise RuntimeError("semantic models unavailable")
+
+
+def _path_ids(result):
+    return [hit.memory_id for hit in result.facts if hit.scope == "path"]
+
+
+def test_many_short_wider_facts_cannot_push_a_path_fact_out_of_the_candidates(session):
+    path = remember(session, "quicksort pivot " + "长篇背景说明，" * 60)
+    for index in range(30):
+        remember(session, f"quicksort pivot {index}", tree_id=2, source_node_id=4)
+    query = "quicksort pivot"
+    alone = retrieve_memory(session, 1, [1], query=query, backend=LexicalOnly())
+    assert alone.mode == "lexical" and _path_ids(alone) == [path.id]
+    widened = retrieve_memory(
+        session,
+        1,
+        [1],
+        query=query,
+        config=RetrievalConfig(include_other_trees=True),
+        backend=LexicalOnly(),
+    )
+    assert _path_ids(widened) == [path.id]
+    assert [hit.scope for hit in widened.facts] == ["path"] + ["other"] * 4
+
+
+def test_a_strong_wider_rerank_score_does_not_raise_the_path_cutoff(session):
+    path = remember(session, "路径：schema 校验先于执行。")
+    other = remember(session, "其他主题：schema 校验与版本。", tree_id=2, source_node_id=4)
+    backend = Backend(
+        [path.content, other.content], scores={path.content: 0.15, other.content: 0.9}
+    )
+    alone = retrieve_memory(session, 1, [1], query="schema", backend=backend)
+    assert alone.reranked and _path_ids(alone) == [path.id]
+    widened = retrieve_memory(
+        session,
+        1,
+        [1],
+        query="schema",
+        config=RetrievalConfig(include_other_trees=True),
+        backend=backend,
+    )
+    assert widened.reranked and _path_ids(widened) == [path.id]
+    assert [hit.memory_id for hit in widened.facts] == [path.id, other.id]
+
+
+def test_a_strong_wider_similarity_does_not_tighten_the_path_gate(session):
+    best = remember(session, "路径甲：相关结论。")
+    close = remember(session, "路径乙：几乎同样相关。")
+    other = remember(session, "其他主题：非常相关。", tree_id=2, source_node_id=4)
+    backend = Backend(
+        vectors={
+            best.content: [0.83, (1 - 0.83**2) ** 0.5, 0.0],
+            close.content: [0.81, (1 - 0.81**2) ** 0.5, 0.0],
+            other.content: [0.95, (1 - 0.95**2) ** 0.5, 0.0],
+        }
+    )
+    config = RetrievalConfig(rerank=False)
+    alone = retrieve_memory(session, 1, [1], query="量子", config=config, backend=backend)
+    assert alone.mode == "hybrid" and set(_path_ids(alone)) == {best.id, close.id}
+    widened = retrieve_memory(
+        session,
+        1,
+        [1],
+        query="量子",
+        config=RetrievalConfig(rerank=False, include_other_trees=True),
+        backend=backend,
+    )
+    assert set(_path_ids(widened)) == {best.id, close.id}
+    assert [hit.memory_id for hit in widened.facts if hit.scope == "other"] == [other.id]
+
+
+def test_wider_scopes_bound_the_vector_work_per_question(session):
+    path = remember(session, "路径：schema 校验先于工具执行。")
+    matching = [
+        remember(session, f"其他主题 {index}：schema 校验的版本兼容。", tree_id=2, source_node_id=4)
+        for index in range(3)
+    ]
+    for index in range(200):
+        remember(session, f"无关记录 {index}：地理与气候。", tree_id=2, source_node_id=4)
+    relevant = [path.content, *(memory.content for memory in matching)]
+    config = RetrievalConfig(include_other_trees=True)
+    backend = Backend(relevant)
+    result = retrieve_memory(session, 1, [1], query="schema 校验", config=config, backend=backend)
+    embedded = sum(backend.document_calls, [])
+    assert len(embedded) <= 1 + config.wider_candidate_k < 201
+    assert set(relevant) <= set(embedded), "keyword matches always reach the vector stage"
+    assert ids(result) == {path.id, *(memory.id for memory in matching)}
+    reranked = sum((documents for _, documents in backend.rerank_calls), [])
+    assert len(reranked) <= 1 + config.wider_candidate_k
+
+
+def test_wider_hits_are_revalidated_against_current_records(session):
+    session.add_all([KnowledgeTree(id=3, title="归档树", archived=True)])
+    session.add(Node(id=9, tree_id=3, title="归档树的根", status="complete"))
+    session.commit()
+    sibling = remember(session, "兄弟分支：schema 校验在中间件里。", source_node_id=3)
+    other = remember(session, "另一棵树：schema 版本兼容。", tree_id=2, source_node_id=4)
+    archived = remember(session, "归档树：schema 不应出现。", tree_id=3, source_node_id=9)
+    config = RetrievalConfig(include_siblings=True, include_other_trees=True)
+    backend = Backend([sibling.content, other.content, archived.content])
+    before = retrieve_memory(session, 1, [1], query="schema", config=config, backend=backend)
+    assert ids(before) == {sibling.id, other.id}
+    assert archived.content not in sum(backend.document_calls, [])
+
+    class ChangeDuringRerank(Backend):
+        def rerank(self, query, documents):
+            with Session(session.get_bind()) as writer:
+                node = writer.get(Node, 3)
+                node.status = "error"
+                tree = writer.get(KnowledgeTree, 2)
+                tree.archived = True
+                writer.add_all([node, tree])
+                writer.commit()
+            return super().rerank(query, documents)
+
+    late = retrieve_memory(
+        session,
+        1,
+        [1],
+        query="schema",
+        config=config,
+        backend=ChangeDuringRerank([sibling.content, other.content]),
+    )
+    assert not late.facts and late.text == ""
+
+
+def test_relative_vector_gate_admits_near_top_candidates_but_not_a_weak_set(session):
+    best = remember(session, "最相关的 schema 结论。")
+    close = remember(session, "几乎同样相关的结论。")
+    far = remember(session, "无关的地理记录。")
+    backend = Backend(
+        vectors={
+            best.content: [1.0, 0.0, 0.0],
+            close.content: [0.98, 0.199, 0.0],
+            far.content: [0.9, 0.4359, 0.0],
+        },
+        query_vectors={"量子纠缠": [0.0, 1.0, 0.0]},
+    )
+    config = RetrievalConfig(min_similarity=0.99, rerank=False)
+
+    result = retrieve_memory(session, 1, [1], query="schema", config=config, backend=backend)
+
+    assert result.mode == "hybrid"
+    assert ids(result) == {best.id, close.id}, "a near-top candidate passes the relative gate"
+    assert far.id not in ids(result)
+    assert len(sum(backend.document_calls, [])) == 3
+
+    weak = retrieve_memory(session, 1, [1], query="量子纠缠", config=config, backend=backend)
+    assert weak.mode == "hybrid" and not weak.facts
+    assert len(backend.document_calls) == 1, "cached vectors are reused for the gate"
+
+    strict = RetrievalConfig(min_similarity=0.99, rerank=False, relative_similarity_margin=0.0)
+    assert ids(
+        retrieve_memory(session, 1, [1], query="schema", config=strict, backend=backend)
+    ) == {best.id}
+
+
+def test_rendered_facts_carry_sources_with_ids_and_titles_only(session):
+    path = remember(session, "当前路径：schema 校验先于工具执行。")
+    other = remember(session, "另一棵树：schema 校验要考虑版本兼容。", tree_id=2, source_node_id=4)
+    empty = retrieve_memory(session, 1, [1], query="量子纠缠", backend=Backend())
+    assert empty.sources == [] and empty.facts == []
+    result = retrieve_memory(
+        session,
+        1,
+        [1],
+        query="schema 校验",
+        config=RetrievalConfig(include_other_trees=True),
+        backend=Backend([path.content, other.content]),
+    )
+    assert result.sources == [
+        {
+            "memory_id": path.id,
+            "source_node_id": 1,
+            "tree_id": 1,
+            "tree_title": "学习",
+            "scope": "path",
+        },
+        {
+            "memory_id": other.id,
+            "source_node_id": 4,
+            "tree_id": 2,
+            "tree_title": "另一棵树",
+            "scope": "other",
+        },
+    ]
+    assert [item["memory_id"] for item in result.sources] == [hit.memory_id for hit in result.facts]
+    assert "schema" not in str(result.sources), "sources never carry memory text"

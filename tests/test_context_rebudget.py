@@ -78,8 +78,9 @@ def test_initial_context_reserves_only_missing_schema_allowance(protocol):
     )
     reserved_room = allowance - actual_cost
     assert diagnostics["compacted"]
-    assert estimate_request_tokens(system, messages, tools, protocol) <= (
-        policy.input_budget - policy.tool_reserve - reserved_room
+    # Compaction fills only the compaction share of the room left after reserves.
+    assert estimate_request_tokens(system, messages, tools, protocol) <= int(
+        (policy.input_budget - policy.tool_reserve - reserved_room) * policy.compaction_ratio
     )
     # Loading the reserved definitions must not consume the space for tool results
     # or require another lossy context pass before the first actual tool call.

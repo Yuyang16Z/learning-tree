@@ -8,12 +8,15 @@ import time
 from dataclasses import dataclass, field
 from uuid import uuid4
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import delete
 from sqlalchemy.orm import defer
 from sqlmodel import Session, select
 
+from ..answer_sources import resolve_sources, scrub_sources, sources_for_storage
+from ..calibration import calibration_sample, record_usage
+from ..config import settings
 from ..context import BASE_SYSTEM, build_context, context_messages, make_content
 from ..context_budget import ContextBudgetExceeded, ContextPolicy, estimate_request_tokens
 from ..context_sources import SOURCE_TOOL_DEF, SOURCE_TOOL_NAME, make_source_reader
@@ -26,7 +29,15 @@ from ..document_context import (
 )
 from ..documents import DocumentAttachment, document_summary, resolve_documents
 from ..learning_summaries import invalidate_summaries, summarize_history
-from ..llm import LLMSpec, complete, run_agent, stream_chat
+from ..llm import (
+    LLMSpec,
+    complete,
+    rejects_tools,
+    remember_tools_unsupported,
+    run_agent,
+    stream_chat,
+    tools_unsupported,
+)
 from ..models import (
     Memory,
     MemoryEmbedding,
@@ -34,8 +45,12 @@ from ..models import (
     Node,
     PreferenceExtraction,
     PreferenceSupplement,
+    ToolResult,
 )
-from ..schemas import AskIn, BranchIn, ExplainIn, NodePatch, StopIn, TitleIn
+from ..retrieval import read_retrieval_settings
+from ..return_summary import build_return_summary
+from ..schemas import UNDERSTANDING_LEVELS, AskIn, BranchIn, ExplainIn, NodePatch, StopIn, TitleIn
+from ..search_index import HISTORY_TOOL_DEF, HISTORY_TOOL_NAME, make_history_search
 from ..service import (
     assemble_tools,
     extract_and_save,
@@ -49,7 +64,18 @@ from ..service import (
 )
 from ..title_generation import fallback_title, summarize_question
 from ..tool_catalog import SEARCH_TOOL_DEF, ToolCatalog, needs_catalog, tool_definition_cost
+from ..tool_results import (
+    PREVIEW_CHARS,
+    TOOL_RESULT_TOOL_DEF,
+    TOOL_RESULT_TOOL_NAME,
+    find_result,
+    make_tool_result_reader,
+    page,
+    portable_steps,
+    stored_text,
+)
 from ..tree_identity import record_node_id
+from .memory_router import restore_superseded
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
 _REQUEST_LOCK = threading.RLock()
@@ -70,9 +96,13 @@ class Generation:
     text: list[str] = field(default_factory=list)
     reasoning: list[str] = field(default_factory=list)
     steps: list[dict] = field(default_factory=list)
+    # Memory records given to the model for this answer (ids and titles only).
+    sources: list[dict] = field(default_factory=list)
     status: str = "pending"
     error: str | None = None
     message_id: int | None = None
+    # Numbers only (estimates, usage, timings); filled once the answer ends.
+    diagnostics: dict | None = None
     # Viewers waiting for new events, as (event loop, asyncio.Event) pairs. The producer
     # thread wakes them instead of each viewer polling the log on a timer.
     waiters: set = field(default_factory=set)
@@ -96,6 +126,51 @@ class Generation:
 _GENERATIONS: dict[int, Generation] = {}
 _CANCELLED_REQUESTS: dict[tuple[int, str], float] = {}
 _STREAM_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+# Appended to a model-facing tool result whose complete text is longer than it.
+_COMPLETE_RESULT_NOTE = (
+    "\n[完整结果共 {total} 字，已保存；可调用 read_tool_result(call_index={index}) 分页阅读。]"
+)
+# The endpoint rejected tools the user selected; retrying the same request cannot help.
+TOOLS_REJECTED_ERROR = (
+    "模型接口拒绝了本次请求中的工具（可能不支持工具调用）。"
+    "请换用支持工具的模型，或取消选择工具后重试。"
+)
+
+
+def _plain_on_rejected_tools(agent, spec: LLMSpec, plain, stopped=lambda: False):
+    """Relay the agent's events, unless its first request is rejected for carrying tools:
+    then remember the endpoint and answer through `plain()` instead. Only the implicit
+    read-only readers ride along here, and nothing was relayed before the rejection.
+    A Stop that arrived while the rejected request was in flight ends the answer here:
+    no further provider request is sent for it."""
+    try:
+        first = next(agent)
+    except StopIteration:
+        return
+    except Exception as exc:
+        if not rejects_tools(exc):
+            raise
+        remember_tools_unsupported(spec)
+        if stopped():
+            return
+        yield from plain()
+        return
+    yield first
+    yield from agent
+
+
+def _with_result_reader(definitions: list[dict], is_mock: bool) -> list[dict]:
+    """Tool rounds advertise read_tool_result from the first round on, not only once a
+    tool has run: providers cache a request's prefix, tool definitions first, so a list
+    that grew after the first call would make the next request miss that cache. Before
+    any call the reader answers result_unavailable. A selected tool never takes its
+    name, and demo answers and tool-free requests get no reader."""
+    if not definitions or is_mock:
+        return definitions
+    return [
+        *(item for item in definitions if item["function"]["name"] != TOOL_RESULT_TOOL_NAME),
+        TOOL_RESULT_TOOL_DEF,
+    ]
 
 
 def discard_node_work(node_ids) -> None:
@@ -110,6 +185,7 @@ def discard_node_work(node_ids) -> None:
                 generation.text.clear()
                 generation.reasoning.clear()
                 generation.steps.clear()
+                generation.sources.clear()
                 generation.log.clear()
             generation.wake()
 
@@ -232,6 +308,10 @@ def node_metadata(
         "source_start": node.source_start,
         "source_end": node.source_end,
         "learning_note": node.learning_note,
+        # Unknown stored values read as "not marked" rather than failing a listing.
+        "understanding": (
+            node.understanding if node.understanding in UNDERSTANDING_LEVELS else None
+        ),
         "revision_of": node.revision_of,
         "request_id": node.request_id,
     }
@@ -252,7 +332,22 @@ def _message_documents(session: Session, message: Message | None) -> list[dict]:
     ]
 
 
-def _qa_rows(node: Node, messages: list[Message], session: Session) -> list[dict]:
+def _answer_sources(session: Session, messages: list[Message]) -> dict[int, list[dict] | None]:
+    """Current provenance of these answers, resolved together: three queries in all,
+    entries whose records were deleted dropped and topic titles read live."""
+    answers = [message for message in messages if message.sources]
+    resolved = resolve_sources(session, [message.sources for message in answers])
+    return {message.id: sources for message, sources in zip(answers, resolved, strict=True)}
+
+
+def _qa_rows(
+    node: Node,
+    messages: list[Message],
+    session: Session,
+    sources: dict[int, list[dict] | None] | None = None,
+) -> list[dict]:
+    if sources is None:
+        sources = _answer_sources(session, messages)
     # Preserve all legacy Q/A pairs without changing message or branch IDs.
     pairs: list[tuple[Message | None, list[Message]]] = []
     for message in messages:
@@ -285,6 +380,8 @@ def _qa_rows(node: Node, messages: list[Message], session: Session) -> list[dict
                 "answer": answer.content if answer else None,
                 "reasoning": answer.reasoning if answer else None,
                 "steps": answer.steps if answer else None,
+                "diagnostics": answer.diagnostics if answer else None,
+                "sources": sources.get(answer.id) if answer else None,
                 "answered_by": answer.answered_by if answer else None,
                 "attempts": [
                     {"message_id": m.id, "status": m.status, "content": m.content}
@@ -306,6 +403,7 @@ def _get(session: Session, node_id: int) -> Node:
 def get_node(node_id: int, session: Session = Depends(get_session)) -> dict:
     node = _get(session, node_id)
     msgs = get_messages(session, node_id)
+    sources = _answer_sources(session, msgs)
     return {
         "id": node.id,
         "tree_id": node.tree_id,
@@ -317,6 +415,7 @@ def get_node(node_id: int, session: Session = Depends(get_session)) -> dict:
         "messages": [
             {
                 **m.model_dump(exclude={"created_at", "node_id"}),
+                "sources": sources.get(m.id),
                 "documents": _message_documents(session, m),
             }
             for m in msgs
@@ -326,12 +425,45 @@ def get_node(node_id: int, session: Session = Depends(get_session)) -> dict:
 
 @router.get("/{node_id}/thread")
 def get_thread_route(node_id: int, session: Session = Depends(get_session)) -> dict:
+    thread = get_thread(session, _get(session, node_id))
+    sources = _answer_sources(session, [message for _, messages in thread for message in messages])
     return {
         "nodes": [
-            row
-            for node, messages in get_thread(session, _get(session, node_id))
-            for row in _qa_rows(node, messages, session)
+            row for node, messages in thread for row in _qa_rows(node, messages, session, sources)
         ]
+    }
+
+
+@router.get("/{node_id}/return-summary")
+def get_return_summary(node_id: int, session: Session = Depends(get_session)) -> dict:
+    """Local excerpts of what the branch around this node added; no model call, no writes."""
+    summary = build_return_summary(session, _get(session, node_id))
+    if summary is None:
+        raise HTTPException(404, "这个节点不在分支中")
+    return summary
+
+
+@router.get("/{node_id}/tool-results/{call_index}")
+def get_tool_result(
+    node_id: int,
+    call_index: int,
+    request_id: str = Query(min_length=1, max_length=100),
+    start: int = Query(default=0, ge=0),
+    max_chars: int = Query(default=20000, ge=1, le=50000),
+    session: Session = Depends(get_session),
+) -> dict:
+    """One page of the complete text a tool call returned during an answer."""
+    _get(session, node_id)
+    row = find_result(session, node_id, request_id, call_index)
+    if row is None:
+        raise HTTPException(404, "工具结果不存在或已删除。")
+    return {
+        "node_id": node_id,
+        "request_id": request_id,
+        "call_index": call_index,
+        "tool": row.tool_name,
+        "truncated": row.truncated,
+        **page(row.content, start, max_chars),
     }
 
 
@@ -339,9 +471,15 @@ def get_thread_route(node_id: int, session: Session = Depends(get_session)) -> d
 def patch_node(node_id: int, body: NodePatch, session: Session = Depends(get_session)) -> dict:
     with _REQUEST_LOCK:
         node = _get(session, node_id)
-        if "learning_note" in body.model_fields_set:
+        fields = body.model_fields_set
+        if "learning_note" in fields:
             invalidate_summaries(session, node_ids={node_id})
             node.learning_note = body.learning_note.strip() if body.learning_note else None
+        if "understanding" in fields:
+            # A learner's mark, not source content: summaries, titles and request
+            # state stay as they are. The ORM update still reaches the change feed.
+            node.understanding = body.understanding
+        if fields & {"learning_note", "understanding"}:
             session.add(node)
             session.commit()
     return get_node(node_id, session)
@@ -369,9 +507,19 @@ def delete_node(node_id: int, session: Session = Depends(get_session)) -> dict:
         session.execute(delete(PreferenceExtraction).where(PreferenceExtraction.node_id.in_(ids)))
         for message in session.exec(select(Message).where(Message.node_id.in_(ids))).all():
             session.delete(message)
+        session.execute(delete(ToolResult).where(ToolResult.node_id.in_(ids)))
+        deleted_memories = {}
         for memory in session.exec(select(Memory).where(Memory.source_node_id.in_(ids))).all():
             session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory.id))
+            deleted_memories[memory.id] = memory.superseded_by
             session.delete(memory)
+        # Earlier facts these facts corrected pass to a correction that remains or become
+        # current again, and answers elsewhere keep no provenance pointing into the subtree.
+        session.flush()
+        restore_superseded(session, deleted_memories)
+        scrub_sources(session, node_ids=ids, memory_ids=list(deleted_memories))
+        # The full-text search_index rows of these messages, memories and notes are
+        # removed by the SQLite triggers in app/search_index.py as the rows go.
         # References outside the deleted subtree must not point to nonexistent nodes.
         for node in session.exec(
             select(Node).where(Node.source_node_id.in_(ids) | Node.revision_of.in_(ids))
@@ -588,7 +736,7 @@ def explain(node_id: int, body: ExplainIn, session: Session = Depends(get_sessio
         if body.locale == "en"
         else f"请解释这段引用：{body.text}"
     )
-    spec = to_spec(cfg)
+    spec = to_spec(cfg, session)
     try:
         system, messages = build_context(
             ancestors,
@@ -634,7 +782,22 @@ def _persist(target_id: int, generation: Generation, label: str) -> None:
     # Deletion must not slip between the source check and assistant-message INSERT.
     with _REQUEST_LOCK, generation.lock, Session(engine) as session:
         node = session.get(Node, target_id)
-        if not node or node.request_id != generation.request_id:
+        if not node:
+            return
+        if node.request_id != generation.request_id:
+            # A retry took the node over after Stop. The producer reports diagnostics
+            # only once its stream returns; keep them on the stopped attempt's own
+            # message, and touch nothing the retry owns.
+            stopped = session.get(Message, generation.message_id) if generation.message_id else None
+            if (
+                stopped is not None
+                and stopped.node_id == target_id
+                and stopped.diagnostics is None
+                and generation.diagnostics
+            ):
+                stopped.diagnostics = generation.diagnostics
+                session.add(stopped)
+                session.commit()
             return
         message = session.get(Message, generation.message_id) if generation.message_id else None
         if message is None:
@@ -642,12 +805,40 @@ def _persist(target_id: int, generation: Generation, label: str) -> None:
         message.content = "".join(generation.text)
         message.reasoning = "".join(generation.reasoning) or None
         message.steps = list(generation.steps) or None
+        message.diagnostics = generation.diagnostics or None
+        # Ids only, and only records that still exist: a deletion may have come first.
+        message.sources = sources_for_storage(session, generation.sources)
         message.status = generation.status
         node.status, node.error = generation.status, generation.error
         session.add(message)
         session.add(node)
         session.commit()
         generation.message_id = message.id
+
+
+def _store_tool_result(
+    target_id: int, generation: Generation, call_index: int, name: str, arguments, text: str
+) -> bool:
+    """Keep the complete text of one call. Like _persist, a late writer cannot add rows
+    to a deleted node or under a request that a retry has replaced."""
+    content, truncated = stored_text(text)
+    with _REQUEST_LOCK, Session(engine) as session:
+        node = session.get(Node, target_id)
+        if not node or node.request_id != generation.request_id:
+            return False
+        session.add(
+            ToolResult(
+                node_id=target_id,
+                request_id=generation.request_id,
+                call_index=call_index,
+                tool_name=name,
+                arguments=arguments if isinstance(arguments, dict) else None,
+                content=content,
+                truncated=truncated,
+            )
+        )
+        session.commit()
+    return True
 
 
 @router.post("/{node_id}/stop")
@@ -763,7 +954,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
         cfg = resolve_config(session, body.config_id)
         if not cfg:
             raise HTTPException(400, "请先在设置中添加模型")
-        spec = to_spec(cfg)
+        spec = to_spec(cfg, session)
+        config_id = cfg.id
         previous_messages = get_messages(session, node_id)
         if node.status == "pending" or (
             node_id in _GENERATIONS and not _GENERATIONS[node_id].stop.is_set()
@@ -869,7 +1061,9 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     images=previous.images,
                     document_ids=previous.document_ids,
                     reasoning=previous.reasoning,
-                    steps=previous.steps,
+                    steps=portable_steps(previous.steps),
+                    diagnostics=previous.diagnostics,
+                    sources=sources_for_storage(session, previous.sources),
                 )
                 session.add(copied)
                 copied_history.append(copied)
@@ -935,6 +1129,83 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
         stream = None
         title_queued = False
         last_checkpoint = time.monotonic()
+        started_at = time.monotonic()
+        model_started: float | None = None
+        timings = {"retrieval": 0.0, "tools": 0.0, "summary": 0.0}
+        # Provider rounds (estimates, reported usage) collected by stream_chat/run_agent.
+        usage: dict = {}
+        context_stats: dict = {}
+        # Memory records that survived context assembly (ids and titles only).
+        kept_sources: list[dict] = []
+        # The tool call in progress (numbered from 1) and complete texts by call index.
+        call: dict = {"index": 0, "args": None}
+        complete_texts: dict[int, str] = {}
+
+        def report_diagnostics() -> None:
+            """Numbers only: never the protected/stable system text held in context_stats."""
+            if model_started is None:
+                return
+            now = time.monotonic()
+            rounds = usage.get("rounds") or []
+
+            def total(key: str) -> int | None:
+                # A total some request did not report is unknown: a partial sum would
+                # set an answer-wide estimate against part of its usage.
+                values = [r.get(key) for r in rounds]
+                if not values or any(value is None for value in values):
+                    return None
+                return int(sum(values))
+
+            def largest() -> dict | None:
+                # The request with the largest estimate (the later one on a tie): what a
+                # single request carried, which the summed totals are not.
+                if not rounds:
+                    return None
+                _, peak = max(
+                    enumerate(rounds),
+                    key=lambda item: (item[1].get("estimated_input_tokens") or 0, item[0]),
+                )
+
+                def number(key: str) -> int | None:
+                    value = peak.get(key)
+                    return None if value is None else int(value)
+
+                return {
+                    "estimated_input_tokens": int(peak.get("estimated_input_tokens") or 0),
+                    "actual_input_tokens": number("input_tokens"),
+                    "cached_input_tokens": number("cached_input_tokens"),
+                }
+
+            def ms(seconds: float) -> int:
+                return int(round(max(0.0, seconds) * 1000))
+
+            report = {
+                # Summed over every provider request: each tool round and the final answer.
+                "estimated_input_tokens": total("estimated_input_tokens")
+                or int(context_stats.get("estimated_input_tokens") or 0),
+                "actual_input_tokens": total("input_tokens"),
+                "cached_input_tokens": total("cached_input_tokens"),
+                "output_tokens": total("output_tokens"),
+                "requests": len(rounds),
+                "largest_request": largest(),
+                "compacted": bool(context_stats.get("compacted")),
+                "memory_count": len(kept_sources),
+                "tool_rounds": int(usage.get("tool_rounds") or 0),
+                # "time" or "tokens" when an agent budget ended the tool rounds early.
+                "tool_budget_stop": usage.get("tool_budget_stop"),
+                "calibration_ratio": round(float(spec.calibration), 3),
+                "timings_ms": {
+                    "retrieval": ms(timings["retrieval"]),
+                    "tools": ms(timings["tools"]),
+                    "summary": ms(timings["summary"]),
+                    "model": ms(now - model_started - timings["tools"]),
+                    "total": ms(now - started_at),
+                },
+            }
+            with generation.lock:
+                generation.diagnostics = report
+            generation.emit({"diagnostics": report})
+
         try:
             policy = ContextPolicy.from_spec(spec)
             if generation.stop.is_set():
@@ -956,9 +1227,18 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             if generation.stop.is_set():
                 return
             memory = ""
+            # Scope settings are snapshotted now; the history tool keeps this view
+            # even if the user changes the setting while the answer runs.
+            scope_snapshot = {"include_siblings": False, "include_other_trees": False}
             # Local inference must not hold _REQUEST_LOCK: stop/retry remain responsive.
             if not is_mock:
+                retrieval_started = time.monotonic()
                 with Session(engine) as memory_session:
+                    scopes = read_retrieval_settings(memory_session)
+                    scope_snapshot = {
+                        "include_siblings": scopes.include_siblings,
+                        "include_other_trees": scopes.include_other_trees,
+                    }
                     memory = fetch_memory_note(
                         memory_session,
                         tree_id,
@@ -967,13 +1247,22 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                         quoted_text=memory_quote,
                         # These sources are mandatory even after compaction.
                         existing_text=memory_quote + "\n" + (context_target.learning_note or ""),
+                        # The same snapshot binds the history tool below.
+                        scopes=scope_snapshot,
                     )
+                timings["retrieval"] = time.monotonic() - retrieval_started
+            # Test doubles return plain strings; provenance is optional.
+            memory_sources = list(getattr(memory, "sources", None) or [])
             if generation.stop.is_set():
                 return
             with Session(engine) as tool_session:
                 tool_defs, tool_router = assemble_tools(tool_session, requested_tools)
+            # User-selected tools, before the implicit document reader joins them.
+            tools_requested = bool(tool_defs)
+            # An endpoint that rejected tools before gets no implicit readers either.
+            readers_off = not tools_requested and tools_unsupported(spec)
             document_reader = None
-            if context_documents and not is_mock:
+            if context_documents and not is_mock and not readers_off:
                 tool_defs = [*tool_defs, DOCUMENT_TOOL_DEF]
                 document_reader = make_document_reader(
                     engine,
@@ -984,16 +1273,35 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 )
             if generation.stop.is_set():
                 return
-            context_stats = {}
             context_defs = tool_defs + ([SOURCE_TOOL_DEF] if tool_defs and not is_mock else [])
+            # The read-only history search joins tool rounds, and is offered on its
+            # own when the user widened memory recall; demo mode never gets it.
+            history_wanted = (
+                not is_mock
+                and not readers_off
+                and (
+                    tools_requested
+                    or scope_snapshot["include_siblings"]
+                    or scope_snapshot["include_other_trees"]
+                )
+            )
+            if history_wanted:
+                context_defs = [*context_defs, HISTORY_TOOL_DEF]
+            context_defs = _with_result_reader(context_defs, is_mock)
             tool_catalog = None
             # A checked group grants availability, not an obligation to attach
             # every server's schema to every request. Reserve a stable allowance
             # so later discovery cannot crowd out the current question.
+            reader_names = (
+                SOURCE_TOOL_NAME,
+                DOCUMENT_TOOL_NAME,
+                HISTORY_TOOL_NAME,
+                TOOL_RESULT_TOOL_NAME,
+            )
             pinned = [
                 definition
                 for definition in context_defs
-                if definition["function"]["name"] in (SOURCE_TOOL_NAME, DOCUMENT_TOOL_NAME)
+                if definition["function"]["name"] in reader_names
             ]
             core_cost = estimate_request_tokens(
                 preflight_stats["protected_system"],
@@ -1011,6 +1319,11 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     budget=schema_budget,
                     pinned_names=tuple(item["function"]["name"] for item in pinned),
                     query=question_text,
+                    # The catalog never registers the reader's reserved name as a
+                    # selected tool; it advertises the agent's own definition instead.
+                    owned=tuple(
+                        item for item in pinned if item["function"]["name"] == TOOL_RESULT_TOOL_NAME
+                    ),
                 )
                 context_defs = tool_catalog.definitions
             request_system, llm_messages = build_context(
@@ -1027,8 +1340,15 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 documents=context_documents,
                 tool_schema_budget=schema_budget if tool_catalog else 0,
             )
-            if context_stats["compacted"] and not context_defs and not is_mock:
-                context_defs = [SOURCE_TOOL_DEF]
+            # Compaction makes the read-only readers available even without tools.
+            present = {item["function"]["name"] for item in context_defs}
+            missing_readers = [
+                definition
+                for definition in (SOURCE_TOOL_DEF, HISTORY_TOOL_DEF)
+                if definition["function"]["name"] not in present
+            ]
+            if context_stats["compacted"] and missing_readers and not is_mock and not readers_off:
+                context_defs = _with_result_reader([*context_defs, *missing_readers], is_mock)
                 request_system, llm_messages = build_context(
                     ancestors,
                     context_target,
@@ -1041,8 +1361,18 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     protocol=spec.protocol,
                     diagnostics=context_stats,
                     documents=context_documents,
+                    tool_schema_budget=schema_budget if tool_catalog else 0,
                 )
             source_reader = None
+            history_search = None
+            if any(item["function"]["name"] == HISTORY_TOOL_NAME for item in context_defs):
+                history_search = make_history_search(
+                    engine,
+                    tree_id,
+                    memory_source_ids,
+                    scope_snapshot,
+                    max_chars=max(32, min(1200, (policy.tool_reserve - 1024) // 4)),
+                )
             # Tool results can force compaction on later rounds even when the
             # initial history fits. Make read-only history access available then.
             if any(item["function"]["name"] == SOURCE_TOOL_NAME for item in context_defs):
@@ -1055,12 +1385,24 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     max_page_chars=max(32, min(1200, (policy.tool_reserve - 1024) // 4)),
                     max_page_items=max(1, min(10, (policy.tool_reserve - 700) // 700)),
                 )
+            # Complete results of this answer's own calls, advertised in every tool round.
+            tool_result_reader = (
+                make_tool_result_reader(
+                    engine,
+                    target_id,
+                    request_id,
+                    max_page_chars=max(200, min(2000, policy.input_budget // 8)),
+                )
+                if any(item["function"]["name"] == TOOL_RESULT_TOOL_NAME for item in context_defs)
+                else None
+            )
             if generation.stop.is_set():
                 return
             if context_stats["compacted"] and not is_mock:
                 # Tool selection and source-reader overhead are now final. Only
                 # this pass may generate a summary; preflight never calls a model.
                 generation.emit({"context_status": "summarizing"})
+                summary_started = time.monotonic()
                 try:
                     request_system, llm_messages = build_context(
                         ancestors,
@@ -1086,24 +1428,71 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                         ),
                     )
                 finally:
+                    timings["summary"] = time.monotonic() - summary_started
                     generation.emit({"context_status": "ready"})
                 if generation.stop.is_set():
                     return
+            # Report only the memory records that survived context assembly, so the
+            # "referenced" line under the answer never claims an omitted record.
+            kept_sources = [
+                source
+                for source in memory_sources
+                if f"- [记忆 {source['memory_id']}；" in request_system
+                or f"- [记忆 {source['memory_id']}]" in request_system
+            ]
+            if kept_sources:
+                with generation.lock:
+                    generation.sources = kept_sources
+                generation.emit({"sources": kept_sources})
             if title_needed:
                 _queue_branch_title(target_id, spec)
                 title_queued = True
+
+            def plain_answer():
+                return (
+                    {"type": kind, "text": chunk}
+                    for kind, chunk in stream_chat(
+                        spec,
+                        request_system,
+                        llm_messages,
+                        deep=body.deep_think,
+                        diagnostics=usage,
+                        cache_prefix=context_stats.get("stable_system"),
+                    )
+                )
+
             tool_defs = context_defs
             if tool_defs:
                 execute = make_executor(tool_router)
 
-                def guarded_execute(name, arguments):
-                    if generation.stop.is_set():
-                        raise RuntimeError("generation cancelled before tool execution")
+                def run_tool(name, arguments):
                     if name == SOURCE_TOOL_NAME and source_reader is not None:
                         return source_reader(arguments)
                     if name == DOCUMENT_TOOL_NAME and document_reader is not None:
                         return document_reader(arguments)
+                    if name == HISTORY_TOOL_NAME and history_search is not None:
+                        return history_search(arguments)
+                    if name == TOOL_RESULT_TOOL_NAME and tool_result_reader is not None:
+                        return tool_result_reader(arguments)
                     return execute(name, arguments)
+
+                def guarded_execute(name, arguments):
+                    if generation.stop.is_set():
+                        raise RuntimeError("generation cancelled before tool execution")
+                    tool_started = time.monotonic()
+                    try:
+                        result = run_tool(name, arguments)
+                    finally:
+                        timings["tools"] += time.monotonic() - tool_started
+                    # The executor may carry the complete text of a bounded MCP result.
+                    text = str(result)
+                    complete = getattr(result, "full", text)
+                    complete_texts[call["index"]] = complete
+                    if len(complete) > len(text):
+                        text += _COMPLETE_RESULT_NOTE.format(
+                            total=len(complete), index=call["index"]
+                        )
+                    return text
 
                 stream = run_agent(
                     spec,
@@ -1112,27 +1501,63 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     tool_defs,
                     guarded_execute,
                     protected_system=context_stats["protected_system"],
+                    diagnostics=usage,
+                    cache_prefix=context_stats.get("stable_system"),
+                    time_limit_seconds=settings.agent_time_limit_seconds,
+                    tool_token_budget=settings.agent_tool_token_budget,
                     **({"tool_catalog": tool_catalog, "max_rounds": 6} if tool_catalog else {}),
                     **({"deep": True} if body.deep_think else {}),
                 )
-            else:
-                stream = (
-                    {"type": kind, "text": chunk}
-                    for kind, chunk in stream_chat(
-                        spec, request_system, llm_messages, deep=body.deep_think
+                if not tools_requested:
+                    # Only implicit readers ride along: an endpoint without tool
+                    # support still answers, without them.
+                    stream = _plain_on_rejected_tools(
+                        stream, spec, plain_answer, generation.stop.is_set
                     )
-                )
+            else:
+                stream = plain_answer()
+            model_started = time.monotonic()
             for event in stream:
                 if generation.stop.is_set():
                     break
+                kind = event["type"]
+                reference: dict = {}
+                if kind == "tool_start":
+                    # Calls are sequential: this index names the call until its tool_end.
+                    call.update(index=call["index"] + 1, args=event["args"])
+                elif kind == "tool_end":
+                    text = str(event["result"])
+                    complete = complete_texts.pop(call["index"], text)
+                    try:
+                        stored = _store_tool_result(
+                            target_id,
+                            generation,
+                            call["index"],
+                            event["name"],
+                            call["args"],
+                            complete,
+                        )
+                    except Exception:
+                        stored = False  # The preview still reaches the step.
+                    preview = text[:PREVIEW_CHARS]
+                    reference = {"truncated": len(complete) > len(preview)}
+                    if stored:
+                        reference["call_index"] = call["index"]
                 with generation.lock:
-                    kind = event["type"]
                     if kind == "tool_start":
                         outgoing = {"tool_start": {"name": event["name"], "args": event["args"]}}
                     elif kind == "tool_end":
-                        result = str(event["result"])[:3000]
-                        generation.steps.append({"tool": event["name"], "result": result})
-                        outgoing = {"tool_end": {"name": event["name"], "result": result}}
+                        generation.steps.append(
+                            {
+                                "tool": event["name"],
+                                "result": preview,
+                                **reference,
+                                **({"request_id": request_id} if stored else {}),
+                            }
+                        )
+                        outgoing = {
+                            "tool_end": {"name": event["name"], "result": preview, **reference}
+                        }
                     elif kind == "reasoning":
                         generation.reasoning.append(event["text"])
                         outgoing = {"reasoning": event["text"]}
@@ -1161,11 +1586,26 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     if generation.stop.is_set()
                     else str(exc)
                     if isinstance(exc, ContextBudgetExceeded)
+                    else TOOLS_REJECTED_ERROR
+                    if rejects_tools(exc)
                     else f"回答未完成（{type(exc).__name__}），可重试。"
                 )
         finally:
             if generation.status == "pending":
                 generation.status, generation.error = "interrupted", "生成中断，可重试。"
+            try:
+                report_diagnostics()
+                if generation.status == "complete" and not is_mock:
+                    # Calibrate the estimator from real usage only, pairing each request's
+                    # estimate with its own reported input; demo answers never learn.
+                    sample = calibration_sample(usage.get("rounds") or [])
+                    if sample:
+                        # Folded only into the model this answer used: not into a model
+                        # that was deleted or switched to another one meanwhile.
+                        identity = (spec.protocol, spec.base_url, spec.llm_model)
+                        record_usage(engine, config_id, *sample, model=identity)
+            except Exception:
+                pass
             if stream and hasattr(stream, "close"):
                 try:
                     stream.close()

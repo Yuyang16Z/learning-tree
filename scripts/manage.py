@@ -44,6 +44,8 @@ def isolated_env(database: Path) -> dict[str, str]:
         "DEFAULT_LLM_MODEL": "mock",
         "TAVILY_API_KEY": "",
         "MEMORY_RETRIEVAL_MODE": "lexical",
+        # Beside the database: checks and browser tests never touch the real token.
+        "ACCESS_TOKEN_FILE": (database.parent / "phone-access-token").resolve().as_posix(),
         "VITE_API_BASE": "/api",
     }
 

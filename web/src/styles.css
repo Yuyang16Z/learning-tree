@@ -779,6 +779,8 @@ input[type="checkbox"] {
 .model-advanced { margin: 12px 0; color: var(--muted); font-size: 12px; }
 .model-advanced summary { cursor: pointer; }
 .model-advanced .field { margin-top: 12px; }
+.model-detect-row { display: flex; gap: 6px; align-items: center; }
+.model-detect-row input { flex: 1; min-width: 0; }
 .form-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -924,6 +926,9 @@ input[type="checkbox"] {
 /* Learning workspace: quiet navigation, generous reading space. */
 :root { --accent: #23674f; --accent-bg: #eaf3ed; --purple: #23674f; --purple-bg: #eaf3ed; }
 [data-theme="dark"] { --accent: #90c7ac; --accent-bg: #19392d; --purple: #90c7ac; --purple-bg: #19392d; }
+/* Understanding marks: open (not yet), partial (roughly), clear (can explain). */
+:root { --u-open: #a8461a; --u-open-bg: #fbece2; --u-partial: #7a5c08; --u-partial-bg: #f7efd6; --u-clear: #0f6e56; --u-clear-bg: #e1f5ee; }
+[data-theme="dark"] { --u-open: #f2a172; --u-open-bg: #3d2618; --u-partial: #e3c565; --u-partial-bg: #362e13; --u-clear: #5dcaa5; --u-clear-bg: #103d31; }
 body { -webkit-font-smoothing: antialiased; }
 button:disabled { cursor: default; }
 button:focus-visible, a:focus-visible { outline: 2px solid var(--teal); outline-offset: 3px; }
@@ -980,3 +985,26 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--teal); outline-
 @media (pointer: coarse) {
   input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, textarea { font-size: 16px !important; }
 }
+
+/* Settings → Memory: retrieval scope toggles under the status row. */
+.memory-scopes { border: 0; padding: 0; margin: 8px 0 0; display: grid; gap: 6px; font-size: 12px; min-width: 0; }
+.memory-scopes legend { padding: 0; margin-bottom: 2px; color: var(--muted); font-size: 11px; }
+.memory-scopes label { display: flex; align-items: center; gap: 7px; }
+.memory-scopes input { margin: 0; flex: none; }
+
+/* Settings → MCP: local command or remote HTTP server, header rows and the private-address opt-in. */
+.mcp-config-form { max-height: calc(100dvh - 40px); overflow-y: auto; }
+.mcp-transport { border: 0; padding: 0; margin: 0 0 12px; display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; min-width: 0; }
+.mcp-transport legend { padding: 0; margin-bottom: 4px; color: var(--muted); font-size: 12px; }
+.mcp-transport label { display: flex; align-items: center; gap: 6px; }
+.mcp-transport input { margin: 0; }
+.mcp-field-title { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.mcp-header-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr) auto; gap: 6px; margin-bottom: 6px; }
+.mcp-header-row .btn { padding-inline: 10px; }
+.mcp-config-form .field > .btn { margin-bottom: 6px; }
+.mcp-private { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.mcp-private input { margin: 0; }
+.mcp-warning { color: var(--danger); margin-bottom: 8px; }
+
+/* A phone whose pairing is missing or was rotated on the computer. */
+.pairing-required { padding: 10px 22px; font-size: 13px; line-height: 1.6; background: var(--err-bg); color: var(--danger); border-bottom: 1px solid var(--err-border); }

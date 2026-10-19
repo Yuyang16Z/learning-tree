@@ -1,7 +1,9 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useState, useSyncExternalStore } from "react";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import { localizeError, mcpDisplayName } from "../i18n/workspace";
+import { mcpTarget } from "../lib/mcpRemote";
+import { createScopeStore, type ScopeChange, type ScopeState, type ScopeStore } from "../lib/retrievalScopes";
 import type { McpServer, MemoryRetrievalStatus, ModelCfg, Tree } from "../types";
 import { MemoryPanel } from "./MemoryPanel";
 import { PhoneAccessPanel } from "./PhoneAccessPanel";
@@ -31,13 +33,19 @@ interface Props {
 
 type Tab = "models" | "mcp" | "phone" | "memory" | "archived" | "appearance" | "language";
 
-function MemoryRetrievalPanel() {
+const NO_SCOPES: ScopeState = { settings: null, saving: false, conflict: null, error: null };
+const noScopeChanges = () => () => {};
+const noScopes = () => NO_SCOPES;
+
+/** Shown on the Memory tab; the scope switches it shows belong to Settings (see ScopeStore). */
+function MemoryRetrievalPanel({ scopes, onScopeChange }: { scopes: ScopeState; onScopeChange: (change: ScopeChange) => void }) {
   const { t } = useI18n();
   const [status, setStatus] = useState<MemoryRetrievalStatus | null>(null);
   const [action, setAction] = useState({ kind: "status", revision: 0 });
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   const [pollingPaused, setPollingPaused] = useState(false);
+  const settings = scopes.settings;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -97,7 +105,17 @@ function MemoryRetrievalPanel() {
       <div className="grow">
         <div>{t("记忆检索", "Memory retrieval")}</div>
         <div className="k" role="status" aria-live="polite">{summary}</div>
-        <div className="k">{t("按当前问题查找相关记忆，话题内容仅来自当前学习路径。", "Finds memories relevant to your question, with topic content limited to the current learning path.")}</div>
+        <div className="k">{t("按当前问题查找相关记忆，话题内容默认仅来自当前学习路径；可在下方扩大范围。", "Finds memories relevant to your question; topic content comes from the current learning path unless you widen it below.")}</div>
+        <fieldset className="memory-scopes">
+          <legend>{t("检索范围", "Memory scope")}</legend>
+          <label><input type="checkbox" checked disabled readOnly />{t("当前学习路径（始终）", "Current learning path (always)")}</label>
+          <label><input type="checkbox" checked={settings?.include_siblings ?? false} disabled={!settings || scopes.saving} onChange={event => onScopeChange({ include_siblings: event.target.checked })} />{t("同主题的其他分支", "Other branches of this topic")}</label>
+          <label><input type="checkbox" checked={settings?.include_other_trees ?? false} disabled={!settings || scopes.saving} onChange={event => onScopeChange({ include_other_trees: event.target.checked })} />{t("其他学习主题（已归档的除外）", "Other learning topics (except archived ones)")}</label>
+          <div className="k">{t("扩大范围后的记忆会单独列出并标注来源，使用比当前路径更小的预算；回答下方会显示参考了哪些记忆。", "Widened memories are listed separately with their origin and use a smaller budget than the path; each answer shows which memories it referenced.")}</div>
+          {scopes.conflict === "reloading" && <div className="k" role="status">{t("检索范围已在别处更新，正在重新载入…", "The retrieval scope changed elsewhere; reloading…")}</div>}
+          {scopes.conflict === "reloaded" && <div className="test-bad" role="alert">{t("检索范围已在别处更新，这里显示的是最新设置；你的更改没有保存。", "The retrieval scope changed elsewhere. The latest settings are shown; your change was not saved.")}</div>}
+          {scopes.error && <div className="test-bad" role="alert">{localizeError(scopes.error)}</div>}
+        </fieldset>
         {status?.state === "not_installed" && (
           <div className="k">
             {t("语义检索为可选增强。在项目目录运行以下命令安装，然后重启应用：", "Semantic retrieval is optional. Run this in the project directory, then restart the app:")}
@@ -136,18 +154,34 @@ export function SettingsModal(props: Props) {
   const [memoryVisited, setMemoryVisited] = useState(false);
   const [memoryDirty, setMemoryDirty] = useState(false);
   const [memoryBusy, setMemoryBusy] = useState(false);
+  // Created with the Memory tab's first visit and kept while Settings is open.
+  const [scopeStore, setScopeStore] = useState<ScopeStore | null>(null);
+  useEffect(() => {
+    if (!memoryVisited) return;
+    const store = createScopeStore({ load: api.getRetrievalSettings, save: api.saveRetrievalSettings });
+    setScopeStore(store);
+    return () => store.close();
+  }, [memoryVisited]);
+  // Read the switches each time the Memory tab is shown, as the panel did when it remounted: a
+  // failed read is retried and a change from another device appears. A running save is left alone.
+  useEffect(() => {
+    if (tab === "memory" && scopeStore) void scopeStore.load();
+  }, [tab, scopeStore]);
+  const scopes = useSyncExternalStore(scopeStore?.subscribe ?? noScopeChanges, scopeStore?.get ?? noScopes);
+  // A save or the reload after a conflict is still running: closing would hide its outcome.
+  const busy = memoryBusy || scopes.saving;
   const [tests, setTests] = useState<Record<number, { ok: boolean; detail: string }>>({});
   const [testing, setTesting] = useState<number | null>(null);
 
   useEffect(() => {
-    if (!memoryDirty && !memoryBusy) return;
+    if (!memoryDirty && !busy) return;
     const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [memoryDirty, memoryBusy]);
+  }, [memoryDirty, busy]);
 
   function canClose() {
-    if (memoryBusy) return false;
+    if (busy) return false;
     return !memoryDirty || window.confirm(t("记忆还有未保存的修改，放弃修改并关闭设置吗？", "You have unsaved memory changes. Discard them and close settings?"));
   }
 
@@ -258,7 +292,7 @@ export function SettingsModal(props: Props) {
                   }}>
                     <span className={"dot " + (s.enabled ? "dot-on" : "dot-off")} />
                     <span className="grow">{mcpDisplayName(s, locale)}</span>
-                    <span className="k mono">{s.command.split(/[\\/]/).pop()}</span>
+                    <span className="k mono">{mcpTarget(s)}</span>
                     <span className="chevron">›</span>
                   </div>
                 ))}
@@ -277,7 +311,7 @@ export function SettingsModal(props: Props) {
                 <MemoryPanel onDirtyChange={setMemoryDirty} onBusyChange={setMemoryBusy} onOpenSource={(treeId, nodeId) => {
                   if (canClose()) { onClose(); props.onOpenMemorySource(treeId, nodeId); }
                 }} />
-                {tab === "memory" && <div className="memory-retrieval-footer"><MemoryRetrievalPanel /></div>}
+                {tab === "memory" && <div className="memory-retrieval-footer"><MemoryRetrievalPanel scopes={scopes} onScopeChange={change => void scopeStore?.update(change)} /></div>}
               </div>
             )}
 
@@ -313,7 +347,7 @@ export function SettingsModal(props: Props) {
 
         <div className="row-between" style={{ marginTop: 14 }}>
           <span />
-          <button className="btn" disabled={memoryBusy} onClick={close}>{t("关闭", "Close")}</button>
+          <button className="btn" disabled={busy} onClick={close}>{t("关闭", "Close")}</button>
         </div>
       </div>
     </div>

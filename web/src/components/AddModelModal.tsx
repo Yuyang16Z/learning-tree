@@ -1,7 +1,9 @@
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
+import { api } from "../api";
 import { useI18n } from "../i18n";
 import { localizeError } from "../i18n/workspace";
-import type { ModelCfg, ModelInput, ModelProtocol } from "../types";
+import { CONTEXT_WINDOW_MAX, CONTEXT_WINDOW_MIN, detectedWindow, detectionRequest, sameDetection } from "../lib/modelDiscovery";
+import type { ModelCfg, ModelDiscovery, ModelInput, ModelProtocol } from "../types";
 
 interface Props {
   isFirst: boolean;
@@ -27,11 +29,39 @@ export function AddModelModal({ isFirst, model, onClose, onAdd }: Props) {
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [detecting, setDetecting] = useState(false);
+  const [detected, setDetected] = useState<{ result: ModelDiscovery; rejected: number | null } | null>(null);
+  const formRef = useRef(form);
+  formRef.current = form;
   const close = () => { if (!busy) onClose(); };
+  // Only on request: asks the provider (or the approximate catalog) and fills the window field.
+  // The field and Save wait meanwhile; a result for a model the form no longer describes is dropped.
+  async function detect() {
+    if (detecting || busy) return;
+    const asked = detectionRequest(form);
+    setDetecting(true);
+    setDetected(null);
+    setError(null);
+    try {
+      const result = await api.discoverModel({ ...asked, config_id: model?.id });
+      if (!sameDetection(asked, detectionRequest(formRef.current))) return;
+      const { fill, rejected } = detectedWindow(result);
+      if (fill !== null) setForm(current => ({ ...current, context_window: fill }));
+      setDetected({ result, rejected });
+    } catch (cause) {
+      if (sameDetection(asked, detectionRequest(formRef.current))) setError(cause instanceof Error ? cause.message : t("连接测试失败，请重试。", "Connection test failed. Please try again."));
+    }
+    finally { setDetecting(false); }
+  }
   const set = (key: "label" | "base_url" | "llm_model" | "api_key") =>
-    (event: React.ChangeEvent<HTMLInputElement>) => setForm(current => ({ ...current, [key]: event.target.value }));
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      setForm(current => ({ ...current, [key]: event.target.value }));
+      // A detection note only describes the model it asked about.
+      if (key !== "label") setDetected(null);
+    };
 
   function changeProtocol(protocol: ModelProtocol) {
+    setDetected(null);
     setForm(current => ({
       ...current, protocol,
       base_url: Object.values(defaultUrls).includes(current.base_url) ? defaultUrls[protocol] : current.base_url,
@@ -41,7 +71,7 @@ export function AddModelModal({ isFirst, model, onClose, onAdd }: Props) {
 
   async function save(event: React.FormEvent) {
     event.preventDefault();
-    if (busy) return;
+    if (busy || detecting) return;
     setError(null);
     const payload = { ...form, label: form.label.trim(), base_url: form.base_url.trim(), llm_model: form.llm_model.trim(), api_key: form.api_key.trim() };
     if (!payload.label || !payload.base_url || !payload.llm_model || (!model && !payload.api_key)) {
@@ -56,7 +86,7 @@ export function AddModelModal({ isFirst, model, onClose, onAdd }: Props) {
         ? t("最大输出长度应为 1–131072 之间的整数。", "Max output tokens must be an integer between 1 and 131072.")
         : t("回答预留应为 1–131072 之间的整数。", "Answer reserve must be an integer between 1 and 131072.")); return;
     }
-    if (!Number.isInteger(payload.context_window) || payload.context_window < 8192 || payload.context_window > 2097152) {
+    if (!Number.isInteger(payload.context_window) || payload.context_window < CONTEXT_WINDOW_MIN || payload.context_window > CONTEXT_WINDOW_MAX) {
       setError(t("上下文窗口应为 8192–2097152 之间的整数。", "Context window must be an integer between 8192 and 2097152.")); return;
     }
     if (payload.context_window - payload.max_tokens - Math.max(512, Math.floor(payload.context_window / 20)) < 1024) {
@@ -86,8 +116,9 @@ export function AddModelModal({ isFirst, model, onClose, onAdd }: Props) {
         <summary>{t("高级设置", "Advanced")}</summary>
         <div className="field">
           <label htmlFor={`${id}-context`}>{t("上下文窗口（tokens）", "Context window (tokens)")}</label>
-          <input id={`${id}-context`} type="number" min={8192} max={2097152} step={1} value={form.context_window || ""} onChange={event => setForm(current => ({ ...current, context_window: Number(event.target.value) }))} disabled={busy} />
+          <div className="model-detect-row"><input id={`${id}-context`} type="number" min={CONTEXT_WINDOW_MIN} max={CONTEXT_WINDOW_MAX} step={1} value={form.context_window || ""} onChange={event => setForm(current => ({ ...current, context_window: Number(event.target.value) }))} disabled={busy || detecting} /><button type="button" className="btn" onClick={() => void detect()} disabled={busy || detecting || !form.base_url.trim() || !form.llm_model.trim()} title={t("向服务商查询该模型的上下文窗口；查不到时使用内置近似目录", "Ask the provider for this model's context window; falls back to an approximate built-in catalog")}>{detecting ? t("检测中…", "Detecting…") : t("检测", "Detect")}</button></div>
           <div className="hint">{t("按服务商提供的模型上下文容量填写。", "Use the model context capacity specified by your provider.")}</div>
+          {detected && <div className={detected.result.source === "unknown" || detected.rejected !== null ? "test-bad" : "test-ok"} role="status">{localizeError(detected.result.note, locale)}{detected.result.max_output_tokens ? ` ${t("服务商最大输出 {tokens} tokens。", "Provider max output {tokens} tokens.", { tokens: detected.result.max_output_tokens })}` : ""}{detected.rejected !== null ? ` ${t("检测到的上下文窗口 {tokens} 超出可填写范围（8192–2097152），未填入。", "The detected context window of {tokens} tokens is outside the accepted range (8192–2097152), so it was not filled in.", { tokens: detected.rejected })}` : ""}</div>}
         </div>
         <div className="field">
           <label htmlFor={`${id}-tokens`}>{form.protocol === "anthropic" ? t("最大输出长度（tokens）", "Max output tokens") : t("回答预留（tokens）", "Answer reserve (tokens)")}</label>
@@ -96,7 +127,7 @@ export function AddModelModal({ isFirst, model, onClose, onAdd }: Props) {
         </div>
       </details>
       {error && <div className="test-bad" role="alert">{localizeError(error, locale)}</div>}
-      <div className="modal-foot"><label className="hint"><input type="checkbox" checked={form.is_default} onChange={event => setForm(current => ({ ...current, is_default: event.target.checked }))} disabled={busy} /> {t("设为默认", "Set as default")}</label><div className="model-form-actions"><button type="button" className="btn" onClick={close} disabled={busy}>{t("取消", "Cancel")}</button><button type="submit" className="btn btn-primary" disabled={busy}>{busy ? t("保存中…", "Saving…") : model ? t("保存", "Save") : t("添加", "Add")}</button></div></div>
+      <div className="modal-foot"><label className="hint"><input type="checkbox" checked={form.is_default} onChange={event => setForm(current => ({ ...current, is_default: event.target.checked }))} disabled={busy} /> {t("设为默认", "Set as default")}</label><div className="model-form-actions"><button type="button" className="btn" onClick={close} disabled={busy}>{t("取消", "Cancel")}</button><button type="submit" className="btn btn-primary" disabled={busy || detecting}>{busy ? t("保存中…", "Saving…") : model ? t("保存", "Save") : t("添加", "Add")}</button></div></div>
     </form>
   </div>;
 }

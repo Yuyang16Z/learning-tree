@@ -1,9 +1,15 @@
 """Safety boundaries of the developer launcher and optional MCP wrappers."""
 
 import json
+import os
+import re
 import sqlite3
+import stat
 import subprocess
+import sys
 import tomllib
+import unicodedata
+from contextlib import closing
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
@@ -24,10 +30,13 @@ def test_dev_overrides_production_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "sqlite:///personal.db")
     monkeypatch.setenv("DEFAULT_API_KEY", "private-provider-key")
     monkeypatch.setenv("VITE_API_BASE", "http://127.0.0.1:8099/api")
+    monkeypatch.setenv("ACCESS_TOKEN_FILE", "/private/real/phone-access-token")
     env = manage.isolated_env(tmp_path / "dev.db")
     assert env["DATABASE_URL"] == f"sqlite:///{(tmp_path / 'dev.db').as_posix()}"
     assert env["DEFAULT_API_KEY"] == "mock"
     assert env["VITE_API_BASE"] == "/api"
+    # The phone-access token stays beside the isolated database.
+    assert env["ACCESS_TOKEN_FILE"] == (tmp_path / "phone-access-token").resolve().as_posix()
 
 
 def test_basic_dependency_manifest_excludes_local_model_runtime():
@@ -366,3 +375,669 @@ def test_web_preset_upgrade_reuses_id_and_preserves_other_configuration(monkeypa
     assert servers[0]["args"][-1] == "web-research"
     expected_label = "联网搜索" if old_label == "网页阅读" else old_label
     assert servers[0]["label"] == expected_label
+
+
+# ---------- Offline retrieval evaluation (scripts/evaluate_retrieval.py) ----------
+
+# Runs the script as a fresh process would, then reports what it imported and where the
+# application's own engine pointed, so the import-order guarantee is checked end to end.
+EVALUATION_PROBE = """
+import json, runpy, sys
+from pathlib import Path
+
+script, output = sys.argv[1], sys.argv[2]
+sys.argv = [script, "--synthetic", "--output", output]
+try:
+    runpy.run_path(script, run_name="__main__")
+    code = 0
+except SystemExit as exc:
+    code = exc.code
+bound = sys.modules["app.db"].engine.url.database
+print(json.dumps({
+    "code": code,
+    "app_main": "app.main" in sys.modules,
+    "routers": sorted(name for name in sys.modules if name.startswith("app.routers")),
+    "bound_to_copy": Path(bound).parent.name.startswith("learning-tree-eval-"),
+}))
+"""
+
+
+def _stored_texts(database):
+    """Every stored text value of a fixture database and its user questions."""
+    with closing(sqlite3.connect(database)) as connection:
+        values = connection.execute(
+            "SELECT content FROM message UNION ALL SELECT content FROM memory "
+            "UNION ALL SELECT title FROM node UNION ALL SELECT seed_text FROM node "
+            "UNION ALL SELECT learning_note FROM node UNION ALL SELECT title FROM knowledgetree"
+        ).fetchall()
+        questions = [
+            row[0] for row in connection.execute("SELECT content FROM message WHERE role = 'user'")
+        ]
+    return {value for (value,) in values if value}, questions
+
+
+def _assert_private(raw, *paths):
+    for path in paths:
+        assert str(path) not in raw
+    # No JSON string starts like an absolute POSIX or Windows path.
+    assert not re.search(r'"(?:/|[A-Za-z]:\\\\)', raw)
+
+
+def test_retrieval_evaluation_runs_the_synthetic_fixture_end_to_end(tmp_path):
+    evaluate = load("scripts/evaluate_retrieval.py")
+    fixture = tmp_path / "fixture" / "fixture.db"
+    fixture.parent.mkdir()
+    evaluate.build_synthetic(fixture)
+    texts, questions = _stored_texts(fixture)
+    texts |= {term for term in map(evaluate.key_term, questions) if term}
+    output = tmp_path / "report.json"
+    decoy = tmp_path / "inherited.db"
+    result = subprocess.run(
+        [sys.executable, "-c", EVALUATION_PROBE, str(ROOT / "scripts/evaluate_retrieval.py")]
+        + [str(output)],
+        cwd=tmp_path,
+        env={**os.environ, "DATABASE_URL": f"sqlite:///{decoy}"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    probe = json.loads(result.stdout.strip().splitlines()[-1])
+    assert probe == {"code": 0, "app_main": False, "routers": [], "bound_to_copy": True}
+    assert not decoy.exists()
+    raw = output.read_text(encoding="utf-8")
+    _assert_private(raw, tmp_path, ROOT, Path.home())
+    assert not re.search("[㐀-鿿]", raw)
+    assert [text for text in texts if text in raw] == []
+    report = json.loads(raw)
+    assert report["source"] == "synthetic fixture"
+    assert report["database"]["completed_questions"] == 17
+    assert report["semantic"]["requested"] is False and report["semantic"]["achieved"] is False
+    small, large = report["estimator"]["policies"]
+    assert (small["window_tokens"], large["window_tokens"]) == (32768, 1048576)
+    # The long fixture path compacts under the byte estimator only, the longest under both.
+    assert small["would_compact"] == {"utf8_bytes": 2, "estimate": 1}
+    assert large["would_compact"] == {"utf8_bytes": 0, "estimate": 0}
+    search = report["full_text_search"]
+    # Every key term is cut from its question, so the question's own message always
+    # matches; that match is counted apart. Only the English questions' terms also
+    # occur in their node's answer, facts or note; the Chinese terms are whole questions.
+    assert search["queries"] == search["own_question_found"] == 17
+    assert search["node_found"] == 6 and search["node_found_share"] == round(6 / 17, 4)
+    found = {case["node_id"] for case in search["cases"] if case["node_found"]}
+    assert found == {21, 22, 23, 24, 25}
+    for case in search["cases"]:
+        assert case["own_question_rank"] is not None
+        assert (case["node_rank"] is not None) is case["node_found"]
+    scopes = report["memory_retrieval"]["scopes"]
+    assert scopes["path"]["returned"]["tree"] == scopes["path"]["returned"]["other"] == 0
+    assert scopes["tree"]["returned"]["tree"] > 0 and scopes["tree"]["returned"]["other"] == 0
+    assert scopes["all"]["returned"]["other"] > 0
+    for summary in scopes.values():
+        # The default run is keyword-only: no similarity gate or reranker cutoff applies.
+        assert summary["modes"] == {"lexical": 17} and summary["reranked"] == 0
+        for proxy in (summary["self_recall"], summary["parent_recall"]):
+            assert proxy["cases"] > 0
+            assert all(0 <= proxy[key] <= 1 for key in ("recall_at_k", "hit_rate_at_k", "mrr_at_k"))
+    # Each question only saw facts that existed, unsuperseded, when it was asked;
+    # archived topics never contribute.
+    with closing(sqlite3.connect(fixture)) as connection:
+        created = dict(connection.execute("SELECT id, created_at FROM memory"))
+        asked = dict(connection.execute("SELECT id, created_at FROM message"))
+        archived = {
+            row[0]
+            for row in connection.execute(
+                "SELECT m.id FROM memory m JOIN knowledgetree t ON t.id = m.tree_id "
+                "WHERE t.archived"
+            )
+        }
+        replaced = dict(
+            connection.execute(
+                "SELECT old.id, new.created_at FROM memory old "
+                "JOIN memory new ON new.id = old.superseded_by"
+            )
+        )
+    cases = report["memory_retrieval"]["cases"]
+    for case in cases:
+        moment = asked[case["question_message_id"]]
+        for memory_id in case["memory_ids"]:
+            assert created[memory_id] < moment
+            assert memory_id not in archived
+            assert memory_id not in replaced or replaced[memory_id] >= moment
+    (superseded,) = replaced
+    assert any(superseded in case["memory_ids"] for case in cases)
+
+
+def test_retrieval_evaluation_writes_text_only_when_asked(tmp_path):
+    evaluate = load("scripts/evaluate_retrieval.py")
+    output = tmp_path / "report.json"
+    arguments = ["--synthetic", "--scopes", "path", "--k", "3", "--output", str(output)]
+    assert evaluate.main([*arguments, "--include-text"]) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["settings"]["scopes"] == ["path"] and report["memory_retrieval"]["k"] == 3
+    cases = report["memory_retrieval"]["cases"]
+    assert {case["question"] for case in cases} >= {"快速排序在什么情况下会退化？"}
+    assert any(case["facts"] for case in cases)
+    assert all("term" in case for case in report["full_text_search"]["cases"])
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+
+
+def test_retrieval_evaluation_reads_only_a_copy_of_the_database(tmp_path):
+    evaluate = load("scripts/evaluate_retrieval.py")
+    folder = tmp_path / "data"
+    folder.mkdir()
+    source = folder / "learning.db"
+    evaluate.build_synthetic(source)
+    # A cleanly closed write-ahead-log database: a plain read-only open would leave
+    # -wal and -shm files beside it.
+    assert [path.name for path in folder.iterdir()] == ["learning.db"]
+    assert source.read_bytes()[18] == 2
+    original = source.read_bytes()
+    output = tmp_path / "report.json"
+    assert evaluate.main(["--database", str(source), "--output", str(output)]) == 0
+    assert source.read_bytes() == original
+    assert [path.name for path in folder.iterdir()] == ["learning.db"]
+    raw = output.read_text(encoding="utf-8")
+    _assert_private(raw, tmp_path, ROOT)
+    assert "learning.db" not in raw
+    report = json.loads(raw)
+    assert report["source"] == "copy of a user database"
+    assert report["database"]["completed_questions"] == 17
+
+
+def test_retrieval_evaluation_reads_a_live_database_through_its_log(tmp_path):
+    evaluate = load("scripts/evaluate_retrieval.py")
+    folder = tmp_path / "live"
+    folder.mkdir()
+    source = folder / "learning.db"
+    evaluate.build_synthetic(source)
+    output = tmp_path / "report.json"
+    writer = sqlite3.connect(source)
+    try:
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute(
+            "INSERT INTO knowledgetree (id, title, archived, created_at) "
+            "VALUES (9, 'Fixture live topic', 0, '2026-02-01 09:00:00.000000')"
+        )
+        writer.commit()
+        siblings = sorted(path.name for path in folder.iterdir())
+        assert siblings == ["learning.db", "learning.db-shm", "learning.db-wal"]
+        main_file = source.read_bytes()
+        assert evaluate.main(["--database", str(source), "--output", str(output)]) == 0
+        assert sorted(path.name for path in folder.iterdir()) == siblings
+        assert source.read_bytes() == main_file
+    finally:
+        writer.close()
+    # The committed but not yet checkpointed topic reached the copy.
+    assert json.loads(output.read_text(encoding="utf-8"))["database"]["topics"] == 5
+
+
+# Report paths that reach the database, or a name beside it, through another spelling.
+_REPORT_SPELLINGS = {
+    "output_name_case": lambda folder, source: folder / source.name.upper(),
+    "output_log_case": lambda folder, source: folder / f"{source.name.capitalize()}-WAL",
+    "output_log_normalization": lambda folder, source: (
+        folder / unicodedata.normalize("NFD", f"{source.name}-wal")
+    ),
+    "output_folder_case": lambda folder, source: (
+        folder.with_name(folder.name.upper()) / source.name
+    ),
+    # On macOS /System/Volumes/Data/private/... is the same directory as /private/...
+    "output_firmlink": lambda folder, source: Path(f"/System/Volumes/Data{source.resolve()}"),
+}
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["missing", "not_sqlite", "log_without_shared_memory", "rollback_journal", "output"]
+    + list(_REPORT_SPELLINGS),
+)
+def test_retrieval_evaluation_refuses_unsafe_sources(tmp_path, capsys, case):
+    evaluate = load("scripts/evaluate_retrieval.py")
+    folder = tmp_path / "data"
+    folder.mkdir()
+    # A name that NFD decomposes, for the normalization-insensitive spelling (APFS).
+    name = "Écoles.db" if case == "output_log_normalization" else "learning.db"
+    source = folder / unicodedata.normalize("NFC", name)
+    output = tmp_path / "report.json"
+    if case == "not_sqlite":
+        source.write_text("not a database", encoding="utf-8")
+    elif case != "missing":
+        evaluate.build_synthetic(source)
+    if case == "log_without_shared_memory":
+        Path(f"{source}-wal").write_bytes(b"")
+    elif case == "rollback_journal":
+        Path(f"{source}-journal").write_bytes(b"")
+    elif case == "output":
+        output = Path(f"{source}-wal")
+    elif case in _REPORT_SPELLINGS:
+        output = _REPORT_SPELLINGS[case](folder, source)
+        if case in ("output_folder_case", "output_firmlink") and not (
+            output.exists() and os.path.samefile(output, source)
+        ):
+            pytest.skip("this file system has no such alias for the database")
+    before = {path.name: path.read_bytes() for path in folder.iterdir()}
+    assert evaluate.main(["--database", str(source), "--output", str(output)]) == 1
+    assert {path.name: path.read_bytes() for path in folder.iterdir()} == before
+    assert not (tmp_path / "report.json").exists()
+    error = capsys.readouterr().err
+    assert error.strip() and str(tmp_path) not in error
+
+
+def test_retrieval_evaluation_migrates_only_the_copy(tmp_path):
+    evaluate = load("scripts/evaluate_retrieval.py")
+    source = tmp_path / "legacy.db"
+    with closing(sqlite3.connect(source)) as database:
+        # The shape of a database written before structured facts and the search index.
+        database.executescript(
+            """
+            CREATE TABLE knowledgetree (id INTEGER PRIMARY KEY, title VARCHAR NOT NULL,
+                created_at DATETIME NOT NULL);
+            CREATE TABLE node (id INTEGER PRIMARY KEY, tree_id INTEGER NOT NULL,
+                parent_id INTEGER, title VARCHAR NOT NULL, seed_text VARCHAR, summary VARCHAR,
+                created_at DATETIME NOT NULL);
+            CREATE TABLE message (id INTEGER PRIMARY KEY, node_id INTEGER NOT NULL,
+                role VARCHAR NOT NULL, content VARCHAR NOT NULL, answered_by VARCHAR,
+                created_at DATETIME NOT NULL);
+            CREATE TABLE memory (id INTEGER PRIMARY KEY, kind VARCHAR NOT NULL,
+                content VARCHAR NOT NULL, tree_id INTEGER, source_node_id INTEGER,
+                created_at DATETIME NOT NULL);
+            INSERT INTO knowledgetree VALUES (1, 'Fixture legacy topic', '2025-03-01 09:00:00');
+            INSERT INTO node VALUES (1, 1, NULL, 'Fixture root', NULL, NULL,
+                '2025-03-01 09:01:00');
+            INSERT INTO node VALUES (2, 1, 1, 'Fixture follow-up', NULL, NULL,
+                '2025-03-01 09:05:00');
+            INSERT INTO message VALUES (1, 1, 'user', 'What does a heap guarantee?', NULL,
+                '2025-03-01 09:01:00');
+            INSERT INTO message VALUES (2, 1, 'assistant', 'A heap keeps its root ordered.',
+                'Fixture model', '2025-03-01 09:02:00');
+            INSERT INTO memory VALUES (1, 'fact', 'A heap keeps the smallest key at its root.',
+                1, 1, '2025-03-01 09:03:00');
+            INSERT INTO message VALUES (3, 2, 'user', 'Why is the heap root the smallest key?',
+                NULL, '2025-03-01 09:05:00');
+            INSERT INTO message VALUES (4, 2, 'assistant', 'Every parent is ordered first.',
+                'Fixture model', '2025-03-01 09:06:00');
+            """
+        )
+    original = source.read_bytes()
+    output = tmp_path / "report.json"
+    assert evaluate.main(["--database", str(source), "--output", str(output)]) == 0
+    assert source.read_bytes() == original
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["legacy.db", "report.json"]
+    with closing(sqlite3.connect(source)) as database:
+        columns = {row[1] for row in database.execute("PRAGMA table_info(memory)")}
+    assert "superseded_by" not in columns
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["database"]["completed_questions"] == 2
+    parent = report["memory_retrieval"]["scopes"]["path"]["parent_recall"]
+    assert parent["cases"] == 1 and parent["hit_rate_at_k"] == 1.0
+
+
+def test_retrieval_evaluation_labels_leave_out_facts_the_prompt_already_holds(tmp_path):
+    evaluate = load("scripts/evaluate_retrieval.py")
+    source = tmp_path / "labels.db"
+    with closing(sqlite3.connect(source)) as database:
+        database.executescript(
+            """
+            CREATE TABLE knowledgetree (id INTEGER PRIMARY KEY, title VARCHAR NOT NULL,
+                created_at DATETIME NOT NULL);
+            CREATE TABLE node (id INTEGER PRIMARY KEY, tree_id INTEGER NOT NULL,
+                parent_id INTEGER, title VARCHAR NOT NULL, seed_text VARCHAR, summary VARCHAR,
+                learning_note VARCHAR, created_at DATETIME NOT NULL);
+            CREATE TABLE message (id INTEGER PRIMARY KEY, node_id INTEGER NOT NULL,
+                role VARCHAR NOT NULL, content VARCHAR NOT NULL, answered_by VARCHAR,
+                created_at DATETIME NOT NULL);
+            CREATE TABLE memory (id INTEGER PRIMARY KEY, kind VARCHAR NOT NULL,
+                content VARCHAR NOT NULL, tree_id INTEGER, source_node_id INTEGER,
+                created_at DATETIME NOT NULL);
+            INSERT INTO knowledgetree VALUES (1, 'Fixture heaps', '2025-03-01 09:00:00');
+            INSERT INTO node VALUES (1, 1, NULL, 'Fixture root', NULL, NULL, NULL,
+                '2025-03-01 09:01:00');
+            INSERT INTO message VALUES (1, 1, 'user', 'What does a heap guarantee?', NULL,
+                '2025-03-01 09:01:00');
+            INSERT INTO message VALUES (2, 1, 'assistant',
+                'A heap keeps the smallest key at its root.', 'Fixture model',
+                '2025-03-01 09:02:00');
+            -- Facts 2 and 3 share a text, so retrieval can return only one of them.
+            INSERT INTO memory VALUES (1, 'fact', 'A heap keeps the smallest key at its root.',
+                1, 1, '2025-03-01 09:03:00');
+            INSERT INTO memory VALUES (2, 'fact', 'A binary heap is stored as an array.',
+                1, 1, '2025-03-01 09:03:00');
+            INSERT INTO memory VALUES (3, 'fact', 'A binary heap is stored as an array.',
+                1, 1, '2025-03-01 09:03:00');
+            -- A branch whose quoted passage is fact 1, word for word.
+            INSERT INTO node VALUES (2, 1, 1, 'Fixture branch',
+                'A heap keeps the smallest key at its root.', NULL, NULL, '2025-03-01 09:05:00');
+            INSERT INTO message VALUES (3, 2, 'user',
+                'Why is the root of a binary heap the smallest key?', NULL,
+                '2025-03-01 09:05:00');
+            INSERT INTO message VALUES (4, 2, 'assistant',
+                'Every parent is ordered before its children.', 'Fixture model',
+                '2025-03-01 09:06:00');
+            -- A follow-up whose learning note holds the text of facts 2 and 3.
+            INSERT INTO node VALUES (3, 1, 1, 'Fixture follow-up', NULL, NULL,
+                'Remember: a binary heap is stored as an array.', '2025-03-01 09:07:00');
+            INSERT INTO message VALUES (5, 3, 'user',
+                'How do I find the children of a heap node?', NULL, '2025-03-01 09:07:00');
+            INSERT INTO message VALUES (6, 3, 'assistant',
+                'The children of index i are at 2i + 1 and 2i + 2.', 'Fixture model',
+                '2025-03-01 09:08:00');
+            """
+        )
+    output = tmp_path / "report.json"
+    arguments = ["--database", str(source), "--scopes", "path", "--output", str(output)]
+    assert evaluate.main(arguments) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    cases = {case["question_message_id"]: case for case in report["memory_retrieval"]["cases"]}
+    # Retrieval drops fact 1 for the branch because its quote already holds it, and
+    # returns one of the two identical facts: the label is one text, and it was found.
+    found = {"source_node_id": 1, "relevant": 1, "found": 1, "rank": 1}
+    assert cases[3]["memory_ids"] == [3]
+    assert cases[3]["self"] == [] and cases[3]["parent"] == {**found, "in_prompt": 1}
+    # The follow-up's note holds the text of facts 2 and 3, so only fact 1 is left.
+    assert cases[5]["memory_ids"] == [1]
+    assert cases[5]["self"] == [{**found, "in_prompt": 2}]
+    assert cases[5]["parent"] == {**found, "in_prompt": 2}
+    summary = report["memory_retrieval"]["scopes"]["path"]
+    perfect = {"cases": 2, "recall_at_k": 1.0, "hit_rate_at_k": 1.0, "mrr_at_k": 1.0}
+    assert summary["parent_recall"] == {**perfect, "facts_in_prompt": 3}
+    assert summary["self_recall"] == {**perfect, "cases": 1, "facts_in_prompt": 2}
+
+
+@pytest.mark.parametrize("missing", ["runtime", "reranker"])
+def test_retrieval_evaluation_hybrid_without_local_models_exits_2(
+    tmp_path, monkeypatch, capsys, missing
+):
+    evaluate = load("scripts/evaluate_retrieval.py")
+    import app.semantic_models as semantic
+
+    if missing == "runtime":
+        monkeypatch.setattr(semantic, "_dependencies_available", lambda: False)
+    else:
+        # The embedding model is cached but the separately downloaded reranker is not.
+        monkeypatch.setattr(semantic, "get_backend", lambda: _FakeModels(reranker="missing"))
+    output = tmp_path / "report.json"
+    assert evaluate.main(["--synthetic", "--hybrid", "--output", str(output)]) == 2
+    assert not output.exists()
+    error = capsys.readouterr().err
+    assert "Hybrid retrieval was requested" in error
+    if missing == "reranker":
+        assert "reranking model" in error and "embedding" not in error
+
+
+class _FakeModels:
+    """Deterministic stand-in for the local models; either one may fail or be missing.
+
+    reranker: "ready", "missing" (not loaded), "fails" (raises from its third call on)
+    or "invalid" (returns scores outside [0, 1], which retrieval rejects).
+    """
+
+    model_key = "synthetic-evaluation-model"
+
+    def __init__(self, fail_after=None, reranker="ready"):
+        self.fail_after = fail_after
+        self.reranker = reranker
+        self.queries = 0
+        self.reranks = 0
+
+    def prepare(self, allow_download):
+        assert allow_download is False
+        ready = self.reranker != "missing"
+        return {
+            "state": "ready" if ready else "degraded",
+            "embedding_ready": True,
+            "reranker_ready": ready,
+        }
+
+    @staticmethod
+    def _vector(text):
+        vector = [0.0] * 8
+        for character in text:
+            vector[ord(character) % 8] += 1.0
+        return vector
+
+    def embed_query(self, query):
+        self.queries += 1
+        if self.fail_after is not None and self.queries > self.fail_after:
+            raise RuntimeError("synthetic inference failure")
+        return self._vector(query)
+
+    def embed_documents(self, documents):
+        return [self._vector(document) for document in documents]
+
+    def rerank(self, query, documents):
+        self.reranks += 1
+        if self.reranker == "missing" or (self.reranker == "fails" and self.reranks > 2):
+            raise RuntimeError("synthetic reranking failure")
+        return [1.5 if self.reranker == "invalid" else 0.5 for _ in documents]
+
+
+@pytest.mark.parametrize(
+    "fail_after, reranker, expected",
+    [(None, "ready", 0), (3, "ready", 2), (None, "fails", 2), (None, "invalid", 2)],
+)
+def test_retrieval_evaluation_records_whether_hybrid_was_achieved(
+    tmp_path, monkeypatch, capsys, fail_after, reranker, expected
+):
+    evaluate = load("scripts/evaluate_retrieval.py")
+    import app.semantic_models as semantic
+
+    models = _FakeModels(fail_after, reranker)
+    monkeypatch.setattr(semantic, "get_backend", lambda: models)
+    output = tmp_path / "report.json"
+    arguments = ["--synthetic", "--hybrid", "--scopes", "path", "--output", str(output)]
+    assert evaluate.main(arguments) == expected
+    report = json.loads(output.read_text(encoding="utf-8"))
+    semantic_report = report["semantic"]
+    path = report["memory_retrieval"]["scopes"]["path"]
+    assert semantic_report["requested"] is True and semantic_report["embedding_ready"] is True
+    assert semantic_report["reranker_ready"] is True
+    assert semantic_report["achieved"] is (expected == 0)
+    assert semantic_report["semantic_attempts"] == path["semantic_attempts"] > 0
+    assert semantic_report["rerank_attempts"] == path["rerank_attempts"] > 0
+    assert semantic_report["rerank_fallbacks"] == path["rerank_fallbacks"]
+    if expected == 0:
+        assert semantic_report["fallback_cases"] == 0 and semantic_report["hybrid_cases"] > 0
+        assert semantic_report["rerank_fallbacks"] == 0
+        assert path["reranked"] == path["rerank_attempts"] <= models.reranks
+        assert capsys.readouterr().err == ""
+    elif fail_after is not None:
+        assert semantic_report["fallback_cases"] > 0
+    else:
+        # The embedding model kept working, so these cases still report mode "hybrid",
+        # but the reranker's result was not applied.
+        assert semantic_report["hybrid_cases"] == semantic_report["semantic_attempts"]
+        assert path["reranked"] == path["rerank_attempts"] - path["rerank_fallbacks"]
+        assert semantic_report["rerank_fallbacks"] > 0
+        assert semantic_report["fallback_cases"] == semantic_report["rerank_fallbacks"]
+        assert "reranking" in capsys.readouterr().err
+
+
+def test_retrieval_evaluation_hybrid_needs_a_question_that_reaches_the_models(
+    tmp_path, monkeypatch, capsys
+):
+    evaluate = load("scripts/evaluate_retrieval.py")
+    import app.semantic_models as semantic
+
+    models = _FakeModels()
+    monkeypatch.setattr(semantic, "get_backend", lambda: models)
+    source = tmp_path / "learning.db"
+    evaluate.build_synthetic(source)
+    with closing(sqlite3.connect(source)) as database:
+        database.execute("DELETE FROM memory")  # Questions and answers, but no facts yet.
+        database.commit()
+    output = tmp_path / "report.json"
+    arguments = ["--database", str(source), "--hybrid", "--output", str(output)]
+    assert evaluate.main(arguments) == 2
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["database"]["completed_questions"] == 17
+    assert report["semantic"]["semantic_attempts"] == models.queries == 0
+    assert report["semantic"]["achieved"] is False
+    assert "never used" in capsys.readouterr().err
+
+
+def test_retrieval_evaluation_workspace_is_private_and_removed():
+    evaluate = load("scripts/evaluate_retrieval.py")
+    with evaluate.workspace() as directory:
+        assert directory.name.startswith("learning-tree-eval-")
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+        (directory / "evaluation.db").write_bytes(b"scratch")
+    assert not directory.exists()
+
+
+def _replay_cost(evaluate, index_padding):
+    """SQLite VM steps of one fact replay on a copy whose search index holds extra rows,
+    and whether the copy's triggers and index are intact afterwards."""
+    from sqlalchemy import event
+
+    from app.search_index import index_count, source_count
+
+    schema = "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name"
+    with evaluate.workspace() as directory:
+        database = directory / "evaluation.db"
+        evaluate.build_synthetic(database)
+        with closing(sqlite3.connect(database)) as connection:
+            # Index rows of messages that do not exist: retrieval never reads the index.
+            connection.executemany(
+                "INSERT INTO search_index (kind, ref_id, tree_id, node_id, content) "
+                "VALUES ('message', ?, 0, 0, 'padding for the full-text index')",
+                [(100000 + index,) for index in range(index_padding)],
+            )
+            connection.commit()
+            triggers = connection.execute(schema).fetchall()
+        engine = evaluate._engine(database)
+        steps = [0]
+
+        def count():
+            steps[0] += 1
+            return 0  # Never interrupt the statement.
+
+        event.listen(engine, "connect", lambda raw, record: raw.set_progress_handler(count, 100))
+        try:
+            snapshot = evaluate.load_snapshot(engine)
+            steps[0] = 0
+            evaluate.measure_retrieval(
+                engine, snapshot, ["path"], 5, evaluate._LexicalOnly(), False
+            )
+            cost = steps[0]
+            with engine.connect() as connection:
+                intact = connection.exec_driver_sql(schema).all() == triggers and (
+                    index_count(connection) == source_count(connection) + index_padding
+                )
+        finally:
+            engine.dispose()
+    return cost, intact
+
+
+def test_retrieval_evaluation_replay_cost_does_not_grow_with_the_search_index():
+    evaluate = load("scripts/evaluate_retrieval.py")
+    small, small_intact = _replay_cost(evaluate, 0)
+    large, large_intact = _replay_cost(evaluate, 3000)
+    assert small_intact and large_intact
+    # Hiding and revealing facts must not rescan the full-text index once per fact.
+    assert large <= small * 1.05
+
+
+def test_retrieval_evaluation_request_estimates_match_the_app(tmp_path):
+    evaluate = load("scripts/evaluate_retrieval.py")
+    from sqlmodel import Session, create_engine
+
+    from app.context import _full_system, _units, _wire
+    from app.context_budget import estimate_request_tokens
+    from app.models import Node
+    from app.service import get_ancestors, get_messages
+
+    fixture = tmp_path / "fixture.db"
+    evaluate.build_synthetic(fixture)
+    engine = create_engine(f"sqlite:///{fixture}")
+    try:
+        section = evaluate.measure_estimator(evaluate.load_snapshot(engine), 0.6)
+        assert section["paths"] == 16
+        with Session(engine) as session:
+            for case in section["cases"]:
+                node = session.get(Node, case["node_id"])
+                ancestors = get_ancestors(session, node)
+                sources = [*ancestors, (node, get_messages(session, node.id))]
+                system = _full_system(ancestors, node, "")
+                expected = estimate_request_tokens(system, _wire(_units(sources)))
+                assert case["request_estimate"] == expected
+                assert case["request_bytes"] > case["request_estimate"]
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "question, term",
+    [
+        ("快速排序的平均时间复杂度是多少？", "快速排序的平均时间复杂度是多少"),
+        ("What is overfitting in machine learning?", "overfitting"),
+        ("What does 过拟合 mean?", "过拟合"),
+        # A CJK character weighs as two letters: a short CJK run loses to a long word.
+        ("请解释 Transformer 的 attention 机制", "Transformer"),
+        ("harness 是什么？", "harness"),
+        ("What is the CAP theorem 在分布式系统里怎么用？", "在分布式系统里怎么用"),
+        ("为何？ok", None),
+    ],
+)
+def test_retrieval_evaluation_key_terms(question, term):
+    assert load("scripts/evaluate_retrieval.py").key_term(question) == term
+
+
+def test_demo_recording_doubles_take_the_calls_the_app_makes(tmp_path, monkeypatch):
+    """record_demo.py swaps only the provider boundary, so its doubles must accept every
+    argument the routes pass, including keyword options added later."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from sqlmodel import Session, SQLModel, create_engine
+
+    import app.service as service
+    from app.models import ModelConfig
+    from app.routers import nodes, trees
+
+    demo = load("scripts/record_demo.py")
+    monkeypatch.setattr(demo, "CHUNK_DELAY", 0)
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'demo.db'}", connect_args={"check_same_thread": False}
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(nodes, "engine", engine)
+    monkeypatch.setattr(service, "engine", engine)
+    # The script replaces llm.stream_chat and llm.complete before the routers import them.
+    monkeypatch.setattr(nodes, "stream_chat", demo.scripted_stream)
+    monkeypatch.setattr(nodes, "complete", demo.scripted_complete)
+    nodes._GENERATIONS.clear()
+    with Session(engine) as session:
+        session.add(
+            ModelConfig(
+                label="Offline demo",
+                base_url="mock://offline",
+                llm_model="mock",
+                api_key="mock",
+                is_default=True,
+            )
+        )
+        session.commit()
+    app = FastAPI()
+    app.include_router(nodes.router)
+    app.include_router(trees.router)
+
+    def session_override():
+        with Session(engine) as session:
+            yield session
+
+    app.dependency_overrides[nodes.get_session] = session_override
+    try:
+        client = TestClient(app)
+        root = client.post("/trees", json={"title": "Overfitting"}).json()["root_node_id"]
+        response = client.post(f"/nodes/{root}/ask", json={"question": demo.QUESTION})
+        events = [
+            json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")
+        ]
+        assert events[-1].get("done") is True, events[-1]
+        assert "".join(event.get("delta", "") for event in events) == demo.MAIN_ANSWER
+        explained = client.post(f"/nodes/{root}/explain", json={"text": "validation set"})
+        assert explained.json() == {"explanation": demo.EXPLANATION}
+    finally:
+        for generation in list(nodes._GENERATIONS.values()):
+            generation.stop.set()
+        nodes._GENERATIONS.clear()
+        engine.dispose()

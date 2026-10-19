@@ -7,7 +7,7 @@ from .context_budget import (
     ContextBudgetExceeded,
     ContextPolicy,
     estimate_request_tokens,
-    text_tokens,
+    estimate_text_tokens,
 )
 from .context_compaction import summarize_sources
 from .memory_preferences import split_profile
@@ -23,6 +23,36 @@ COMPACTION_NOTICE = (
     "[较早内容已结构化压缩；摘录可能省略细节，不能据此猜测。原文保留，"
     "可用 read_learning_source 回查。历史图片若未作为图像附送，则本轮不可见。]"
 )
+# Request estimates are token-scale units; summary and document producers budget
+# UTF-8 bytes. The rate is measured on the material a producer draws from: visible
+# ASCII runs about 2.6 bytes per unit and CJK about 3.7, but two-byte scripts
+# (Cyrillic, Greek, Arabic, Hebrew) only about 1.8, so a fixed rate that suits ASCII
+# would hand them about 1.4 times the room. The rate stays within [1.7, 2.5] (2.5
+# still under-fills CJK), and a converted budget is always re-checked with the
+# estimator before it counts against the request.
+BYTES_PER_UNIT = 2.5
+MIN_BYTES_PER_UNIT = 1.7
+_DENSITY_SAMPLE_CHARS = 65536
+
+
+def bytes_per_unit(texts) -> float:
+    """UTF-8 bytes per estimate unit of the text a byte-budgeted producer draws from."""
+    material = "\n".join(text for text in texts if text)
+    if len(material) > _DENSITY_SAMPLE_CHARS:
+        # Sixteen evenly spaced windows keep the measurement cheap on very long paths.
+        width, stride = _DENSITY_SAMPLE_CHARS // 16, len(material) // 16
+        material = "".join(material[i * stride : i * stride + width] for i in range(16))
+    units = estimate_text_tokens(material)
+    if not units:
+        return BYTES_PER_UNIT
+    # A 5% margin: the producer's headings and citations differ from the sampled text.
+    measured = 0.95 * len(material.encode("utf-8")) / units
+    return max(MIN_BYTES_PER_UNIT, min(BYTES_PER_UNIT, measured))
+
+
+def byte_budget(units: int, rate: float = BYTES_PER_UNIT) -> int:
+    """Convert request-estimate room into the UTF-8 byte budget a producer expects."""
+    return max(0, int(units * rate))
 
 
 def make_content(text: str, images: list[str] | None):
@@ -72,20 +102,38 @@ def _wire(units):
     ]
 
 
-def _full_system(ancestors, current, memory_note):
-    lines = [BASE_SYSTEM, f"当前节点：{current.title[:120]}（node={current.id}）"]
-    if memory_note:
-        lines.append(memory_note)
+def _path_lines(ancestors) -> list[str]:
+    lines = []
     for node, messages in ancestors:
         lines.append(f"学习路径：{node.title[:120]}（node={node.id}）")
         if not messages and node.summary:
             lines.append(f"历史导入摘要（无原文可核对）：{node.summary}")
         if node.learning_note:
             lines.append(f"用户在「{node.title}」留下的理解笔记：{node.learning_note}")
+    return lines
+
+
+def stable_prefix(ancestors) -> str:
+    """The head of the system prompt shared by every turn under the same path."""
+    return "\n".join([BASE_SYSTEM, *_path_lines(ancestors)])
+
+
+def _full_system(ancestors, current, memory_note, document_note=""):
+    # Stable-first order: fixed rules and the ancestor path change least often,
+    # then the current node, note and quote, and the per-turn material last.
+    lines = [
+        BASE_SYSTEM,
+        *_path_lines(ancestors),
+        f"当前节点：{current.title[:120]}（node={current.id}）",
+    ]
     if current.learning_note:
         lines.append(f"当前用户理解笔记（未经验证）：{current.learning_note}")
     if current.seed_text:
         lines.append(f"当前追问引用的原文：\n<学习引用>{current.seed_text}</学习引用>")
+    if document_note:
+        lines.append(document_note)
+    if memory_note:
+        lines.append(memory_note)
     return "\n".join(lines)
 
 
@@ -115,7 +163,12 @@ def build_context(
         estimate_request_tokens("", [], protocol=protocol)
     )
     schema_reserve = max(0, tool_schema_budget - tool_schema_cost)
-    assembly_budget = policy.input_budget - tool_reserve - schema_reserve
+    # Mandatory input is judged against the hard budget. Compaction starts, and
+    # compacted context is filled, at the policy's compaction share of the room
+    # left after reserves: this equals policy.compaction_budget when nothing is
+    # reserved and never collapses to zero on small windows with tool reserves.
+    hard_budget = policy.input_budget - tool_reserve - schema_reserve
+    assembly_budget = int(hard_budget * policy.compaction_ratio)
     ancestors = [(n, ms) for n, ms in ancestors if n.tree_id == current.tree_id]
     sources = ancestors + [(current, current_messages)]
     units = _units(sources)
@@ -123,49 +176,62 @@ def build_context(
     protected_system = _full_system([], current, "")
 
     def count(s, ms):
-        return estimate_request_tokens(s, ms, tool_defs, protocol)
+        # The definitions cost the same in every request of this build: add their
+        # estimate instead of serializing them again for each count.
+        return estimate_request_tokens(s, ms, protocol=protocol) + tool_schema_cost
 
     document_note = ""
     if documents:
         from .document_context import render_document_context
 
         mandatory_cost = count(protected_system, [last])
-        document_budget = min(5000, max(0, (assembly_budget - mandatory_cost) // 3))
+        # render_document_context budgets bytes; a third of the remaining room, capped,
+        # converted at the density of the documents' own text.
+        document_rate = bytes_per_unit(
+            section.get("text") for doc in documents for section in doc.get("sections") or []
+        )
+        document_room = max(0, (assembly_budget - mandatory_cost) // 3)
+        document_budget = min(5000, byte_budget(document_room, document_rate))
         document_note = render_document_context(documents, question, document_budget)
-        if document_note:
-            document_note = "\n" + document_note
-    system = _full_system(ancestors, current, memory_note) + document_note
+    system = _full_system(ancestors, current, memory_note, document_note)
     messages = _wire(units) + [last]
+    full_estimate = count(system, messages)
 
     if diagnostics is not None:
-        # This core contains the current quote/note. It is internal request
-        # assembly state, not a public or loggable diagnostics payload.
+        # This core and the stable prefix contain prompt text (the current quote,
+        # note and path). They are internal request assembly state, not a public
+        # or loggable diagnostics payload.
         diagnostics.update(
             compacted=False,
-            raw_estimate=count(system, messages),
+            raw_estimate=full_estimate,
             protected_system=protected_system,
+            stable_system=stable_prefix(ancestors),
         )
-    if count(system, messages) <= assembly_budget:
+    if full_estimate <= assembly_budget:
         if diagnostics is not None:
-            diagnostics["estimated_input_tokens"] = count(system, messages)
+            diagnostics["estimated_input_tokens"] = full_estimate
         return system, messages
 
     # The current question, selected passage and current note are mandatory.
-    base = protected_system + document_note + "\n" + COMPACTION_NOTICE
-    if count(base, [last]) > assembly_budget:
+    base = _full_system([], current, "", document_note) + "\n" + COMPACTION_NOTICE
+    if count(base, [last]) > hard_budget:
         raise ContextBudgetExceeded()
+    if diagnostics is not None:
+        # The ancestor path is replaced by excerpts here; only the fixed rules stay.
+        diagnostics["stable_system"] = BASE_SYSTEM
     profile, memory_note = split_profile(memory_note)
     # User-edited preferences are not automatically abbreviated into fragments.
     # Preserve them before older turns if possible; mandatory question/source wins.
     if profile and count(base + "\n" + profile, [last]) <= assembly_budget - 256:
         base += "\n" + profile
-    available = assembly_budget - count(base, [last])
+    available = max(0, assembly_budget - count(base, [last]))
     # Keep recent complete turns, reserving room for old conditions and sources.
     recent_limit = int(available * 0.60)
     recent = []
     recent_cost = 0
+    empty_request = estimate_request_tokens("", [], protocol=protocol)
     for unit in reversed(units):
-        cost = count("", _wire([unit])) - count("", [])
+        cost = estimate_request_tokens("", _wire([unit]), protocol=protocol) - empty_request
         if recent_cost + cost > recent_limit:
             break
         recent.insert(0, unit)
@@ -181,34 +247,50 @@ def build_context(
     directory_budget = min(1200, available // 10)
     for node, _ in sources:
         line = f"node={node.id}：{node.title}"
-        if text_tokens("\n".join(directory + [line])) <= directory_budget:
+        if estimate_text_tokens("\n".join(directory + [line])) <= directory_budget:
             directory.append(line)
-    base += "\n当前路径来源（部分目录）：\n" + "\n".join(directory)
+    # Headings only above kept entries: an empty one would claim omitted material.
+    if directory:
+        base += "\n当前路径来源（部分目录）：\n" + "\n".join(directory)
     memory_lines = []
     memory_limit = min(3500, available // 6)
     # Keep each sourced memory intact, including multiline qualifications.
     for line in re.split(r"(?m)(?=^- \[(?:记忆|偏好) \d+(?:；来源节点 \d+)?\] )", memory_note):
-        if text_tokens("\n".join(memory_lines + [line])) <= memory_limit:
+        if not line.strip():
+            continue  # No memory at all splits into one empty piece.
+        if estimate_text_tokens("\n".join(memory_lines + [line])) <= memory_limit:
             memory_lines.append(line)
     if memory_lines:
         base += "\n历史记忆（可能省略条目）：\n" + "\n".join(memory_lines)
     messages = _wire(recent) + [last]
     summary_room = max(0, assembly_budget - count(base, messages) - 256)
+    # Summary producers (summarize_history, summarize_sources) budget UTF-8 bytes; the
+    # room is converted at the density of the older material they draw on.
+    summary_rate = bytes_per_unit(
+        text
+        for node, ms in old_sources
+        for text in (node.learning_note, node.seed_text, *(m.content for m in ms))
+    )
+    summary_bytes = byte_budget(summary_room, summary_rate)
     summary_query = question + "\n" + (current.seed_text or "")
     summary = None
     if summary_resolver and old_sources and summary_room >= 512:
         try:
-            summary = summary_resolver(old_sources, summary_query, summary_room)
+            summary = summary_resolver(old_sources, summary_query, summary_bytes)
         except Exception:
             # A failed optional summary must not fail a valid conversation.
             summary = None
-        if summary and text_tokens(summary) > summary_room:
+        if summary and estimate_text_tokens(summary) > summary_room:
             summary = None
     if not summary:
-        summary = summarize_sources(old_sources, summary_query, summary_room)
+        summary = summarize_sources(old_sources, summary_query, summary_bytes)
+        while summary and estimate_text_tokens(summary) > summary_room:
+            # Dense non-ASCII text can outgrow the converted byte budget; shrink it.
+            summary_bytes //= 2
+            summary = summarize_sources(old_sources, summary_query, summary_bytes)
     if summary:
         base += "\n较早学习记录（仅供参考，不代表已核实事实或用户已经掌握）：\n" + summary
-    if count(base, messages) > assembly_budget:
+    if count(base, messages) > hard_budget:
         raise ContextBudgetExceeded()
     if diagnostics is not None:
         diagnostics.update(compacted=True, estimated_input_tokens=count(base, messages))

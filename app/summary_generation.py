@@ -98,6 +98,30 @@ def _source_payload(sources: list[dict]) -> list[dict] | None:
     return result
 
 
+def _request_messages(payload: list[dict], max_output_bytes: int) -> list[dict]:
+    message = json.dumps(
+        {"max_output_bytes": max_output_bytes, "sources": payload},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return [{"role": "user", "content": message}]
+
+
+def _fits(spec: LLMSpec, messages: list[dict]) -> bool:
+    estimated = estimate_request_tokens(_SYSTEM, messages, protocol=spec.protocol)
+    return estimated <= ContextPolicy.from_spec(spec).input_budget
+
+
+def fits_input_budget(spec: LLMSpec, sources: list[dict], max_output_bytes: int) -> bool:
+    """Whether the summary request for these sources fits the model's calibrated budget.
+
+    The same check gates summarize_learning_context; callers use it to skip a source
+    block the request would refuse before spending their one summary attempt on it.
+    """
+    payload = _source_payload(sources)
+    return payload is not None and _fits(spec, _request_messages(payload, max_output_bytes))
+
+
 def _unique_object(pairs: list[tuple]) -> dict:
     result = {}
     for key, value in pairs:
@@ -169,14 +193,8 @@ def summarize_learning_context(
         payload = _source_payload(sources)
         if payload is None:
             return None
-        message = json.dumps(
-            {"max_output_bytes": max_output_bytes, "sources": payload},
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        messages = [{"role": "user", "content": message}]
-        policy = ContextPolicy.from_spec(spec)
-        if estimate_request_tokens(_SYSTEM, messages, protocol=spec.protocol) > policy.input_budget:
+        messages = _request_messages(payload, max_output_bytes)
+        if not _fits(spec, messages):
             return None
         if spec.protocol == "anthropic":
             with Anthropic(

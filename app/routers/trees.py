@@ -8,11 +8,12 @@ from pathlib import PurePosixPath
 from typing import Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import delete, func
+from sqlalchemy import delete, func, or_
 from sqlmodel import Session, select
 
+from ..answer_sources import scrub_sources
 from ..context_compaction import forget_tree
 from ..db import get_session
 from ..documents import (
@@ -32,9 +33,13 @@ from ..models import (
     Node,
     PreferenceExtraction,
     PreferenceSupplement,
+    ToolResult,
 )
-from ..schemas import NodeOut, TreeIn, TreeOut, TreePatch
+from ..schemas import UNDERSTANDING_LEVELS, NodeOut, TreeIn, TreeOut, TreePatch, Understanding
+from ..search_index import excerpt, search_text
+from ..tool_results import portable_steps
 from ..tree_identity import record_node_id, record_tree_id
+from .memory_router import restore_superseded
 from .nodes import _CANCELLED_REQUESTS, _REQUEST_LOCK, discard_node_work, node_metadata
 
 router = APIRouter(prefix="/trees", tags=["trees"])
@@ -143,6 +148,8 @@ class PortableNode(Portable):
     source_start: int | None = Field(default=None, ge=0)
     source_end: int | None = Field(default=None, ge=0)
     learning_note: str | None = Field(default=None, max_length=10000)
+    # Exported only when marked; backups without it import as "not marked".
+    understanding: Understanding | None = None
     revision_of: int | None = None
 
 
@@ -328,14 +335,28 @@ def export_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
         "tree": {"title": tree.title},
         "nodes": [
             {
-                **node.model_dump(exclude={"tree_id", "created_at", "request_id", "title_state"}),
+                **node.model_dump(
+                    exclude={"tree_id", "created_at", "request_id", "title_state", "understanding"}
+                ),
                 "kind": node_metadata(node)["kind"],
+                # Only marked nodes carry the field, so a topic without marks stays
+                # importable by versions that predate it.
+                **(
+                    {"understanding": node.understanding}
+                    if node.understanding in UNDERSTANDING_LEVELS
+                    else {}
+                ),
             }
             for node in nodes
         ],
         "messages": [
             {
-                **message.model_dump(exclude={"created_at", "document_ids"}),
+                # Diagnostics and memory provenance are local state over this database,
+                # and so are a step's references to stored complete tool results.
+                **message.model_dump(
+                    exclude={"created_at", "document_ids", "diagnostics", "sources"}
+                ),
+                "steps": portable_steps(message.steps),
                 **({"document_ids": message.document_ids or []} if documents else {}),
             }
             for message in messages
@@ -354,6 +375,64 @@ def export_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
     if len(json.dumps(backup, ensure_ascii=False).encode()) > 25 * 1024 * 1024:
         raise HTTPException(413, "备份含附件后超过 25 MB，请分成较小的主题")
     return backup
+
+
+@router.get("/{tree_id}/search")
+def search_tree(
+    tree_id: int,
+    q: str = Query(min_length=1, max_length=300),
+    limit: int = Query(default=20, ge=1, le=50),
+    session: Session = Depends(get_session),
+) -> dict:
+    """Title and quote matches first, then completed answers, notes and facts by text.
+
+    The query count is constant: one node query plus one index query (or the LIKE
+    fallback), whatever the topic size. Archived topics stay searchable."""
+    if not session.get(KnowledgeTree, tree_id):
+        raise HTTPException(404, "知识树不存在")
+    needle = q.strip()
+    if not needle:
+        return {"results": []}
+    results: list[dict] = []
+    titled = session.exec(
+        select(Node.id, Node.title, Node.seed_text)
+        .where(
+            Node.tree_id == tree_id,
+            or_(
+                Node.title.icontains(needle, autoescape=True),
+                Node.seed_text.icontains(needle, autoescape=True),
+            ),
+        )
+        .order_by(Node.id)
+        .limit(limit)
+    ).all()
+    for node_id, title, seed_text in titled:
+        matched = title if needle.casefold() in title.casefold() else seed_text or ""
+        results.append(
+            {
+                "node_id": node_id,
+                "message_id": None,
+                "kind": "title",
+                "snippet": excerpt(matched, needle),
+                "rank": len(results) + 1,
+            }
+        )
+    for hit in search_text(session, needle, tree_id=tree_id, limit=limit):
+        if len(results) >= limit:
+            break
+        if hit.node_id is None:
+            continue
+        results.append(
+            {
+                "node_id": hit.node_id,
+                # Answers are "message" hits and the user's questions "question" hits.
+                "message_id": hit.ref_id if hit.kind in ("message", "question") else None,
+                "kind": hit.kind,
+                "snippet": hit.snippet,
+                "rank": len(results) + 1,
+            }
+        )
+    return {"results": results}
 
 
 @router.delete("/{tree_id}")
@@ -385,13 +464,23 @@ def delete_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
                 _CANCELLED_REQUESTS.pop(key, None)
         for message in session.exec(select(Message).where(Message.node_id.in_(ids))).all():
             session.delete(message)
+        session.execute(delete(ToolResult).where(ToolResult.node_id.in_(ids)))
+        deleted_memories = {}
         for memory in session.exec(
             select(Memory).where((Memory.tree_id == tree_id) | Memory.source_node_id.in_(ids))
         ).all():
             session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory.id))
+            deleted_memories[memory.id] = memory.superseded_by
             session.delete(memory)
+        # No fact keeps pointing at a deleted replacement, and other topics' answers
+        # keep no provenance (ids) pointing into this topic.
+        session.flush()
+        restore_superseded(session, deleted_memories)
+        scrub_sources(session, tree_ids=[tree_id], node_ids=ids, memory_ids=list(deleted_memories))
         # One statement removes parents and children together; SQLite checks the
-        # self-referencing parent key at the end of the statement.
+        # self-referencing parent key at the end of the statement. The triggers in
+        # app/search_index.py drop the full-text rows of every deleted record;
+        # RetrievalSettings is a global user setting and is deliberately kept.
         session.execute(delete(Node).where(Node.tree_id == tree_id))
         session.execute(delete(DocumentAttachment).where(DocumentAttachment.tree_id == tree_id))
         session.delete(tree)

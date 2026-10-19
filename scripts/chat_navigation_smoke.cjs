@@ -217,9 +217,15 @@ async function poll(callback, label) {
     // Hold a real isolated branch response after server creation. The user can
     // change topics before its result arrives; completion must only seed that
     // new branch's own draft and must not steal the current topic's focus.
+    const emptyRecap = page.waitForResponse(response => new URL(response.url()).pathname === `/api/nodes/${selectedBranch.id}/return-summary`);
     await page.getByRole('button', { name: 'Back to source ↗', exact: true }).click();
     const sourceAnswer = page.locator(`[data-message-id="${thread[1].answer_message_id}"]`);
     await sourceAnswer.waitFor();
+    const emptyRecapBody = await (await emptyRecap).json();
+    assert.deepEqual([emptyRecapBody.excerpts, emptyRecapBody.note, emptyRecapBody.understanding], [[], null, null]);
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+    assert.equal(await page.locator('.chat-return-card').count(), 0, 'A branch without answers leaves nothing to recap');
+    assert.equal(modelCalls, 0, 'Returning to the source reads one local recap and never asks or explains');
     await selectAnswerText(sourceAnswer, selectedText);
     let releaseBranch;
     const held = new Promise(resolve => { releaseBranch = resolve; });
@@ -264,6 +270,228 @@ async function poll(callback, label) {
       releaseBranch();
       await page.unroute(branchRoute);
     }
+
+    // Understanding marks, map colours, the unresolved list and the return recap use a
+    // second imported topic, so the navigation fixture above stays as it was.
+    const recapAnswer = [
+      'A syntax tree is a tree whose nodes are grammar rules.',
+      'Correction: the parse tree and the abstract syntax tree are not the same thing.',
+      'Only when every token is consumed does parsing succeed.',
+    ].join('\n\n');
+    const recapNote = 'A tree of grammar rules, checked against the tokens.';
+    const recap = await api('/trees/import', {
+      format: 'branch-learning', version: 1, tree: { title: 'Return recap UI check' },
+      nodes: [
+        { id: 1, parent_id: null, title: 'Why do compilers build trees?', kind: 'root', status: 'complete' },
+        { id: 2, parent_id: 1, title: 'What is a syntax tree?', kind: 'branch', status: 'complete', seed_text: 'syntax tree', source_node_id: 1, source_message_id: 2, learning_note: recapNote },
+        { id: 3, parent_id: 2, title: 'Is it the same as an AST?', kind: 'followup', status: 'complete' },
+        { id: 4, parent_id: 1, title: 'Where else do compilers use trees?', kind: 'followup', status: 'complete' },
+      ],
+      messages: [
+        { id: 1, node_id: 1, role: 'user', content: 'Why do compilers build trees?' },
+        { id: 2, node_id: 1, role: 'assistant', content: 'Parsers turn tokens into a syntax tree, which keeps nesting explicit.', answered_by: 'Demo (offline)' },
+        { id: 3, node_id: 2, role: 'user', content: 'What is a syntax tree?' },
+        { id: 4, node_id: 2, role: 'assistant', content: recapAnswer, answered_by: 'Demo (offline)' },
+        { id: 5, node_id: 3, role: 'user', content: 'Is it the same as an AST?' },
+        { id: 6, node_id: 3, role: 'assistant', content: 'An AST means the tree without punctuation tokens.', answered_by: 'Demo (offline)' },
+        { id: 7, node_id: 4, role: 'user', content: 'Where else do compilers use trees?' },
+        { id: 8, node_id: 4, role: 'assistant', content: 'Optimizers rewrite expression trees.', answered_by: 'Demo (offline)' },
+      ],
+    });
+    const recapNodes = await api(`/trees/${recap.id}`);
+    const recapNode = title => recapNodes.find(node => node.title === title);
+    const [recapRoot, recapBranch, recapFollow, recapOther] = ['Why do compilers build trees?', 'What is a syntax tree?', 'Is it the same as an AST?', 'Where else do compilers use trees?'].map(recapNode);
+    const recapSource = (await api(`/nodes/${recapRoot.id}/thread`)).nodes[0];
+    const activeRecapNode = () => page.evaluate(id => JSON.parse(localStorage.getItem(`bl-node:${id}`)), recap.id);
+    let recapReads = 0, recapModelCalls = 0;
+    const patches = [];
+    page.on('request', request => {
+      const pathname = new URL(request.url()).pathname;
+      if (/\/api\/nodes\/\d+\/return-summary$/.test(pathname)) recapReads += 1;
+      if (/\/api\/nodes\/\d+\/(?:ask|explain)$/.test(pathname)) recapModelCalls += 1;
+      if (request.method() === 'PATCH') patches.push({ pathname, body: request.postDataJSON() });
+    });
+    await page.evaluate(({ treeId, nodeId }) => {
+      localStorage.setItem('bl-tree', JSON.stringify(treeId));
+      localStorage.setItem(`bl-node:${treeId}`, JSON.stringify(nodeId));
+    }, { treeId: recap.id, nodeId: recapFollow.id });
+    await page.reload();
+    await page.getByRole('heading', { name: 'Return recap UI check', exact: true, level: 1 }).waitFor();
+    // One mark, for the open question, in the source bar area; none under the path's answers.
+    const followMarks = page.locator('.chat-source-bar').getByRole('radiogroup', { name: 'Understanding', exact: true });
+    await followMarks.waitFor();
+    assert.equal(await page.getByRole('radiogroup', { name: 'Understanding', exact: true }).count(), 1, 'Only the open question offers a mark');
+    assert.equal(await page.locator('[data-turn-node] [role="radiogroup"]').count(), 0, 'Answers on the path carry no marks of their own');
+    assert.equal(await page.locator('[data-turn-node]').count(), 3, 'The whole path is shown');
+    const markSaved = page.waitForResponse(response => response.request().method() === 'PATCH' && new URL(response.url()).pathname === `/api/nodes/${recapFollow.id}`);
+    await followMarks.getByRole('radio', { name: 'Not yet', exact: true }).click();
+    assert.equal((await markSaved).status(), 200);
+    assert.deepEqual(patches, [{ pathname: `/api/nodes/${recapFollow.id}`, body: { understanding: 'open' } }], 'Only the mark is sent, never the note');
+    await page.reload();
+    await followMarks.waitFor();
+    assert.equal(await followMarks.getByRole('radio', { name: 'Not yet', exact: true }).getAttribute('aria-checked'), 'true', 'The mark survives a reload');
+    assert.equal(await followMarks.getByRole('radio', { name: 'Roughly', exact: true }).getAttribute('aria-checked'), 'false');
+    assert.equal((await api(`/nodes/${recapBranch.id}`)).learning_note, recapNote);
+    checks.push('The open question offers one understanding mark in the source bar, which saves only the mark and survives reload');
+
+    const map = page.getByRole('complementary', { name: 'LearningTree', exact: true });
+    const mapCard = node => map.locator(`.lm-card[aria-label=${JSON.stringify(node.title)}]`);
+    await poll(async () => /\bu-open\b/.test(await mapCard(recapBranch).getAttribute('class') ?? ''), 'the branch card takes its last node mark');
+    assert.match(await mapCard(recapBranch).locator('.lm-topic').getAttribute('title'), /· Understanding: Not yet$/);
+    assert.equal(await map.locator('.lm-card').count(), 3, 'Marks never add or remove cards');
+    assert.equal(await map.locator('.lm-card.u-open, .lm-card.u-partial, .lm-card.u-clear').count(), 1);
+    checks.push('The map colours the card whose last node is marked and names the mark in its tooltip');
+
+    const unresolvedToggle = map.getByRole('button', { name: 'Not understood', exact: true });
+    assert.equal(await unresolvedToggle.locator('.lm-badge').innerText(), '1');
+    await mapCard(recapRoot).locator('.lm-topic').click();
+    await poll(async () => await activeRecapNode() === recapRoot.id, 'the root question is open');
+    // The main line has no source bar; its question's mark sits in a bar of its own there.
+    const rootMarks = page.locator('.chat-mark-bar').getByRole('radiogroup', { name: 'Understanding', exact: true });
+    await rootMarks.waitFor();
+    assert.equal(await page.locator('.chat-source-bar').count(), 0);
+    assert.equal(await page.getByRole('radiogroup', { name: 'Understanding', exact: true }).count(), 1);
+    const rootSaved = page.waitForResponse(response => response.request().method() === 'PATCH' && new URL(response.url()).pathname === `/api/nodes/${recapRoot.id}`);
+    await rootMarks.getByRole('radio', { name: 'Can explain', exact: true }).click();
+    assert.equal((await rootSaved).status(), 200);
+    assert.deepEqual(patches.at(-1), { pathname: `/api/nodes/${recapRoot.id}`, body: { understanding: 'clear' } });
+    await poll(async () => /\bu-clear\b/.test(await mapCard(recapRoot).getAttribute('class') ?? ''), 'the root card takes its mark');
+    assert.equal(await rootMarks.getByRole('radio', { name: 'Can explain', exact: true }).getAttribute('aria-checked'), 'true');
+    assert.equal(await unresolvedToggle.locator('.lm-badge').innerText(), '1', 'Only "Not yet" marks are unresolved');
+    checks.push('A main-line question offers its mark in a bar of its own where the source bar would be');
+    await unresolvedToggle.click();
+    const unresolvedList = map.getByRole('region', { name: 'Not understood', exact: true });
+    await unresolvedList.waitFor();
+    assert(/1 question marked “Not yet”/.test(await unresolvedList.innerText()));
+    await page.keyboard.press('Escape');
+    await unresolvedList.waitFor({ state: 'hidden' });
+    await unresolvedToggle.click();
+    await unresolvedList.getByRole('button').filter({ hasText: recapFollow.title }).click();
+    await unresolvedList.waitFor({ state: 'hidden' });
+    await poll(async () => await activeRecapNode() === recapFollow.id, 'choosing an unresolved question opens it');
+    await followMarks.waitFor();
+    checks.push('The Not understood list counts marked questions, closes on Escape, and opens a chosen question');
+
+    const recapCard = page.getByRole('region', { name: `Back from “${recapBranch.title}”`, exact: true });
+    const readsBefore = recapReads;
+    await page.getByRole('button', { name: 'Back to source ↗', exact: true }).click();
+    await recapCard.waitFor();
+    await page.locator(`[data-message-id="${recapSource.answer_message_id}"]`).waitFor();
+    assert.equal(await activeRecapNode(), recapRoot.id);
+    const recapText = await recapCard.innerText();
+    for (const expected of ['Correction: the parse tree and the abstract syntax tree are not the same thing.', 'Only when every token is consumed does parsing succeed.', 'An AST means the tree without punctuation tokens.', recapNote, 'Not yet', 'not an AI summary']) {
+      assert(recapText.includes(expected), `The recap shows: ${expected}`);
+    }
+    assert.equal(recapReads - readsBefore, 1, 'One local recap read per return');
+    assert.equal(recapModelCalls, 0, 'The recap never asks or explains');
+    await page.screenshot({ path: path.join(artifacts, 'chat-return-recap.png') });
+    await recapCard.getByRole('button', { name: 'Dismiss branch recap', exact: true }).click();
+    await recapCard.waitFor({ state: 'hidden' });
+
+    await mapCard(recapBranch).locator('.lm-topic').click();
+    await poll(async () => await activeRecapNode() === recapFollow.id, 'the branch reopens at its last question');
+    await page.getByRole('button', { name: 'Back to source ↗', exact: true }).click();
+    await recapCard.waitFor();
+    await mapCard(recapOther).locator('.lm-topic').click();
+    await poll(async () => await activeRecapNode() === recapOther.id, 'another question is open');
+    await recapCard.waitFor({ state: 'hidden' });
+
+    await mapCard(recapBranch).locator('.lm-topic').click();
+    await poll(async () => await activeRecapNode() === recapFollow.id, 'the branch reopens again');
+    await page.getByRole('button', { name: 'Continue with reflection', exact: true }).click();
+    await recapCard.waitFor();
+    assert((await input.inputValue()).includes(recapNote), 'Continue with reflection still prefills the source draft');
+    assert.equal(recapModelCalls, 0);
+    await page.getByRole('button', { name: 'Send question', exact: true }).click();
+    await recapCard.waitFor({ state: 'hidden' });
+    // The offline answer ends by opening its new follow-up node.
+    await poll(async () => await activeRecapNode() !== recapRoot.id && await page.locator('.chat-send.is-stop').count() === 0, 'the sent question was answered');
+    assert.equal(recapModelCalls, 1, 'Only the question the learner sent reaches the model');
+    assert.equal(recapReads - readsBefore, 3, 'Each return reads its recap once; dismissing and leaving read nothing');
+    checks.push('Returning from a branch shows a dismissible local recap above the composer that ends on dismiss, navigation or a new question');
+
+    // Map search hits are windows of stored Markdown; choosing one must highlight the query in the
+    // rendered answer, far down a long answer, not flash the whole message.
+    const filler = Array.from({ length: 10 }, (_, index) => `Paragraph ${index + 1}: partitioning keeps every element on the correct side of the pivot, one comparison at a time, so each recursive call works on a smaller range.`);
+    const searchAnswer = ['Quicksort needs a **good pivot**.', '## Pivot choice', '1. Take the first element.\n2. Take a random element.', ...filler, 'Finally: **median-of-three** keeps the pivot stable on sorted input.'].join('\n\n');
+    const searchTopic = await api('/trees/import', {
+      format: 'branch-learning', version: 1, tree: { title: 'Map search UI check' },
+      nodes: [{ id: 1, parent_id: null, title: 'Choosing a pivot', kind: 'root', status: 'complete' }],
+      messages: [
+        { id: 1, node_id: 1, role: 'user', content: 'Why does partition balance matter for KESTREL-88?' },
+        { id: 2, node_id: 1, role: 'assistant', content: searchAnswer, answered_by: 'Demo (offline)' },
+      ],
+    });
+    const searchRow = (await api(`/nodes/${searchTopic.root_node_id}/thread`)).nodes[0];
+    await page.evaluate(treeId => localStorage.setItem('bl-tree', JSON.stringify(treeId)), searchTopic.id);
+    await page.reload();
+    await page.getByRole('heading', { name: 'Map search UI check', exact: true, level: 1 }).waitFor();
+    const highlighted = () => page.evaluate(() => [...(CSS.highlights.get('learning-source') ?? [])].map(range => range.toString()));
+    async function chooseHistoryHit(query) {
+      await map.getByRole('button', { name: 'Search nodes', exact: true }).click();
+      await map.getByRole('textbox', { name: 'Search questions or quotes', exact: true }).fill(query);
+      const group = map.getByRole('group', { name: 'Matches in history', exact: true });
+      await group.waitFor();
+      const hit = group.getByRole('button').first();
+      const text = await hit.innerText();
+      await page.evaluate(() => CSS.highlights.clear());
+      await hit.click();
+      return text;
+    }
+    const markdownHit = await chooseHistoryHit('median-of-three');
+    assert(markdownHit.includes('median-of-three') && !markdownHit.includes('**'), 'History snippets show Markdown as plain text');
+    await poll(async () => (await highlighted()).join('|') === 'median-of-three', 'the highlight covers the query inside rendered Markdown');
+    assert(await page.evaluate(() => {
+      const range = [...CSS.highlights.get('learning-source')][0];
+      const rect = range.getBoundingClientRect();
+      const viewport = document.querySelector('.chat-scroll').getBoundingClientRect();
+      return rect.top >= viewport.top && rect.bottom <= viewport.bottom;
+    }), 'The matching passage, not the middle of the answer, is scrolled into view');
+    assert(((await page.locator(`[data-message-id="${searchRow.answer_message_id}"]`).getAttribute('class')) ?? '').includes('chat-source-flash'));
+    checks.push('Choosing a map search hit in a Markdown answer highlights and scrolls to the query text, with Markdown removed from the snippet');
+
+    // Questions are searchable too. The search API labels their hits "question"; the rewrite keeps
+    // this check independent of whether the running server already does.
+    const searchRoute = `**/api/trees/${searchTopic.id}/search?*`;
+    await page.route(searchRoute, async route => {
+      const response = await route.fetch();
+      const body = await response.json();
+      body.results = body.results.map(hit => hit.message_id === searchRow.question_message_id ? { ...hit, kind: 'question' } : hit);
+      await route.fulfill({ response, json: body });
+    });
+    const questionHit = await chooseHistoryHit('KESTREL-88');
+    await page.unroute(searchRoute);
+    assert(questionHit.includes('Question · ') && !questionHit.includes('Answer · '), 'A question hit says it matched a question');
+    await poll(async () => (await highlighted()).some(text => text.includes('KESTREL-88')), 'the highlight lands on the question text');
+    assert(((await page.locator(`[data-message-id="${searchRow.question_message_id}"]`).getAttribute('class')) ?? '').includes('chat-source-flash'), 'The question turn itself is marked');
+    checks.push('A map search hit on a question is labelled as a question and highlights that question in the conversation');
+
+    // The next query never lists the previous query's history hits, even when its own request fails.
+    await map.getByRole('button', { name: 'Search nodes', exact: true }).click();
+    const searchBox = map.getByRole('textbox', { name: 'Search questions or quotes', exact: true });
+    assert.equal(await searchBox.getAttribute('maxlength'), '300', 'Queries stop at the server limit');
+    await searchBox.fill('median-of-three');
+    const historyGroup = map.getByRole('group', { name: 'Matches in history', exact: true });
+    await historyGroup.waitFor();
+    let releaseSearch;
+    await page.route(searchRoute, async route => {
+      await new Promise(resolve => { releaseSearch = resolve; });
+      await route.abort();
+    });
+    await searchBox.fill('median-of-three keeps');
+    assert.equal(await historyGroup.count(), 0, 'Hits for the previous query disappear at once');
+    const searchStatus = map.locator('.lm-result-count');
+    await poll(async () => releaseSearch !== undefined, 'the next search was sent');
+    assert.equal(await searchStatus.innerText(), 'Searching…', 'An unanswered search is not reported as finding nothing');
+    releaseSearch();
+    // A search that never reached the history is not reported as finding nothing.
+    await poll(async () => await searchStatus.innerText() === 'History search failed', 'a failed search ends the wait and says so');
+    assert.equal(await historyGroup.count(), 0, 'A failed search leaves no stale hits behind');
+    await page.unroute(searchRoute);
+    await searchBox.fill('keeps the pivot stable');
+    await poll(async () => await searchStatus.innerText() === '1 results', 'the next search reaches the history again');
+    await searchBox.press('Escape');
+    checks.push('Map search shows history hits only for the current query, says it is searching until the server answers, says when the history search failed and drops stale hits then');
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ ok: true, checks }, null, 2));
   } finally {

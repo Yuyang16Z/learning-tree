@@ -59,6 +59,74 @@ describe('stream recovery boundaries', () => {
     expect(result).not.toHaveProperty('context_status');
     expect(result).not.toHaveProperty('summary');
   });
+  it('hands numeric diagnostics to their handler without leaking them into the result', async () => {
+    const report = { estimated_input_tokens: 1234, actual_input_tokens: 1100, cached_input_tokens: 800, output_tokens: 42, requests: 3, largest_request: { estimated_input_tokens: 500, actual_input_tokens: 460, cached_input_tokens: 300 }, compacted: false, tool_rounds: 2, calibration_ratio: 1, timings_ms: { retrieval: 10, tools: 20, summary: 0, model: 300, total: 400 } };
+    const events = [
+      { started: true, node_id: 9 },
+      { diagnostics: 'not an object' },
+      { diagnostics: [report] },
+      { diagnostics: report, seq: 2 },
+      { delta: '回答' },
+      { done: true, node_id: 9 },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(stream(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')))));
+    const diagnostics = vi.fn();
+    const result = await api.ask(1, { question: '问题', config_id: 1 }, { onDelta() {}, onDiagnostics: diagnostics });
+    expect(diagnostics.mock.calls).toEqual([[report]]);
+    expect(result).not.toHaveProperty('diagnostics');
+    expect(result).toMatchObject({ node_id: 9, seq: 2 });
+  });
+  it('dispatches memory sources once without merging them into the result', async () => {
+    const sources = [{ memory_id: 7, source_node_id: 1, tree_id: 1, tree_title: '当前树', scope: 'path' }];
+    const events = [{ started: true, node_id: 9 }, { sources }, { sources: 'not a list' }, { delta: '回答' }, { done: true, node_id: 9 }];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(stream(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')))));
+    const received = vi.fn();
+    const result = await api.ask(1, { question: '问题', config_id: 1 }, { onDelta() {}, onSources: received });
+    expect(received.mock.calls).toEqual([[sources]]);
+    expect(result).not.toHaveProperty('sources');
+  });
+  it('drops malformed memory sources, and a sources event with none left', async () => {
+    const valid = { memory_id: 7, source_node_id: 1, tree_id: 1, tree_title: '当前树', scope: 'path' };
+    const events = [
+      { started: true, node_id: 9 },
+      { sources: [null] },
+      { sources: [{ memory_id: 'x', scope: 'path' }] },
+      { sources: [valid, null, { ...valid, memory_id: 8, scope: 'everywhere' }] },
+      { delta: '回答' },
+      { done: true, node_id: 9 },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(stream(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')))));
+    const received = vi.fn();
+    await api.ask(1, { question: '问题', config_id: 1 }, { onDelta() {}, onSources: received });
+    expect(received.mock.calls).toEqual([[[valid]]]);
+  });
+  it('reads only well-formed stored sources in thread rows', async () => {
+    const valid = { memory_id: 7, source_node_id: 1, tree_id: 1, tree_title: '当前树', scope: 'tree' };
+    const rows = [{ node_id: 1, answer: 'a', sources: [null, valid] }, { node_id: 2, answer: 'b', sources: [{}] }, { node_id: 3, answer: 'c', sources: null }];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ nodes: rows }), { headers: { 'content-type': 'application/json' } })));
+    const thread = await api.getThread(3);
+    expect(thread.map(row => row.sources)).toEqual([[valid], null, null]);
+    expect(thread.map(row => row.answer)).toEqual(['a', 'b', 'c']);
+  });
+  it('hands tool results their stored-result reference from the event and its envelope', async () => {
+    const events = [
+      { started: true, node_id: 9, request_id: 'r1' },
+      { tool_start: { name: 'web_search', args: { query: 'x' } }, seq: 1, node_id: 9, request_id: 'r1' },
+      { tool_end: { name: 'web_search', result: 'preview', call_index: 1, truncated: true }, seq: 2, node_id: 9, request_id: 'r1' },
+      { tool_end: { name: 'fetch', result: 'short', truncated: false }, seq: 3, node_id: 9, request_id: 'r1' },
+      { delta: '回答' },
+      { done: true, node_id: 9 },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(stream(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')))));
+    const starts = vi.fn(); const ends = vi.fn();
+    const result = await api.ask(1, { question: '问题', config_id: 1 }, { onDelta() {}, onToolStart: starts, onToolEnd: ends });
+    expect(starts.mock.calls).toEqual([['web_search', { query: 'x' }]]);
+    expect(ends.mock.calls).toEqual([
+      ['web_search', 'preview', { call_index: 1, truncated: true, request_id: 'r1', node_id: 9 }],
+      ['fetch', 'short', { truncated: false }],
+    ]);
+    expect(result).not.toHaveProperty('tool_end');
+  });
   it('does not mistake context readiness for terminal success', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(stream('data: {"context_status":"summarizing"}\n\ndata: {"context_status":"ready"}\n\n'))));
     const contextStatus = vi.fn();

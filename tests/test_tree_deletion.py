@@ -29,6 +29,7 @@ from app.models import (
     PreferenceExtraction,
     PreferenceProfile,
     PreferenceSupplement,
+    RetrievalSettings,
 )
 from app.routers import nodes, trees
 
@@ -140,6 +141,7 @@ def test_delete_removes_all_owned_records_and_caches_preserving_other_topics(set
                 ModelConfig(label="Keep model", base_url="mock", llm_model="mock", api_key="mock"),
                 McpServer(label="Shared library", command="mock", args=["shared-library"]),
                 PreferenceProfile(content="Manually managed preferences"),
+                RetrievalSettings(include_siblings=True),
             ]
         )
         memories = [
@@ -163,7 +165,7 @@ def test_delete_removes_all_owned_records_and_caches_preserving_other_topics(set
         kept_memory_ids = [memories[3].id, memories[4].id]
         preserved = {
             model.__name__: [row.model_dump() for row in session.exec(select(model)).all()]
-            for model in (ModelConfig, McpServer, PreferenceProfile)
+            for model in (ModelConfig, McpServer, PreferenceProfile, RetrievalSettings)
         }
         for tree_id, root in ((target_id, target_root), (other_id, other_root)):
             compaction._DELETED_TREES.discard(tree_id)
@@ -206,10 +208,18 @@ def test_delete_removes_all_owned_records_and_caches_preserving_other_topics(set
         assert [
             row.memory_id for row in session.exec(select(MemoryEmbedding)).all()
         ] == kept_memory_ids
-        for model in (ModelConfig, McpServer, PreferenceProfile):
+        for model in (ModelConfig, McpServer, PreferenceProfile, RetrievalSettings):
             assert [row.model_dump() for row in session.exec(select(model)).all()] == preserved[
                 model.__name__
             ]
+    with engine.connect() as connection:
+        indexed = connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'search_index'"
+        ).first()
+        if indexed is not None:
+            # Triggers remove the deleted topic's full-text rows; the other topic keeps its own.
+            rows = connection.exec_driver_sql("SELECT tree_id FROM search_index").fetchall()
+            assert rows and all(row[0] == other_id for row in rows), rows
 
 
 def test_document_finishing_after_delete_cannot_reappear_on_replacement_node(setup, monkeypatch):

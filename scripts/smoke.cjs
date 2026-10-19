@@ -100,6 +100,16 @@ async function poll(callback) {
       await route.fulfill({ json: { state: 'preparing', embedding_ready: false, reranker_ready: false } });
       retrievalFixture = { state: 'ready', embedding_ready: true, reranker_ready: true };
     });
+    // The first read of the scope switches fails (a server restart, a phone on a flaky link).
+    const scopeRoute = '**/api/memories/retrieval/settings';
+    let scopeReads = 0;
+    await page.route(scopeRoute, route => {
+      if (route.request().method() !== 'GET') return route.continue();
+      scopeReads += 1;
+      if (scopeReads === 1) return route.fulfill({ status: 502, body: '' });
+      if (scopeReads === 2) return route.fulfill({ json: { include_siblings: true, include_other_trees: false, revision: 'changed-elsewhere' } });
+      return route.continue();
+    });
     await page.getByRole('button', { name: '⚙ Settings', exact: true }).click();
     const memoryDialog = page.getByRole('dialog');
     await memoryDialog.getByRole('button', { name: 'Memory', exact: true }).click();
@@ -111,6 +121,57 @@ async function poll(callback) {
     assert.equal(await memoryDialog.getByRole('link', { name: 'Installation and resource requirements', exact: true }).getAttribute('href'), 'https://github.com/Yuyang16Z/learning-tree/blob/main/docs/operations.md');
     assert.equal(prepareCalls, 0, 'A basic install must not request a model download');
     checks.push('Basic installation explains optional retrieval setup without an ineffective model download action');
+    const pathScope = retrievalPanel.getByRole('checkbox', { name: 'Current learning path (always)', exact: true });
+    const siblingScope = retrievalPanel.getByRole('checkbox', { name: 'Other branches of this topic', exact: true });
+    const otherScope = retrievalPanel.getByRole('checkbox', { name: 'Other learning topics (except archived ones)', exact: true });
+    const showMemoryTabAgain = async () => {
+      await memoryDialog.getByRole('button', { name: 'Appearance', exact: true }).click();
+      await memoryDialog.getByRole('button', { name: 'Memory', exact: true }).click();
+    };
+    await retrievalPanel.getByRole('alert').filter({ hasText: 'Request failed (502)' }).waitFor();
+    assert(await siblingScope.isDisabled() && await otherScope.isDisabled(), 'Switches that could not be read cannot be changed');
+    // Showing the Memory tab again reads them again: the failure is retried, and a change made on
+    // another device appears instead of a stale value that would end in a conflict.
+    await showMemoryTabAgain();
+    await poll(async () => await siblingScope.isEnabled() && await siblingScope.isChecked());
+    assert.equal(await retrievalPanel.getByRole('alert').count(), 0, 'A successful read clears the failed one');
+    await showMemoryTabAgain();
+    await poll(async () => scopeReads === 3 && !(await siblingScope.isChecked()));
+    await page.unroute(scopeRoute);
+    checks.push('The memory scope switches are read again whenever the Memory tab is shown, so a failed read is retried and changes from another device appear');
+    // Wider memory scopes are opt-in toggles saved with a revision; the path stays always on.
+    const scopeSaves = [];
+    await page.route(scopeRoute, async route => {
+      if (route.request().method() !== 'PUT') return route.continue();
+      const body = route.request().postDataJSON();
+      scopeSaves.push(body);
+      await route.fulfill({ json: { ...body, revision: 'saved-revision' } });
+    });
+    await poll(async () => await siblingScope.isEnabled());
+    assert(await pathScope.isChecked() && await pathScope.isDisabled(), 'The current path is always searched');
+    assert(!(await siblingScope.isChecked()) && !(await otherScope.isChecked()), 'Wider scopes start off');
+    await siblingScope.click();
+    await poll(async () => scopeSaves.length === 1);
+    assert.deepEqual(scopeSaves[0], { include_siblings: true, include_other_trees: false, revision: 'initial' });
+    await poll(async () => siblingScope.isChecked());
+    await page.unroute(scopeRoute);
+    // A save still running keeps Settings open, and its conflict is reported after a tab switch.
+    let releaseScopeSave;
+    await page.route(scopeRoute, async route => {
+      if (route.request().method() !== 'PUT') return route.continue();
+      await new Promise(resolve => { releaseScopeSave = resolve; });
+      await route.fulfill({ status: 409, json: { detail: '检索范围设置已在其他窗口更新，请重新载入。' } });
+    });
+    await otherScope.click();
+    await poll(async () => releaseScopeSave !== undefined);
+    assert(await memoryDialog.getByRole('button', { name: 'Close', exact: true }).isDisabled(), 'Settings stays open while a scope change is saving');
+    await memoryDialog.getByRole('button', { name: 'Appearance', exact: true }).click();
+    releaseScopeSave();
+    await memoryDialog.getByRole('button', { name: 'Memory', exact: true }).click();
+    await retrievalPanel.getByRole('alert').filter({ hasText: 'your change was not saved' }).waitFor();
+    assert(!(await otherScope.isChecked()), 'The switch shows the setting saved elsewhere');
+    await page.unroute(scopeRoute);
+    checks.push('Memory settings offer opt-in sibling and other-topic recall, saving each change with its revision');
     retrievalFixture = { state: 'degraded', embedding_ready: false, reranker_ready: false };
     await memoryDialog.getByRole('button', { name: 'Refresh status', exact: true }).click();
     await poll(async () => (await retrievalPanel.getAttribute('data-memory-retrieval-state')) === 'degraded');
@@ -134,7 +195,47 @@ async function poll(callback) {
     await modelForm.getByLabel('API format', { exact: true }).selectOption('anthropic');
     await modelForm.getByRole('spinbutton', { name: 'Max output tokens', exact: true }).waitFor();
     assert.equal(await contextWindow.inputValue(), '32768');
+    // Detection is explicit: the field keeps its default until the button asks the (fixture) provider.
+    const discoverRoute = '**/api/models/discover';
+    const discoverBodies = [];
+    await page.route(discoverRoute, route => {
+      discoverBodies.push(route.request().postDataJSON());
+      return route.fulfill({ json: { context_window: 1048576, max_output_tokens: null, source: 'catalog', note: '服务商未提供该模型的上下文长度；以下为内置目录的近似值，请核对后保存。' } });
+    });
+    await modelForm.getByRole('button', { name: 'Detect', exact: true }).click();
+    await modelForm.getByRole('status').filter({ hasText: 'approximate value from the built-in catalog' }).waitFor();
+    assert.equal(await contextWindow.inputValue(), '1048576');
+    assert.equal(discoverBodies.length, 1);
+    assert.equal(discoverBodies[0].protocol, 'anthropic');
+    assert.equal(discoverBodies[0].api_key, '', 'The browser never holds the stored key; the server reuses it only for the saved protocol and address');
+    await page.unroute(discoverRoute);
+    // Detection clears an earlier error, holds the field and Save until it answers, and never fills
+    // in a window the form would reject (a 4,096-token vLLM max_model_len, say).
+    await contextWindow.fill('8192');
+    await modelForm.getByRole('spinbutton', { name: 'Max output tokens', exact: true }).fill('7168');
+    await modelForm.getByRole('button', { name: 'Save', exact: true }).click();
+    await modelForm.getByRole('alert').waitFor();
+    let releaseDetection;
+    await page.route(discoverRoute, async route => {
+      await new Promise(resolve => { releaseDetection = resolve; });
+      await route.fulfill({ json: { context_window: 4096, max_output_tokens: null, source: 'provider', note: '已从服务商获取该模型的上限。' } });
+    });
+    await modelForm.getByRole('button', { name: 'Detect', exact: true }).click();
+    assert.equal(await modelForm.getByRole('alert').count(), 0, 'Detecting clears an earlier validation message');
+    await poll(async () => releaseDetection !== undefined);
+    assert(await contextWindow.isDisabled(), 'The field cannot be edited while a detection would overwrite it');
+    assert(await modelForm.getByRole('button', { name: 'Save', exact: true }).isDisabled(), 'Saving waits for the detection');
+    releaseDetection();
+    await modelForm.getByRole('status').filter({ hasText: 'outside the accepted range' }).waitFor();
+    assert.equal(await contextWindow.inputValue(), '8192', 'An out-of-range detection leaves the field unchanged');
+    await page.unroute(discoverRoute);
+    // Unstubbed: the API format changed in the form, so the server makes no request with the
+    // saved key and says so; the stubbed answers above stand in for a provider the form could reach.
+    await modelForm.getByRole('button', { name: 'Detect', exact: true }).click();
+    await modelForm.getByRole('status').filter({ hasText: 'saved API key is not sent to the new endpoint' }).waitFor();
+    assert.equal(await contextWindow.inputValue(), '8192', 'A detection without a provider answer leaves the field unchanged');
     await modelForm.getByLabel('API format', { exact: true }).selectOption('openai');
+    assert.equal(await modelForm.getByRole('status').count(), 0, 'A detection note never describes another model');
     const answerReserve = modelForm.getByRole('spinbutton', { name: 'Answer reserve (tokens)', exact: true });
     await contextWindow.fill('8192');
     await answerReserve.fill('7168');
@@ -147,7 +248,7 @@ async function poll(callback) {
     await modelForm.waitFor({ state: 'hidden' });
     assert.equal((await api('/models'))[0].context_window, 65536);
     await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click();
-    checks.push('Model settings expose context capacity for both protocols, reject unusable budgets and persist valid settings');
+    checks.push('Model settings expose context capacity for both protocols, detect windows only on request, reject unusable budgets and persist valid settings');
     await page.reload();
     await input.waitFor();
     await assertLocale('en');
@@ -159,6 +260,33 @@ async function poll(callback) {
     await page.locator(`[data-answer-node="${tree.root_node_id}"]`).waitFor();
     await poll(async () => (await api(`/nodes/${tree.root_node_id}`)).status === 'complete');
     checks.push('Mock answer persists and Enter clears the submitted draft');
+    // The map search asks the server's full-text index for answer passages and jumps to them.
+    const map = page.getByRole('complementary', { name: 'LearningTree', exact: true });
+    await map.getByRole('button', { name: 'Search nodes', exact: true }).click();
+    const searchBox = map.getByRole('textbox', { name: 'Search questions or quotes', exact: true });
+    await searchBox.fill('兄弟分支没掺进来');
+    const historyGroup = map.getByRole('group', { name: 'Matches in history', exact: true });
+    await historyGroup.waitFor();
+    const historyHit = historyGroup.getByRole('button').first();
+    assert((await historyHit.innerText()).includes('Answer'), 'history hits say what kind of record matched');
+    assert((await historyHit.innerText()).includes('兄弟分支没掺进来'), 'history hits show a verbatim snippet');
+    const rootAnswer = await api(`/nodes/${tree.root_node_id}`);
+    const answerMessage = rootAnswer.messages.find(message => message.role === 'assistant');
+    await historyHit.click();
+    await poll(async () => ((await page.locator(`[data-message-id="${answerMessage.id}"]`).getAttribute('class')) ?? '').includes('chat-source-flash'));
+    // The whole-answer flash is also the fallback when no passage matches: the highlight proves the jump.
+    await poll(async () => (await page.evaluate(() => [...(CSS.highlights.get('learning-source') ?? [])].map(range => range.toString()))).some(text => text.includes('兄弟分支没掺进来')));
+    assert.equal(await map.getByRole('textbox', { name: 'Search questions or quotes', exact: true }).count(), 0, 'Choosing a hit closes the search');
+    checks.push('Map search lists full-text matches from the server and jumps to the matching answer passage');
+    // Words only the learner's question holds come back as a question hit, labelled as one.
+    await map.getByRole('button', { name: 'Search nodes', exact: true }).click();
+    await searchBox.fill('learning tree works');
+    await historyGroup.waitFor();
+    const questionHit = await historyGroup.getByRole('button').first().innerText();
+    assert(questionHit.includes('Question · '), `question hits say they matched a question: ${JSON.stringify(questionHit)}`);
+    await searchBox.press('Escape');
+    await searchBox.waitFor({ state: 'hidden' });
+    checks.push('Map search labels a match in a question as a question');
     await input.fill(ordinaryDraft);
     const originalAnswer = await page.locator(`[data-answer-node="${tree.root_node_id}"]`).innerText();
     await page.locator('.chat-question').first().hover();
