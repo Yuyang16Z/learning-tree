@@ -207,7 +207,7 @@ async function poll(callback) {
     assert.equal(await contextWindow.inputValue(), '1048576');
     assert.equal(discoverBodies.length, 1);
     assert.equal(discoverBodies[0].protocol, 'anthropic');
-    assert.equal(discoverBodies[0].api_key, '', 'A blank key means the stored key is used server-side');
+    assert.equal(discoverBodies[0].api_key, '', 'The browser never holds the stored key; the server reuses it only for the saved protocol and address');
     await page.unroute(discoverRoute);
     // Detection clears an earlier error, holds the field and Save until it answers, and never fills
     // in a window the form would reject (a 4,096-token vLLM max_model_len, say).
@@ -229,6 +229,11 @@ async function poll(callback) {
     await modelForm.getByRole('status').filter({ hasText: 'outside the accepted range' }).waitFor();
     assert.equal(await contextWindow.inputValue(), '8192', 'An out-of-range detection leaves the field unchanged');
     await page.unroute(discoverRoute);
+    // Unstubbed: the API format changed in the form, so the server makes no request with the
+    // saved key and says so; the stubbed answers above stand in for a provider the form could reach.
+    await modelForm.getByRole('button', { name: 'Detect', exact: true }).click();
+    await modelForm.getByRole('status').filter({ hasText: 'saved API key is not sent to the new endpoint' }).waitFor();
+    assert.equal(await contextWindow.inputValue(), '8192', 'A detection without a provider answer leaves the field unchanged');
     await modelForm.getByLabel('API format', { exact: true }).selectOption('openai');
     assert.equal(await modelForm.getByRole('status').count(), 0, 'A detection note never describes another model');
     const answerReserve = modelForm.getByRole('spinbutton', { name: 'Answer reserve (tokens)', exact: true });
