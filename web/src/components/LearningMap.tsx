@@ -259,7 +259,7 @@ export function LearningMap({ nodes, activeId, onSelect, onDelete, onCollapse, w
   const results = useMemo(() => localMatches(nodes, query), [nodes, query]);
   const merged = useMemo(() => mergeSearchResults(results, hits, nodes), [results, hits, nodes]);
   const resultCount = merged.local.length + merged.remote.length;
-  const hitKind: Record<SearchHit["kind"], string> = { title: t("标题", "Title"), message: t("回答", "Answer"), note: t("笔记", "Note"), memory: t("记忆", "Memory") };
+  const hitKind: Record<SearchHit["kind"], string> = { title: t("标题", "Title"), question: t("问题", "Question"), message: t("回答", "Answer"), note: t("笔记", "Note"), memory: t("记忆", "Memory") };
   const activeGroupId = activeId == null ? undefined : tree.nodeToGroup.get(activeId);
   const nodeStyle = (x: number, y: number, height: number): CSSProperties => ({ left: x, top: y, width: TOPIC_CARD.width, height });
 

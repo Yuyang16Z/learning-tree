@@ -64,11 +64,14 @@ export interface AnswerSource {
   tree_title: string;
   scope: 'path' | 'tree' | 'other';
 }
-/** One topic search result; message hits carry the message id so the map can jump to the passage. */
+/**
+ * One topic search result. Question (user message) and message (answer) hits carry the message id,
+ * so the map can jump to the passage.
+ */
 export interface SearchHit {
   node_id: number;
   message_id: number | null;
-  kind: 'title' | 'message' | 'note' | 'memory';
+  kind: 'title' | 'question' | 'message' | 'note' | 'memory';
   snippet: string;
   rank: number;
 }
