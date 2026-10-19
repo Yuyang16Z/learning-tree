@@ -143,17 +143,28 @@ def fetch_memory_note(
     query: str = "",
     quoted_text: str = "",
     existing_text: str = "",
+    *,
+    scopes=None,
 ) -> MemoryNote:
     """Choose relevant memories within the allowed source path, independently of preferences.
 
     Sibling branches and other topics only join in after the user enabled them in
-    Settings; those hits stay labelled with their origin in the rendered note."""
+    Settings; those hits stay labelled with their origin in the rendered note.
+    `scopes` is the caller's snapshot of the two switches (a dict or the settings
+    read); an answer passes the one its history tool also uses, so a save landing
+    meanwhile cannot give the two different scopes. Without it, the settings are read."""
     from .retrieval import RetrievalConfig, read_retrieval_settings, retrieve_memory
 
-    scopes = read_retrieval_settings(session)
+    if scopes is None:
+        scopes = read_retrieval_settings(session)
+
+    def flag(name: str) -> bool:
+        value = scopes.get(name) if isinstance(scopes, dict) else getattr(scopes, name, False)
+        return bool(value)
+
     config = RetrievalConfig(
-        include_siblings=scopes.include_siblings,
-        include_other_trees=scopes.include_other_trees,
+        include_siblings=flag("include_siblings"),
+        include_other_trees=flag("include_other_trees"),
     )
     result = retrieve_memory(
         session, tree_id, source_node_ids, query, quoted_text, existing_text, config=config
@@ -397,6 +408,7 @@ def extract_and_save(
                 source_node_id=node_id,
                 fact_type=record["type"],
                 terms=record["terms"],
+                origin="extracted",
             )
             s.add(memory)
             s.flush()
@@ -404,8 +416,11 @@ def extract_and_save(
             old = (
                 s.get(Memory, record["supersedes"]) if record["supersedes"] in replaceable else None
             )
-            # Only a current, never user-edited fact on this path can be superseded;
-            # the old row stays stored and visible in Settings.
+            # Only a current fact on this path that extraction wrote and nobody edited
+            # can be superseded; legacy facts may hold an unrecorded hand edit. The old
+            # row stays stored and visible in Settings. superseded_by alone records it:
+            # updated_at marks hand edits, so a fact made current again when its
+            # replacement is deleted can still be corrected later.
             if (
                 old is not None
                 and old.id != memory.id
@@ -413,9 +428,9 @@ def extract_and_save(
                 and old.tree_id == tree_id
                 and old.source_node_id in path_ids
                 and old.superseded_by is None
+                and old.origin == "extracted"
                 and old.updated_at is None
             ):
                 old.superseded_by = memory.id
-                old.updated_at = datetime.now(timezone.utc)
                 s.add(old)
         s.commit()

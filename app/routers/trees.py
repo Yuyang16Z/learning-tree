@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import delete, func, or_
 from sqlmodel import Session, select
 
+from ..answer_sources import scrub_sources
 from ..context_compaction import forget_tree
 from ..db import get_session
 from ..documents import (
@@ -38,6 +39,7 @@ from ..schemas import UNDERSTANDING_LEVELS, NodeOut, TreeIn, TreeOut, TreePatch,
 from ..search_index import excerpt, search_text
 from ..tool_results import portable_steps
 from ..tree_identity import record_node_id, record_tree_id
+from .memory_router import restore_superseded
 from .nodes import _CANCELLED_REQUESTS, _REQUEST_LOCK, discard_node_work, node_metadata
 
 router = APIRouter(prefix="/trees", tags=["trees"])
@@ -423,7 +425,8 @@ def search_tree(
         results.append(
             {
                 "node_id": hit.node_id,
-                "message_id": hit.ref_id if hit.kind == "message" else None,
+                # Answers are "message" hits and the user's questions "question" hits.
+                "message_id": hit.ref_id if hit.kind in ("message", "question") else None,
                 "kind": hit.kind,
                 "snippet": hit.snippet,
                 "rank": len(results) + 1,
@@ -462,11 +465,18 @@ def delete_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
         for message in session.exec(select(Message).where(Message.node_id.in_(ids))).all():
             session.delete(message)
         session.execute(delete(ToolResult).where(ToolResult.node_id.in_(ids)))
+        deleted_memories = {}
         for memory in session.exec(
             select(Memory).where((Memory.tree_id == tree_id) | Memory.source_node_id.in_(ids))
         ).all():
             session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory.id))
+            deleted_memories[memory.id] = memory.superseded_by
             session.delete(memory)
+        # No fact keeps pointing at a deleted replacement, and other topics' answers
+        # keep no provenance (ids) pointing into this topic.
+        session.flush()
+        restore_superseded(session, deleted_memories)
+        scrub_sources(session, tree_ids=[tree_id], node_ids=ids, memory_ids=list(deleted_memories))
         # One statement removes parents and children together; SQLite checks the
         # self-referencing parent key at the end of the statement. The triggers in
         # app/search_index.py drop the full-text rows of every deleted record;

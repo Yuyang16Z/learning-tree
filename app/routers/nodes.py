@@ -14,6 +14,7 @@ from sqlalchemy import delete
 from sqlalchemy.orm import defer
 from sqlmodel import Session, select
 
+from ..answer_sources import resolve_sources, scrub_sources, sources_for_storage
 from ..calibration import calibration_sample, record_usage
 from ..config import settings
 from ..context import BASE_SYSTEM, build_context, context_messages, make_content
@@ -28,7 +29,15 @@ from ..document_context import (
 )
 from ..documents import DocumentAttachment, document_summary, resolve_documents
 from ..learning_summaries import invalidate_summaries, summarize_history
-from ..llm import LLMSpec, complete, run_agent, stream_chat
+from ..llm import (
+    LLMSpec,
+    complete,
+    rejects_tools,
+    remember_tools_unsupported,
+    run_agent,
+    stream_chat,
+    tools_unsupported,
+)
 from ..models import (
     Memory,
     MemoryEmbedding,
@@ -66,6 +75,7 @@ from ..tool_results import (
     stored_text,
 )
 from ..tree_identity import record_node_id
+from .memory_router import restore_superseded
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
 _REQUEST_LOCK = threading.RLock()
@@ -120,6 +130,29 @@ _STREAM_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 _COMPLETE_RESULT_NOTE = (
     "\n[完整结果共 {total} 字，已保存；可调用 read_tool_result(call_index={index}) 分页阅读。]"
 )
+# The endpoint rejected tools the user selected; retrying the same request cannot help.
+TOOLS_REJECTED_ERROR = (
+    "模型接口拒绝了本次请求中的工具（可能不支持工具调用）。"
+    "请换用支持工具的模型，或取消选择工具后重试。"
+)
+
+
+def _plain_on_rejected_tools(agent, spec: LLMSpec, plain):
+    """Relay the agent's events, unless its first request is rejected for carrying tools:
+    then remember the endpoint and answer through `plain()` instead. Only the implicit
+    read-only readers ride along here, and nothing was relayed before the rejection."""
+    try:
+        first = next(agent)
+    except StopIteration:
+        return
+    except Exception as exc:
+        if not rejects_tools(exc):
+            raise
+        remember_tools_unsupported(spec)
+        yield from plain()
+        return
+    yield first
+    yield from agent
 
 
 def _with_result_reader(definitions: list[dict], is_mock: bool) -> list[dict]:
@@ -295,7 +328,22 @@ def _message_documents(session: Session, message: Message | None) -> list[dict]:
     ]
 
 
-def _qa_rows(node: Node, messages: list[Message], session: Session) -> list[dict]:
+def _answer_sources(session: Session, messages: list[Message]) -> dict[int, list[dict] | None]:
+    """Current provenance of these answers, resolved together: three queries in all,
+    entries whose records were deleted dropped and topic titles read live."""
+    answers = [message for message in messages if message.sources]
+    resolved = resolve_sources(session, [message.sources for message in answers])
+    return {message.id: sources for message, sources in zip(answers, resolved, strict=True)}
+
+
+def _qa_rows(
+    node: Node,
+    messages: list[Message],
+    session: Session,
+    sources: dict[int, list[dict] | None] | None = None,
+) -> list[dict]:
+    if sources is None:
+        sources = _answer_sources(session, messages)
     # Preserve all legacy Q/A pairs without changing message or branch IDs.
     pairs: list[tuple[Message | None, list[Message]]] = []
     for message in messages:
@@ -329,7 +377,7 @@ def _qa_rows(node: Node, messages: list[Message], session: Session) -> list[dict
                 "reasoning": answer.reasoning if answer else None,
                 "steps": answer.steps if answer else None,
                 "diagnostics": answer.diagnostics if answer else None,
-                "sources": answer.sources if answer else None,
+                "sources": sources.get(answer.id) if answer else None,
                 "answered_by": answer.answered_by if answer else None,
                 "attempts": [
                     {"message_id": m.id, "status": m.status, "content": m.content}
@@ -351,6 +399,7 @@ def _get(session: Session, node_id: int) -> Node:
 def get_node(node_id: int, session: Session = Depends(get_session)) -> dict:
     node = _get(session, node_id)
     msgs = get_messages(session, node_id)
+    sources = _answer_sources(session, msgs)
     return {
         "id": node.id,
         "tree_id": node.tree_id,
@@ -362,6 +411,7 @@ def get_node(node_id: int, session: Session = Depends(get_session)) -> dict:
         "messages": [
             {
                 **m.model_dump(exclude={"created_at", "node_id"}),
+                "sources": sources.get(m.id),
                 "documents": _message_documents(session, m),
             }
             for m in msgs
@@ -371,11 +421,11 @@ def get_node(node_id: int, session: Session = Depends(get_session)) -> dict:
 
 @router.get("/{node_id}/thread")
 def get_thread_route(node_id: int, session: Session = Depends(get_session)) -> dict:
+    thread = get_thread(session, _get(session, node_id))
+    sources = _answer_sources(session, [message for _, messages in thread for message in messages])
     return {
         "nodes": [
-            row
-            for node, messages in get_thread(session, _get(session, node_id))
-            for row in _qa_rows(node, messages, session)
+            row for node, messages in thread for row in _qa_rows(node, messages, session, sources)
         ]
     }
 
@@ -454,9 +504,16 @@ def delete_node(node_id: int, session: Session = Depends(get_session)) -> dict:
         for message in session.exec(select(Message).where(Message.node_id.in_(ids))).all():
             session.delete(message)
         session.execute(delete(ToolResult).where(ToolResult.node_id.in_(ids)))
+        deleted_memories = {}
         for memory in session.exec(select(Memory).where(Memory.source_node_id.in_(ids))).all():
             session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory.id))
+            deleted_memories[memory.id] = memory.superseded_by
             session.delete(memory)
+        # Earlier facts these facts corrected pass to a correction that remains or become
+        # current again, and answers elsewhere keep no provenance pointing into the subtree.
+        session.flush()
+        restore_superseded(session, deleted_memories)
+        scrub_sources(session, node_ids=ids, memory_ids=list(deleted_memories))
         # The full-text search_index rows of these messages, memories and notes are
         # removed by the SQLite triggers in app/search_index.py as the rows go.
         # References outside the deleted subtree must not point to nonexistent nodes.
@@ -745,7 +802,8 @@ def _persist(target_id: int, generation: Generation, label: str) -> None:
         message.reasoning = "".join(generation.reasoning) or None
         message.steps = list(generation.steps) or None
         message.diagnostics = generation.diagnostics or None
-        message.sources = list(generation.sources) or None
+        # Ids only, and only records that still exist: a deletion may have come first.
+        message.sources = sources_for_storage(session, generation.sources)
         message.status = generation.status
         node.status, node.error = generation.status, generation.error
         session.add(message)
@@ -1001,7 +1059,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     reasoning=previous.reasoning,
                     steps=portable_steps(previous.steps),
                     diagnostics=previous.diagnostics,
-                    sources=previous.sources,
+                    sources=sources_for_storage(session, previous.sources),
                 )
                 session.add(copied)
                 copied_history.append(copied)
@@ -1185,6 +1243,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                         quoted_text=memory_quote,
                         # These sources are mandatory even after compaction.
                         existing_text=memory_quote + "\n" + (context_target.learning_note or ""),
+                        # The same snapshot binds the history tool below.
+                        scopes=scope_snapshot,
                     )
                 timings["retrieval"] = time.monotonic() - retrieval_started
             # Test doubles return plain strings; provenance is optional.
@@ -1195,8 +1255,10 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 tool_defs, tool_router = assemble_tools(tool_session, requested_tools)
             # User-selected tools, before the implicit document reader joins them.
             tools_requested = bool(tool_defs)
+            # An endpoint that rejected tools before gets no implicit readers either.
+            readers_off = not tools_requested and tools_unsupported(spec)
             document_reader = None
-            if context_documents and not is_mock:
+            if context_documents and not is_mock and not readers_off:
                 tool_defs = [*tool_defs, DOCUMENT_TOOL_DEF]
                 document_reader = make_document_reader(
                     engine,
@@ -1210,10 +1272,14 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             context_defs = tool_defs + ([SOURCE_TOOL_DEF] if tool_defs and not is_mock else [])
             # The read-only history search joins tool rounds, and is offered on its
             # own when the user widened memory recall; demo mode never gets it.
-            history_wanted = not is_mock and (
-                tools_requested
-                or scope_snapshot["include_siblings"]
-                or scope_snapshot["include_other_trees"]
+            history_wanted = (
+                not is_mock
+                and not readers_off
+                and (
+                    tools_requested
+                    or scope_snapshot["include_siblings"]
+                    or scope_snapshot["include_other_trees"]
+                )
             )
             if history_wanted:
                 context_defs = [*context_defs, HISTORY_TOOL_DEF]
@@ -1277,7 +1343,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 for definition in (SOURCE_TOOL_DEF, HISTORY_TOOL_DEF)
                 if definition["function"]["name"] not in present
             ]
-            if context_stats["compacted"] and missing_readers and not is_mock:
+            if context_stats["compacted"] and missing_readers and not is_mock and not readers_off:
                 context_defs = _with_result_reader([*context_defs, *missing_readers], is_mock)
                 request_system, llm_messages = build_context(
                     ancestors,
@@ -1377,6 +1443,20 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             if title_needed:
                 _queue_branch_title(target_id, spec)
                 title_queued = True
+
+            def plain_answer():
+                return (
+                    {"type": kind, "text": chunk}
+                    for kind, chunk in stream_chat(
+                        spec,
+                        request_system,
+                        llm_messages,
+                        deep=body.deep_think,
+                        diagnostics=usage,
+                        cache_prefix=context_stats.get("stable_system"),
+                    )
+                )
+
             tool_defs = context_defs
             if tool_defs:
                 execute = make_executor(tool_router)
@@ -1424,18 +1504,12 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     **({"tool_catalog": tool_catalog, "max_rounds": 6} if tool_catalog else {}),
                     **({"deep": True} if body.deep_think else {}),
                 )
+                if not tools_requested:
+                    # Only implicit readers ride along: an endpoint without tool
+                    # support still answers, without them.
+                    stream = _plain_on_rejected_tools(stream, spec, plain_answer)
             else:
-                stream = (
-                    {"type": kind, "text": chunk}
-                    for kind, chunk in stream_chat(
-                        spec,
-                        request_system,
-                        llm_messages,
-                        deep=body.deep_think,
-                        diagnostics=usage,
-                        cache_prefix=context_stats.get("stable_system"),
-                    )
-                )
+                stream = plain_answer()
             model_started = time.monotonic()
             for event in stream:
                 if generation.stop.is_set():
@@ -1506,6 +1580,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     if generation.stop.is_set()
                     else str(exc)
                     if isinstance(exc, ContextBudgetExceeded)
+                    else TOOLS_REJECTED_ERROR
+                    if rejects_tools(exc)
                     else f"回答未完成（{type(exc).__name__}），可重试。"
                 )
         finally:

@@ -471,3 +471,23 @@ def test_saved_scopes_widen_what_the_chat_memory_note_recalls(setup):
     assert "（同主题其他分支「兄弟分支」）兄弟分支的 schema 事实" in note
     assert "（其他主题「MCP」）其他话题的 schema 事实" in note
     assert note.index("当前路径的 schema 事实") < note.index("兄弟分支的 schema 事实")
+
+
+def test_a_scope_snapshot_is_used_instead_of_reading_the_settings_again(setup, monkeypatch):
+    client, engine = setup
+    add(engine, "当前路径的 schema 事实")
+    add(engine, "兄弟分支的 schema 事实", source_node_id=2)
+    revision = client.get("/memories/retrieval/settings").json()["revision"]
+    body = {"include_siblings": True, "include_other_trees": True, "revision": revision}
+    assert client.put("/memories/retrieval/settings", json=body).status_code == 200
+
+    import app.retrieval as retrieval
+
+    def unexpected(session):
+        raise AssertionError("the snapshot replaces this read")
+
+    monkeypatch.setattr(retrieval, "read_retrieval_settings", unexpected)
+    off = {"include_siblings": False, "include_other_trees": False}
+    with Session(engine) as session:
+        note = service.fetch_memory_note(session, 1, [1], query="schema 事实", scopes=off)
+    assert "当前路径的 schema 事实" in note and "兄弟分支的" not in note

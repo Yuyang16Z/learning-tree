@@ -610,7 +610,7 @@ def build_synthetic(path: Path) -> None:
                     facts[text] = row
                     if text == _SUPERSEDED[1]:
                         old = facts[_SUPERSEDED[0]]
-                        old.superseded_by, old.updated_at = memory_id, created
+                        old.superseded_by = memory_id  # As the app records it.
                 turns[node_id] += 1
             session.commit()
     finally:
@@ -976,7 +976,7 @@ def measure_search(engine, snapshot: _Snapshot, include_text: bool) -> dict:
             (
                 hit.rank
                 for hit in hits
-                if (hit.kind, hit.ref_id) == ("message", question.message_id)
+                if (hit.kind, hit.ref_id) == ("question", question.message_id)
             ),
             None,
         )
@@ -1037,10 +1037,10 @@ class FactTimeline:
     retrieval skips; restore() writes the original values back. Questions must be
     visited in time order after reset().
 
-    Every superseded_by write would fire the search index's memory triggers, which find
-    the fact's index row through unindexed columns and so scan the whole index: each
-    pass would cost facts x index rows. Retrieval never reads the index, so the triggers
-    are suspended from construction until restore(), which recreates them once every
+    Every superseded_by write would fire the search index's memory triggers, which drop
+    and re-index the fact each time (on an index built before rowid lookups, each firing
+    scanned the whole index). Retrieval never reads the index, so the triggers are
+    suspended from construction until restore(), which recreates them once every
     original value is back; the index then matches the restored rows again.
     """
 

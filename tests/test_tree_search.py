@@ -118,6 +118,27 @@ def test_titles_come_first_then_indexed_text_with_anchors(client):
     assert title[0]["snippet"] == "快速排序是什么"
 
 
+@pytest.mark.parametrize("fts", [True, False])
+def test_question_matches_are_reported_as_questions(client, monkeypatch, fts):
+    from app import search_index
+
+    if not fts:
+        monkeypatch.setattr(search_index, "fts5_available", lambda connection: False)
+    http, _ = client
+    results = http.get("/trees/1/search", params={"q": "是什么？"}).json()["results"]
+    assert results == [
+        {
+            "node_id": 1,
+            "message_id": 11,
+            "kind": "question",
+            "snippet": "快速排序是什么？",
+            "rank": 1,
+        }
+    ]
+    answers = http.get("/trees/1/search", params={"q": "递归"}).json()["results"]
+    assert [(item["kind"], item["message_id"]) for item in answers] == [("message", 12)]
+
+
 def test_limits_short_queries_archived_topics_and_errors(client):
     http, _ = client
     assert (

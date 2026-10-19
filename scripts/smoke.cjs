@@ -210,6 +210,15 @@ async function poll(callback) {
     await poll(async () => ((await page.locator(`[data-message-id="${answerMessage.id}"]`).getAttribute('class')) ?? '').includes('chat-source-flash'));
     assert.equal(await map.getByRole('textbox', { name: 'Search questions or quotes', exact: true }).count(), 0, 'Choosing a hit closes the search');
     checks.push('Map search lists full-text matches from the server and jumps to the matching answer passage');
+    // Words only the learner's question holds come back as a question hit, labelled as one.
+    await map.getByRole('button', { name: 'Search nodes', exact: true }).click();
+    await searchBox.fill('learning tree works');
+    await historyGroup.waitFor();
+    const questionHit = await historyGroup.getByRole('button').first().innerText();
+    assert(questionHit.includes('Question · '), `question hits say they matched a question: ${JSON.stringify(questionHit)}`);
+    await searchBox.press('Escape');
+    await searchBox.waitFor({ state: 'hidden' });
+    checks.push('Map search labels a match in a question as a question');
     await input.fill(ordinaryDraft);
     const originalAnswer = await page.locator(`[data-answer-node="${tree.root_node_id}"]`).innerText();
     await page.locator('.chat-question').first().hover();

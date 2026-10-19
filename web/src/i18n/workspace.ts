@@ -38,6 +38,7 @@ const diagnostics: [string, string][] = [
   ["暂时无法解释，请重试。", "Could not explain this selection. Try again."],
   ["分支创建失败，请重试。", "Could not create the branch. Try again."],
   ["回答未完成，可在聊天记录中重试。", "The response is incomplete. You can retry it in the conversation."],
+  ["模型接口拒绝了本次请求中的工具（可能不支持工具调用）。请换用支持工具的模型，或取消选择工具后重试。", "The model endpoint rejected the tools in this request (it may not support tool calls). Use a model that supports tools, or deselect the tools and try again."],
   ["发送失败，草稿已保留。", "Could not send. Your draft has been kept."],
   ["保存失败，理解草稿已保留。", "Could not save. Your reflection draft has been kept."],
   ["理解标记没有保存，已恢复原来的标记。", "Your understanding mark was not saved; the previous mark is back."],

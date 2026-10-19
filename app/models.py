@@ -63,7 +63,13 @@ class Memory(SQLModel, table=True):
     # A later fact that corrects this one; superseded facts leave retrieval and the
     # search index but stay visible in Settings until deleted.
     superseded_by: int | None = None
-    updated_at: datetime | None = None  # Set by edits and supersession, not creation.
+    updated_at: datetime | None = None  # Set by hand edits only; never by supersession.
+    # "extracted": written by automatic extraction. "legacy": stored before origins
+    # were recorded, when hand edits left no trace, so it may hold the user's own
+    # correction. Only extracted facts never edited by hand can be superseded.
+    origin: str = Field(
+        default="legacy", sa_column=Column(String, nullable=False, default="legacy")
+    )
 
 
 class MemoryEmbedding(SQLModel, table=True):
@@ -222,8 +228,9 @@ class Message(SQLModel, table=True):
     # Per-answer numbers (token estimates, usage, timings) and fixed labels such as the
     # budget that stopped tool rounds; never prompt text.
     diagnostics: dict | None = Field(default=None, sa_column=Column(JSON))
-    # Memory records the answer was given: [{memory_id, source_node_id, tree_id,
-    # tree_title, scope}]. Local provenance only; excluded from exports.
+    # Memory records the answer was given: [{memory_id, source_node_id, tree_id, scope}];
+    # topic titles are read from the live topic (app/answer_sources.py), and a tree_title
+    # that earlier rows stored is ignored. Local provenance only; excluded from exports.
     sources: list | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=_now)
 

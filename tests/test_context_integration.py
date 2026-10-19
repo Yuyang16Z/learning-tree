@@ -18,7 +18,15 @@ import app.service as service
 from app import learning_summaries
 from app.context_budget import ContextPolicy, estimate_request_tokens
 from app.context_sources import SOURCE_TOOL_NAME
-from app.models import ContextSummary, KnowledgeTree, Message, ModelConfig, Node, RetrievalSettings
+from app.models import (
+    ContextSummary,
+    KnowledgeTree,
+    Memory,
+    Message,
+    ModelConfig,
+    Node,
+    RetrievalSettings,
+)
 from app.routers import nodes, trees
 from app.search_index import HISTORY_TOOL_NAME
 from app.tool_catalog import SEARCH_TOOL_NAME, tool_definition_cost
@@ -1038,6 +1046,14 @@ def test_memory_sources_are_announced_once_persisted_and_kept_out_of_exports(api
             },
         ],
     )
+    with Session(engine) as session:
+        # Provenance is shown only for records that exist; memory 8 never reached the prompt.
+        session.add(
+            Memory(
+                id=7, kind="fact", content="只有收到明确授权才执行。", tree_id=1, source_node_id=1
+            )
+        )
+        session.commit()
     monkeypatch.setattr(nodes, "fetch_memory_note", lambda *args, **kwargs: note)
     events = ask(client)
     assert events[-1]["done"], events
@@ -1058,7 +1074,9 @@ def test_memory_sources_are_announced_once_persisted_and_kept_out_of_exports(api
     assert "sources" not in json.dumps(client.get("/trees/1/export").json())
     with Session(engine) as session:
         answer = session.exec(select(Message).where(Message.node_id == 2)).all()[-1]
-        assert answer.role == "assistant" and answer.sources == [note.sources[0]]
+        # At rest an answer keeps ids and scope only; the title is read from the live topic.
+        stored = {key: value for key, value in note.sources[0].items() if key != "tree_title"}
+        assert answer.role == "assistant" and answer.sources == [stored]
 
     monkeypatch.setattr(nodes, "fetch_memory_note", lambda *args, **kwargs: "")
     events = ask(client, "再问一次。")
@@ -1066,6 +1084,37 @@ def test_memory_sources_are_announced_once_persisted_and_kept_out_of_exports(api
     follow_up = events[-1]["node_id"]
     assert follow_up != 2
     assert client.get(f"/nodes/{follow_up}/thread").json()["nodes"][-1]["sources"] is None
+
+
+def test_memory_recall_and_history_search_share_one_scope_snapshot(api, monkeypatch):
+    client, engine, calls = api
+    with Session(engine) as session:
+        session.add(RetrievalSettings(include_siblings=True, include_other_trees=True))
+        session.commit()
+    read = nodes.read_retrieval_settings
+
+    def read_then_concurrent_save(session):
+        scopes = read(session)
+        with Session(engine) as writer:  # A save from another window lands now.
+            row = writer.get(RetrievalSettings, 1)
+            row.include_other_trees = False
+            writer.add(row)
+            writer.commit()
+        return scopes
+
+    monkeypatch.setattr(nodes, "read_retrieval_settings", read_then_concurrent_save)
+    snapshots = []
+    make = nodes.make_history_search
+
+    def capture(engine_, tree_id, path, snapshot, **kwargs):
+        snapshots.append(dict(snapshot))
+        return make(engine_, tree_id, path, snapshot, **kwargs)
+
+    monkeypatch.setattr(nodes, "make_history_search", capture)
+    events = ask(client)
+    assert events[-1]["done"], events
+    assert snapshots == [{"include_siblings": True, "include_other_trees": True}]
+    assert calls["memory"][-1]["scopes"] == snapshots[0], "recall used the same snapshot"
 
 
 def _synthetic_tool(name="synthetic_tool", padding=0):

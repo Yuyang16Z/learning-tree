@@ -1,6 +1,7 @@
 """The full-text index is derived data over synthetic records; triggers keep it current."""
 
 import os
+import re
 import sqlite3
 
 os.environ["DATABASE_URL"] = "sqlite://"
@@ -113,8 +114,9 @@ def rows(engine, kind=None):
 
 @requires_fts5
 def test_create_all_builds_the_index_and_triggers_keep_it_current(engine):
+    # The user's question is its own kind: search results say what matched.
+    assert rows(engine, "question") == [("question", 11, 1, 1)]
     assert rows(engine, "message") == [
-        ("message", 11, 1, 1),
         ("message", 12, 1, 1),
         ("message", 21, 1, 2),
         ("message", 31, 1, 3),
@@ -203,6 +205,153 @@ def test_init_db_rebuilds_a_missing_or_stale_index_and_is_idempotent(engine):
     assert ("message", 70, 1, 2) in rows(engine)
 
 
+def _trigger_statements(connection) -> dict[str, list[str]]:
+    """The statements inside each stored search trigger body."""
+    stored = connection.exec_driver_sql(
+        "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'search%'"
+    )
+    return {
+        name: [
+            part.strip()
+            for part in sql[sql.index(" BEGIN ") + len(" BEGIN ") : sql.rindex(" END")].split(";")
+            if part.strip()
+        ]
+        for name, sql in stored
+    }
+
+
+@requires_fts5
+def test_trigger_statements_find_index_rows_by_rowid(engine):
+    # FTS5 can only look rows up by rowid (or MATCH): a filter on an UNINDEXED column
+    # scans the whole index for every changed source row.
+    with engine.connect() as connection:
+        triggers = _trigger_statements(connection)
+        assert len(triggers) == 11
+        for name, statements in triggers.items():
+            if name == "search_node_tree_au":
+                continue  # Nodes never move between topics; this repair may scan.
+            for statement in statements:
+                probe = re.sub(r"\b(?:OLD|NEW)\.\w+", "?", statement)
+                plan = connection.exec_driver_sql(
+                    "EXPLAIN QUERY PLAN " + probe, (None,) * probe.count("?")
+                ).fetchall()
+                for row in plan:
+                    if "search_index VIRTUAL TABLE" in row[-1] or " s VIRTUAL TABLE" in row[-1]:
+                        assert re.search(r"INDEX \d+:=", row[-1]), (name, statement, row[-1])
+
+
+@requires_fts5
+def test_index_rows_carry_rowids_derived_from_their_sources(engine):
+    with engine.connect() as connection:
+        rows = connection.exec_driver_sql("SELECT rowid, kind, ref_id FROM search_index").all()
+    offsets = search_index.ROWID_OFFSETS
+    assert offsets == {"message": 1, "question": 1, "memory": 2, "note": 3}
+    assert rows and all(rowid == ref_id * 4 + offsets[kind] for rowid, kind, ref_id in rows)
+
+
+@requires_fts5
+def test_an_index_from_an_earlier_trigger_layout_is_replaced_and_rebuilt(engine):
+    with engine.begin() as connection:
+        names = list(_trigger_statements(connection))
+        for name in names:
+            connection.exec_driver_sql(f"DROP TRIGGER {name}")
+        # The earlier layout: the same rows with arbitrary rowids, found by kind and ref_id.
+        connection.exec_driver_sql("DELETE FROM search_index")
+        connection.exec_driver_sql(
+            "INSERT INTO search_index(kind, ref_id, tree_id, node_id, content) "
+            "SELECT 'message', m.id, n.tree_id, m.node_id, m.content "
+            "FROM message m JOIN node n ON n.id = m.node_id WHERE m.status = 'complete' "
+            "UNION ALL SELECT 'memory', id, tree_id, source_node_id, content FROM memory "
+            "WHERE kind = 'fact' AND superseded_by IS NULL "
+            "UNION ALL SELECT 'note', id, tree_id, id, learning_note FROM node "
+            "WHERE learning_note IS NOT NULL AND learning_note <> ''"
+        )
+        connection.exec_driver_sql(
+            "CREATE TRIGGER search_message_ad AFTER DELETE ON message BEGIN "
+            "DELETE FROM search_index WHERE kind = 'message' AND ref_id = OLD.id; END"
+        )
+    with engine.connect() as connection:
+        # Equal counts: only the trigger layout tells that the rows must be rebuilt.
+        assert search_index.index_count(connection) == search_index.source_count(connection)
+    database.init_db()
+    with engine.connect() as connection:
+        triggers = _trigger_statements(connection)
+        assert sorted(triggers) == sorted(names)
+        assert "rowid = OLD.id * 4 + 1" in triggers["search_message_ad"][0]
+        assert search_index.index_count(connection) == search_index.source_count(connection)
+    test_index_rows_carry_rowids_derived_from_their_sources(engine)
+    with Session(engine) as session:
+        session.delete(session.get(Message, 31))
+        session.commit()
+        assert ("message", 31, 1, 3) not in rows(engine)
+        assert [hit.ref_id for hit in search_text(session, "SYNTHETIC_FOREIGN")] == [41]
+
+
+def _set_tokenizer(engine, old, new):
+    """Rewrite the stored table definition, as a database moved between SQLite builds."""
+    with engine.begin() as connection:
+        connection.exec_driver_sql("PRAGMA writable_schema = ON")
+        connection.exec_driver_sql(
+            "UPDATE sqlite_master SET sql = replace(sql, ?, ?) WHERE name = 'search_index'",
+            (old, new),
+        )
+        connection.exec_driver_sql("PRAGMA writable_schema = OFF")
+    engine.dispose()
+
+
+def _search_triggers(engine) -> list[str]:
+    with engine.connect() as connection:
+        return list(_trigger_statements(connection))
+
+
+@requires_fts5
+def test_an_index_this_sqlite_cannot_open_never_blocks_writes(engine):
+    _set_tokenizer(engine, "remove_diacritics 1", "remove_diacritics 9")
+    assert ensure_search_index(engine) is False
+    assert _search_triggers(engine) == []
+    with Session(engine) as session:
+        session.add(Message(node_id=2, role="assistant", content="partial", status="pending"))
+        session.add(Message(node_id=2, role="assistant", content="SYNTHETIC_UNINDEXED answer"))
+        session.add(Node(id=6, tree_id=1, parent_id=1, title="新节点", learning_note="新笔记"))
+        fact = session.get(Memory, 101)
+        fact.content = "快速排序在离线期间改写过。"
+        session.add(fact)
+        session.commit()
+        # Search falls back to a LIKE scan instead of returning nothing.
+        hits = search_text(session, "SYNTHETIC_UNINDEXED", tree_id=1)
+        assert [(hit.kind, hit.node_id) for hit in hits] == [("message", 2)]
+
+    # Back on an SQLite that opens the table: triggers return and the index is rebuilt,
+    # including the edit made meanwhile, although the row counts happen to agree.
+    _set_tokenizer(engine, "remove_diacritics 9", "remove_diacritics 1")
+    assert ensure_search_index(engine)
+    assert len(_search_triggers(engine)) == 11
+    with engine.connect() as connection:
+        assert search_index.index_count(connection) == search_index.source_count(connection)
+    with Session(engine) as session:
+        assert [hit.ref_id for hit in search_text(session, "离线期间改写", kinds=["memory"])] == [
+            101
+        ]
+        assert search_text(session, "SYNTHETIC_UNINDEXED", tree_id=1)[0].kind == "message"
+
+
+@requires_fts5
+def test_without_fts5_the_triggers_are_removed_and_restored_later(engine, monkeypatch):
+    monkeypatch.setattr(search_index, "fts5_available", lambda connection: False)
+    assert ensure_search_index(engine) is False
+    assert _search_triggers(engine) == []
+    with Session(engine) as session:
+        fact = session.get(Memory, 103)
+        fact.content = "foreign fact rewritten offline"
+        session.add(fact)
+        session.commit()
+    monkeypatch.undo()
+    assert ensure_search_index(engine)
+    assert len(_search_triggers(engine)) == 11
+    with Session(engine) as session:
+        assert [hit.ref_id for hit in search_text(session, "rewritten offline")] == [103]
+
+
 @requires_fts5
 def test_fts_queries_are_phrases_and_filters_bound_tree_and_nodes(engine):
     with Session(engine) as session:
@@ -242,6 +391,23 @@ def test_short_queries_and_missing_fts5_use_like_with_literal_wildcards(engine, 
         assert {(hit.kind, hit.ref_id) for hit in fallback} == {("message", 21), ("note", 2)}
         assert all("quicksort" in hit.snippet for hit in fallback)
         assert search_text(session, "QUICKSORT", tree_id=2, kinds=["memory"])[0].ref_id == 103
+
+
+def test_excerpts_keep_the_match_when_case_folding_changes_lengths(engine):
+    from app.search_index import excerpt
+
+    german = "Das heißt: " * 40 + "Quicksort teilt das Array in zwei Teile und sortiert sie."
+    snippet = excerpt(german, "quicksort")
+    assert "Quicksort teilt" in snippet and snippet.strip("…") in german
+    ligatures = "ﬁﬂ" * 30 + " QuickSort teilt"
+    assert "QuickSort" in excerpt(ligatures, "QUICKSORT")
+    # Matches that only diacritic folding finds keep the FTS snippet.
+    assert excerpt("Ein café am Markt", "cafe", "…Ein café…") == "…Ein café…"
+    with Session(engine) as session:
+        session.add(Message(id=70, node_id=2, role="assistant", content=german))
+        session.commit()
+        hits = search_text(session, "Quicksort teilt", tree_id=1)
+        assert [hit.ref_id for hit in hits] == [70] and "Quicksort teilt" in hits[0].snippet
 
 
 def test_database_errors_become_empty_results(engine, monkeypatch):
