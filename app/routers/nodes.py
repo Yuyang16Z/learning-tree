@@ -721,7 +721,22 @@ def _persist(target_id: int, generation: Generation, label: str) -> None:
     # Deletion must not slip between the source check and assistant-message INSERT.
     with _REQUEST_LOCK, generation.lock, Session(engine) as session:
         node = session.get(Node, target_id)
-        if not node or node.request_id != generation.request_id:
+        if not node:
+            return
+        if node.request_id != generation.request_id:
+            # A retry took the node over after Stop. The producer reports diagnostics
+            # only once its stream returns; keep them on the stopped attempt's own
+            # message, and touch nothing the retry owns.
+            stopped = session.get(Message, generation.message_id) if generation.message_id else None
+            if (
+                stopped is not None
+                and stopped.node_id == target_id
+                and stopped.diagnostics is None
+                and generation.diagnostics
+            ):
+                stopped.diagnostics = generation.diagnostics
+                session.add(stopped)
+                session.commit()
             return
         message = session.get(Message, generation.message_id) if generation.message_id else None
         if message is None:

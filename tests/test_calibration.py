@@ -18,7 +18,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 import app.llm as llm
 import app.service as service
-from app import db
+from app import changes, db
 from app.calibration import (
     MIN_ESTIMATED_UNITS,
     calibration_sample,
@@ -633,3 +633,54 @@ def test_diagnostics_count_the_memories_the_answer_was_given(workspace):
     monkeypatch.setattr(nodes, "fetch_memory_note", lambda *args, **kwargs: "")
     events = ask(client)
     assert next(e["diagnostics"] for e in events if "diagnostics" in e)["memory_count"] == 0
+
+
+def test_a_stopped_attempt_keeps_its_diagnostics_when_a_retry_starts_first(workspace):
+    """Stop ends the viewers at once and persists the partial answer; the producer reports
+    its diagnostics only when its stream returns. A retry may start in between, and the
+    stopped attempt still keeps its numbers."""
+    client, engine, monkeypatch = workspace
+    produced, release = threading.Event(), threading.Event()
+
+    def slow(spec, system, messages, **kwargs):
+        yield "text", "部分"
+        produced.set()
+        release.wait(5)
+        yield "text", "不应追加"
+
+    monkeypatch.setattr(nodes, "stream_chat", slow)
+    result = []
+    worker = threading.Thread(target=lambda: result.extend(ask(client, request_id="slow")))
+    worker.start()
+    try:
+        assert produced.wait(5)
+        generation = next(g for g in nodes._GENERATIONS.values() if g.request_id == "slow")
+        stopped = client.post("/nodes/1/stop", json={"request_id": "slow"}).json()
+        worker.join(5)
+        assert result[-1]["status"] == "interrupted"
+        assert not any("diagnostics" in event for event in result)
+        streaming_double(monkeypatch, estimated=3000, actual=2600)
+        retried = ask(client, stopped["node_id"], mode="retry", request_id="fresh-retry")
+        assert retried[-1]["status"] == "complete", retried
+        cursor = changes.feed.since("")["cursor"]
+    finally:
+        release.set()
+    assert generation.finished.wait(5)
+    # Open pages, the stopping one included, are told to reload the node's stored answers.
+    assert stopped["node_id"] in changes.feed.since(cursor)["trees"]["1"]
+    with Session(engine) as session:
+        first, second = session.exec(
+            select(Message)
+            .where(Message.node_id == stopped["node_id"], Message.role == "assistant")
+            .order_by(Message.id)
+        ).all()
+    assert first.status == "interrupted" and first.content == "部分"
+    assert first.diagnostics is not None and first.diagnostics["actual_input_tokens"] is None
+    assert set(first.diagnostics["timings_ms"]) == {
+        "retrieval",
+        "tools",
+        "summary",
+        "model",
+        "total",
+    }
+    assert second.status == "complete" and second.diagnostics["actual_input_tokens"] == 2600
