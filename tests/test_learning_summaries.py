@@ -562,3 +562,99 @@ def test_a_block_the_calibrated_budget_refuses_never_takes_the_summary_call(work
     # No failure cooldown was started: at a ratio that fits, the block is summarized now.
     summaries.summarize_history(engine, replace(calibrated, calibration=1.0), path, "parser", 20000)
     assert len(calls) == 2 and calls[1][1][0]["source_id"].startswith("node=5,")
+
+
+def test_block_ranking_discounts_common_words_and_long_blocks():
+    query = "How does the softmax function normalize the logits into probabilities for the model?"
+    specific = (
+        Node(id=1, tree_id=1, title="Softmax", status="complete"),
+        [
+            Message(id=11, node_id=1, role="user", content="Next step?"),
+            Message(
+                id=12,
+                node_id=1,
+                role="assistant",
+                content=(
+                    "Softmax exponentiates logits and divides by their sum "
+                    "to normalize them into probabilities."
+                ),
+            ),
+        ],
+    )
+    generic = (
+        Node(id=2, tree_id=1, parent_id=1, title="Background", status="complete"),
+        [
+            Message(id=21, node_id=2, role="user", content="And then?"),
+            Message(
+                id=22,
+                node_id=2,
+                role="assistant",
+                content=(
+                    "The model does this for the function, and how the model does it "
+                    "for the function is how it works for the model. "
+                )
+                * 12,
+            ),
+        ],
+    )
+    path = [specific, generic]
+    blocks = summaries._blocks(path, "model", 24000)
+    assert len(blocks) == 2
+    cached = {
+        block.key: f"Summary {block.node.id} [{block.records[0]['source_id']}]" for block in blocks
+    }
+    one = max(text_tokens(block.heading + cached[block.key]) for block in blocks)
+    result = summaries._render(path, blocks, cached, query, one + 2)
+    assert result and "模型摘要（node=1" in result
+    assert "模型摘要（node=2" not in result, "shared filler words must not outrank a specific block"
+
+
+class SyntheticEmbedding:
+    """Deterministic vectors: only node 2's block points the same way as the question."""
+
+    model_key = "synthetic-e5"
+
+    def __init__(self):
+        self.documents: list[list[str]] = []
+        self.queries: list[str] = []
+
+    def embed_query(self, text):
+        self.queries.append(text)
+        return [1.0, 0.0]
+
+    def embed_documents(self, texts):
+        self.documents.append(list(texts))
+        return [[1.0, 0.0] if "Source 2:" in text else [0.0, 1.0] for text in texts]
+
+
+def test_semantic_similarity_ranks_blocks_that_share_no_words(workspace, monkeypatch):
+    from app import semantic_models
+
+    engine, sources, spec, calls = workspace
+    model = SyntheticEmbedding()
+    monkeypatch.setattr(semantic_models, "get_backend", lambda: model)
+    summaries._SEMANTIC_CACHE.clear()
+    result = summaries.summarize_history(
+        engine, spec, sources(1, 2), "概率分布的含义是什么？", 4000
+    )
+    assert result and len(calls) == 1
+    assert all(item["source_id"].startswith("node=2,") for item in calls[0][1])
+    # Block vectors are cached by content hash: a later question embeds no block again.
+    summaries.summarize_history(engine, spec, sources(1, 2), "另一个问题", 4000)
+    assert len(model.documents) == 1 and len(model.queries) == 2
+
+
+def test_unavailable_semantic_model_falls_back_to_lexical_ranking(workspace, monkeypatch):
+    from app import semantic_models
+
+    engine, sources, spec, calls = workspace
+
+    def unavailable():
+        raise semantic_models.SemanticUnavailable("not ready")
+
+    monkeypatch.setattr(semantic_models, "get_backend", unavailable)
+    result = summaries.summarize_history(
+        engine, spec, sources(1, 2), "概率分布的含义是什么？", 4000
+    )
+    assert result and len(calls) == 1
+    assert all(item["source_id"].startswith("node=1,") for item in calls[0][1])

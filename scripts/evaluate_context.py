@@ -11,13 +11,57 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.context import build_context
-from app.context_budget import ContextPolicy, estimate_request_tokens, fit_request
+from app.context_budget import ContextPolicy, estimate_request_tokens, fit_request, text_tokens
+from app.context_compaction import CONDITION, extract, summarize_sources
 from app.models import Message, Node
 
 
 def numbers(stats: dict) -> dict:
     """Keep numeric/boolean diagnostics only; prompt text never enters the evidence file."""
     return {key: value for key, value in stats.items() if isinstance(value, (bool, int, float))}
+
+
+def selection_checks() -> dict:
+    """Local excerpt selection on synthetic sentences: relevance, categories and shares."""
+    query = "交叉熵和 softmax 一起用时梯度为什么很简单？"
+    relevant = "softmax 加交叉熵的梯度等于预测概率减去真实标签，形式很简单。"
+    conditions = [f"只有拿到第{n}份书面授权时，才可以修改生产配置。" for n in range(1, 7)]
+    contrast = "但它在实践中很直观。"
+    correction = "更正：前面把对数的底写成了 2，用自然对数也可以。"
+    node = Node(id=1, tree_id=1, title="合成选择")
+    answer = "\n".join([*conditions, contrast, relevant, correction])
+    message = Message(id=1, node_id=1, role="assistant", content=answer)
+    excerpts = {item.text: item for item in extract(node, [message])}
+    budget = 600
+    chosen = summarize_sources([(node, [message])], query, budget)
+    lines = chosen.splitlines()
+    condition_bytes = sum(
+        text_tokens(line) + 1 for line in lines if line.startswith(f"- [{CONDITION}")
+    )
+    checks = {
+        "relevant_explanation_selected": relevant in chosen,
+        "correction_selected": correction in chosen,
+        "bare_contrast_not_condition": excerpts[contrast].category != CONDITION,
+        "condition_share_within_first_pass_cap": condition_bytes <= 0.4 * budget,
+        "deterministic": len(
+            {summarize_sources([(node, [message])], query, budget) for _ in range(3)}
+        )
+        == 1,
+        "selected_lines": len(lines),
+        "condition_bytes": condition_bytes,
+        "budget_bytes": budget,
+    }
+    assert all(
+        checks[key]
+        for key in (
+            "relevant_explanation_selected",
+            "correction_selected",
+            "bare_contrast_not_condition",
+            "condition_share_within_first_pass_cap",
+            "deterministic",
+        )
+    )
+    return checks
 
 
 def evaluate() -> dict:
@@ -144,6 +188,7 @@ def evaluate() -> dict:
         "source_update": source_update,
         "current_image": images,
         "large_tool_result": tools,
+        "excerpt_selection": selection_checks(),
     }
 
 

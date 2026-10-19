@@ -3,6 +3,12 @@
 No generative model is called. Categories select complete source sentences,
 including conditions/corrections in the middle of answers, rather than making
 new factual claims. A bounded hash-keyed cache is disposable and process-local.
+
+Selection order: corrections first, then every other sentence by its category's
+base weight plus its relevance to the question (BM25 within the candidate set,
+normalised to 0..1, see text_relevance). A first pass caps each category's share of
+the excerpt budget so conditions cannot crowd out relevant explanations; a second
+pass fills whatever budget is left in the same order. The result is deterministic.
 """
 
 from __future__ import annotations
@@ -11,13 +17,14 @@ import hashlib
 import json
 import re
 import threading
-from collections import OrderedDict
-from dataclasses import dataclass
+from collections import Counter, OrderedDict
+from dataclasses import dataclass, field
 
 from .context_budget import text_tokens
 from .models import Message, Node
+from .text_relevance import relevance, tokens
 
-SUMMARY_VERSION = "extractive-v1"
+SUMMARY_VERSION = "extractive-v2"
 _CACHE: OrderedDict[tuple[int, str], tuple] = OrderedDict()
 _DELETED_TREES: set[int] = set()
 _LOCK = threading.Lock()
@@ -26,7 +33,15 @@ _CORRECTION = re.compile(
     r"纠正|更正|修正|此前.*错|应改为|实际上|\b(?:correction|instead|incorrect)\b", re.I
 )
 _CONDITION = re.compile(
-    r"只有|仅当|除非|前提|条件|必须|不能|不要|不应|不等于|并非|禁止|但|\b(?:if|unless|must|never|not|except|only)\b",
+    r"只有|仅当|除非|前提|条件|必须|不能|不要|不应|不等于|并非|禁止|\b(?:if|unless|must|never|not|except|only)\b",
+    re.I,
+)
+# A contrast alone ("但它很直观") is ordinary explanation. It marks a condition only
+# together with a negation or a limiting word in the same sentence.
+_CONTRAST = re.compile(r"但|不过|然而|可是|\b(?:but|however)\b", re.I)
+_QUALIFIER = re.compile(
+    r"不(?!过|错|仅|但|管|久|少|断)|没|无(?!论|穷)|非(?!常)|未|别|勿|仅|只|才|须|需要|限于|除了"
+    r"|\b(?:no|cannot|can't|don't|doesn't|isn't|aren't|won't|unless|except|must|only|never|not)\b",
     re.I,
 )
 _UNCERTAIN = re.compile(
@@ -46,6 +61,8 @@ class Excerpt:
     role: str
     text: str
     priority: int
+    # Lexical terms of the sentence, computed once with the cached extraction.
+    terms: tuple[str, ...] = field(default=(), compare=False, repr=False)
 
     def render(self) -> str:
         source = f"node={self.node_id}, section={self.section}"
@@ -56,20 +73,56 @@ class Excerpt:
         )
 
 
+CORRECTION = "纠正记录"
+CONDITION = "适用条件"
+# Base weight per category; corrections additionally form a tier of their own.
+CATEGORY_WEIGHT = {
+    CORRECTION: 50,
+    CONDITION: 40,
+    "待解决疑问": 30,
+    "用户理解（未经验证）": 25,
+    "学习目标与问题": 20,
+    "概念定义": 15,
+    "历史解释（未经验证）": 5,
+}
+# Relevance adds up to this much: a highly relevant explanation (5 + 60) outranks an
+# unrelated condition (40), while equally relevant sentences keep the category order.
+RELEVANCE_WEIGHT = 60
+# First-pass share of the excerpt budget per category; the second pass fills the rest.
+CATEGORY_SHARE = {
+    CORRECTION: 0.5,
+    CONDITION: 0.4,
+    "待解决疑问": 0.3,
+    "用户理解（未经验证）": 0.3,
+    "学习目标与问题": 0.3,
+    "概念定义": 0.3,
+    "历史解释（未经验证）": 0.5,
+}
+# Candidate sentences kept per source version, by base weight and then position. Large
+# enough that relevance, not the category alone, decides what a long answer keeps.
+MAX_CANDIDATES = 512
+
+
+def _is_condition(text: str) -> bool:
+    return bool(_CONDITION.search(text)) or bool(_CONTRAST.search(text) and _QUALIFIER.search(text))
+
+
 def _category(text: str, role: str) -> tuple[str, int]:
     if _CORRECTION.search(text):
-        return "纠正记录", 50
-    if _CONDITION.search(text):
-        return "适用条件", 40
-    if _UNCERTAIN.search(text):
-        return "待解决疑问", 30
-    if role == "用户笔记":
-        return "用户理解（未经验证）", 25
-    if role == "user":
-        return "学习目标与问题", 20
-    if _DEFINITION.search(text):
-        return "概念定义", 15
-    return "历史解释（未经验证）", 5
+        label = CORRECTION
+    elif _is_condition(text):
+        label = CONDITION
+    elif _UNCERTAIN.search(text):
+        label = "待解决疑问"
+    elif role == "用户笔记":
+        label = "用户理解（未经验证）"
+    elif role == "user":
+        label = "学习目标与问题"
+    elif _DEFINITION.search(text):
+        label = "概念定义"
+    else:
+        label = "历史解释（未经验证）"
+    return label, CATEGORY_WEIGHT[label]
 
 
 def source_fingerprint(node: Node, messages: list[Message]) -> str:
@@ -128,9 +181,11 @@ def extract(node: Node, messages: list[Message]) -> tuple[Excerpt, ...]:
                     role,
                     text,
                     priority,
+                    tuple(tokens(text)),
                 )
             )
-    ranked = sorted(enumerate(candidates), key=lambda item: (-item[1].priority, item[0]))[:128]
+    ranked = sorted(enumerate(candidates), key=lambda item: (-item[1].priority, item[0]))
+    ranked = ranked[:MAX_CANDIDATES]
     result = tuple(excerpt for _, excerpt in sorted(ranked))
     with _LOCK:
         # A worker holding old snapshots can finish after deletion. Never recache them.
@@ -151,33 +206,54 @@ def forget_tree(tree_id: int) -> None:
                 del _CACHE[key]
 
 
-def _terms(text: str) -> set[str]:
-    terms = set(re.findall(r"[a-z0-9_]+", text.lower()))
-    for run in re.findall(r"[\u3400-\u9fff]+", text):
-        terms.update(run[i : i + 2] for i in range(len(run) - 1))
-    return terms
-
-
 def summarize_sources(
     sources: list[tuple[Node, list[Message]]], query: str, byte_budget: int
 ) -> str:
     """Select cited whole sentences under a budget, with explicit omission markers."""
-    query_terms = _terms(query)
-    ranked = []
-    for order, (node, messages) in enumerate(sources):
-        for excerpt in extract(node, messages):
-            overlap = len(query_terms & _terms(excerpt.text))
-            ranked.append((excerpt.priority + min(30, overlap * 5), order, excerpt))
-    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    candidates = [
+        (order, excerpt)
+        for order, (node, messages) in enumerate(sources)
+        for excerpt in extract(node, messages)
+    ]
+    scores = relevance(tokens(query), [Counter(excerpt.terms) for _, excerpt in candidates])
+    ranked = sorted(
+        (
+            (
+                excerpt.category == CORRECTION,
+                excerpt.priority + RELEVANCE_WEIGHT * score,
+                order,
+                excerpt,
+            )
+            for (order, excerpt), score in zip(candidates, scores, strict=True)
+        ),
+        key=lambda item: (item[0], item[1], item[2]),
+        reverse=True,
+    )
     chosen = []
     seen = set()
     used = 0
-    for _, order, excerpt in ranked:
+    spent: Counter = Counter()
+    deferred = []
+    for _, _, order, excerpt in ranked:
         if excerpt.text in seen:
             continue
-        line = excerpt.render()
-        cost = text_tokens(line) + 1
-        if used + cost <= byte_budget:
+        cost = text_tokens(excerpt.render()) + 1
+        if used + cost > byte_budget:
+            continue
+        # A share caps how much a category accumulates; its best sentence always gets a
+        # place, even when that one sentence is longer than the share itself.
+        share = CATEGORY_SHARE[excerpt.category] * byte_budget
+        if spent[excerpt.category] and spent[excerpt.category] + cost > share:
+            deferred.append((order, excerpt, cost))
+            continue
+        chosen.append((order, excerpt))
+        seen.add(excerpt.text)
+        spent[excerpt.category] += cost
+        used += cost
+    # Every category has had its turn; leftover budget goes to deferred sentences in
+    # the same order, so the shares prevent crowding out without wasting budget.
+    for order, excerpt, cost in deferred:
+        if excerpt.text not in seen and used + cost <= byte_budget:
             chosen.append((order, excerpt))
             seen.add(excerpt.text)
             used += cost

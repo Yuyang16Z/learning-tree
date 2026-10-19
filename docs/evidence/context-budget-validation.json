@@ -12,7 +12,7 @@
   "long_path": {
     "compacted": true,
     "raw_estimate": 63398,
-    "estimated_input_tokens": 8944,
+    "estimated_input_tokens": 8987,
     "middle_condition_retained": true,
     "question_preserved": true,
     "quote_preserved": true,
@@ -25,7 +25,7 @@
   "current_image": {
     "compacted": true,
     "raw_estimate": 67582,
-    "estimated_input_tokens": 10630,
+    "estimated_input_tokens": 10673,
     "current_image_intact": true
   },
   "large_tool_result": {
@@ -34,5 +34,15 @@
     "omission_disclosed": true,
     "call_id_preserved": true,
     "original_result_unchanged": true
+  },
+  "excerpt_selection": {
+    "relevant_explanation_selected": true,
+    "correction_selected": true,
+    "bare_contrast_not_condition": true,
+    "condition_share_within_first_pass_cap": true,
+    "deterministic": true,
+    "selected_lines": 3,
+    "condition_bytes": 146,
+    "budget_bytes": 600
   }
 }
