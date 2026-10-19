@@ -409,6 +409,89 @@ async function poll(callback, label) {
     assert.equal(recapModelCalls, 1, 'Only the question the learner sent reaches the model');
     assert.equal(recapReads - readsBefore, 3, 'Each return reads its recap once; dismissing and leaving read nothing');
     checks.push('Returning from a branch shows a dismissible local recap above the composer that ends on dismiss, navigation or a new question');
+
+    // Map search hits are windows of stored Markdown; choosing one must highlight the query in the
+    // rendered answer, far down a long answer, not flash the whole message.
+    const filler = Array.from({ length: 10 }, (_, index) => `Paragraph ${index + 1}: partitioning keeps every element on the correct side of the pivot, one comparison at a time, so each recursive call works on a smaller range.`);
+    const searchAnswer = ['Quicksort needs a **good pivot**.', '## Pivot choice', '1. Take the first element.\n2. Take a random element.', ...filler, 'Finally: **median-of-three** keeps the pivot stable on sorted input.'].join('\n\n');
+    const searchTopic = await api('/trees/import', {
+      format: 'branch-learning', version: 1, tree: { title: 'Map search UI check' },
+      nodes: [{ id: 1, parent_id: null, title: 'Choosing a pivot', kind: 'root', status: 'complete' }],
+      messages: [
+        { id: 1, node_id: 1, role: 'user', content: 'Why does partition balance matter for KESTREL-88?' },
+        { id: 2, node_id: 1, role: 'assistant', content: searchAnswer, answered_by: 'Demo (offline)' },
+      ],
+    });
+    const searchRow = (await api(`/nodes/${searchTopic.root_node_id}/thread`)).nodes[0];
+    await page.evaluate(treeId => localStorage.setItem('bl-tree', JSON.stringify(treeId)), searchTopic.id);
+    await page.reload();
+    await page.getByRole('heading', { name: 'Map search UI check', exact: true, level: 1 }).waitFor();
+    const highlighted = () => page.evaluate(() => [...(CSS.highlights.get('learning-source') ?? [])].map(range => range.toString()));
+    async function chooseHistoryHit(query) {
+      await map.getByRole('button', { name: 'Search nodes', exact: true }).click();
+      await map.getByRole('textbox', { name: 'Search questions or quotes', exact: true }).fill(query);
+      const group = map.getByRole('group', { name: 'Matches in history', exact: true });
+      await group.waitFor();
+      const hit = group.getByRole('button').first();
+      const text = await hit.innerText();
+      await page.evaluate(() => CSS.highlights.clear());
+      await hit.click();
+      return text;
+    }
+    const markdownHit = await chooseHistoryHit('median-of-three');
+    assert(markdownHit.includes('median-of-three') && !markdownHit.includes('**'), 'History snippets show Markdown as plain text');
+    await poll(async () => (await highlighted()).join('|') === 'median-of-three', 'the highlight covers the query inside rendered Markdown');
+    assert(await page.evaluate(() => {
+      const range = [...CSS.highlights.get('learning-source')][0];
+      const rect = range.getBoundingClientRect();
+      const viewport = document.querySelector('.chat-scroll').getBoundingClientRect();
+      return rect.top >= viewport.top && rect.bottom <= viewport.bottom;
+    }), 'The matching passage, not the middle of the answer, is scrolled into view');
+    assert(((await page.locator(`[data-message-id="${searchRow.answer_message_id}"]`).getAttribute('class')) ?? '').includes('chat-source-flash'));
+    checks.push('Choosing a map search hit in a Markdown answer highlights and scrolls to the query text, with Markdown removed from the snippet');
+
+    // Questions are searchable too. The search API labels their hits "question"; the rewrite keeps
+    // this check independent of whether the running server already does.
+    const searchRoute = `**/api/trees/${searchTopic.id}/search?*`;
+    await page.route(searchRoute, async route => {
+      const response = await route.fetch();
+      const body = await response.json();
+      body.results = body.results.map(hit => hit.message_id === searchRow.question_message_id ? { ...hit, kind: 'question' } : hit);
+      await route.fulfill({ response, json: body });
+    });
+    const questionHit = await chooseHistoryHit('KESTREL-88');
+    await page.unroute(searchRoute);
+    assert(questionHit.includes('Question · ') && !questionHit.includes('Answer · '), 'A question hit says it matched a question');
+    await poll(async () => (await highlighted()).some(text => text.includes('KESTREL-88')), 'the highlight lands on the question text');
+    assert(((await page.locator(`[data-message-id="${searchRow.question_message_id}"]`).getAttribute('class')) ?? '').includes('chat-source-flash'), 'The question turn itself is marked');
+    checks.push('A map search hit on a question is labelled as a question and highlights that question in the conversation');
+
+    // The next query never lists the previous query's history hits, even when its own request fails.
+    await map.getByRole('button', { name: 'Search nodes', exact: true }).click();
+    const searchBox = map.getByRole('textbox', { name: 'Search questions or quotes', exact: true });
+    assert.equal(await searchBox.getAttribute('maxlength'), '300', 'Queries stop at the server limit');
+    await searchBox.fill('median-of-three');
+    const historyGroup = map.getByRole('group', { name: 'Matches in history', exact: true });
+    await historyGroup.waitFor();
+    let releaseSearch;
+    await page.route(searchRoute, async route => {
+      await new Promise(resolve => { releaseSearch = resolve; });
+      await route.abort();
+    });
+    await searchBox.fill('median-of-three keeps');
+    assert.equal(await historyGroup.count(), 0, 'Hits for the previous query disappear at once');
+    const searchStatus = map.locator('.lm-result-count');
+    await poll(async () => releaseSearch !== undefined, 'the next search was sent');
+    assert.equal(await searchStatus.innerText(), 'Searching…', 'An unanswered search is not reported as finding nothing');
+    releaseSearch();
+    // A search that never reached the history is not reported as finding nothing.
+    await poll(async () => await searchStatus.innerText() === 'History search failed', 'a failed search ends the wait and says so');
+    assert.equal(await historyGroup.count(), 0, 'A failed search leaves no stale hits behind');
+    await page.unroute(searchRoute);
+    await searchBox.fill('keeps the pivot stable');
+    await poll(async () => await searchStatus.innerText() === '1 results', 'the next search reaches the history again');
+    await searchBox.press('Escape');
+    checks.push('Map search shows history hits only for the current query, says it is searching until the server answers, says when the history search failed and drops stale hits then');
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ ok: true, checks }, null, 2));
   } finally {

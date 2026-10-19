@@ -129,7 +129,13 @@ Each widened hit is rechecked against current records for its own scope before
 it enters the prompt: a sibling whose answer failed, or a topic that was
 archived meanwhile, drops out. Both switches are off by default; changing them
 is saved with a revision token, and a conflicting save from another window
-reloads the latest settings instead of overwriting them.
+reloads the latest settings instead of overwriting them. Settings stays open
+while a change is being saved. After a conflict the panel says it is reloading,
+then shows the latest settings and that your change was not saved; the outcome
+of a save is still shown after you switch to another Settings tab and back. The
+switches are read again each time the Memory tab is shown, so a read that failed
+is retried and a change made on another device appears; a failed save stays
+reported until your next change or a newer failure.
 
 The same switches govern the answer model's read-only `search_learning_history`
 tool. It searches completed answers, notes and current facts of the current path
@@ -140,7 +146,9 @@ The switches stay independent there too: `all` adds other topics to the current
 path and includes this topic's other branches only when **Other branches of this
 topic** is also on. The topic being answered in stays searchable under `all`
 even when it is archived. The tool never writes, never embeds and is not offered
-in demo mode.
+in demo mode. Its calls appear among the answer's tool steps as **Search
+learning history**, distinct from **Read source passages**, the reader that pages
+through original conversation text.
 
 Offering the tool turns an answer into a tool-capable request, which keeps room
 for tool results: with a 32,768-token window, history is compacted 15–20%
@@ -156,9 +164,14 @@ endpoint rejects them, the answer says so instead of asking you to retry.
 Under each answer, a compact **Referenced** line lists the memories that were
 actually part of the prompt, as memory ids with their source node, labelled when
 they came from another branch or topic. Entries open the source node, switching
-topic when needed. Records that compaction dropped from the prompt are not
-listed. The list is stored with the answer and shown again later; it refers to
-this database's ids, so learning-tree exports leave it out.
+topic when needed. In a conversation that is already open, an entry whose topic
+or node has since been deleted is struck through and cannot be opened; one
+deleted after the line was drawn is checked when chosen, and the app reports the
+deletion and keeps the current conversation open. Entries that are not
+well-formed (from an older or damaged record) are skipped. Records that
+compaction dropped from the prompt are not listed. The list is stored with the
+answer and shown again later; it refers to this database's ids, so
+learning-tree exports leave it out.
 
 The stored list holds only record ids and their scope. Topic names are read when
 the answer is shown, so a renamed topic shows its new name, and entries whose
@@ -172,12 +185,22 @@ answer: it stays in the answer and its export and is not rewritten.
 ## Topic search
 
 The learning map's search box filters titles and quoted passages instantly and,
-after a short pause, also asks the server for full-text matches in your
-questions, completed answers, learning notes and current facts of the open topic. Those appear as a
-second group with a verbatim snippet; choosing an answer hit opens the node and
-highlights the matching passage. Pending or interrupted answers and superseded
-facts are never listed. Results are capped at thirty, and a search is dropped
-when you switch topics before it returns.
+after a short pause, also asks the server for full-text matches in the open
+topic's questions, completed answers, learning notes and current facts. Those
+appear as a second group, each labelled with what matched (question, answer,
+note or memory) and a short snippet shown without Markdown markers. Choosing a
+question or answer hit opens the node, scrolls to the matching text and
+highlights it, also inside formatted answers (bold text, lists, code, links).
+Pending or interrupted answers and superseded facts are never listed. Results
+are capped at thirty, and the count reads “30+” (or “N+”) when more matches
+exist than are shown; queries stop at 300 characters. Until the server answers,
+a search with no instant matches says **Searching…** rather than reporting no
+results. When the history search fails (offline, or a server error), the line
+says **History search failed**, also beside instant matches, so a search that
+never reached the history is not mistaken for one that found nothing. History
+hits are shown only for the query and topic they answer:
+changing either hides them at once, and a search that fails or returns after you
+switched topics adds nothing.
 
 Search uses a SQLite FTS5 trigram index (`search_index`) maintained by database
 triggers, so it follows every edit, completion, supersession and deletion
@@ -253,7 +276,10 @@ backups include them, learning-tree exports exclude `sources`.
   因此打开开关不会让原本能进入回答的路径记忆被挤掉；为了让每次提问的开销有上限，扩大范围的记忆
   每次最多 48 条进入向量计算和重排（先取关键词最匹配的，再取最新的），所以范围内超过 48 条时，
   与问题没有共同词语的记忆可能检索不到；进入提示前会按各自范围重新核对来源是否仍然有效。
-  两个开关默认关闭，保存带版本号，别处同时修改会重新载入最新设置而不是覆盖。
+  两个开关默认关闭，保存带版本号，别处同时修改会重新载入最新设置而不是覆盖。保存期间不能关闭设置；遇到冲突时先
+  提示正在重新载入，载入后显示最新设置并说明你的更改没有保存，切换设置标签页再回来也能看到结果。
+  每次打开「记忆」标签页都会重新读取开关：读取失败会重试，其他设备上的修改也会显示；保存失败的
+  提示会保留，直到下一次修改或出现新的失败。
 - **结构化事实**：提炼出的事实带类型标签（定义、适用条件、纠正误解、待解决疑问、学习状态、
   结论）。新事实可以标记为修正某条当前路径上的旧事实，旧事实显示「已更新」并保留可删，
   但不再进入回答、搜索索引和模型的历史检索；删除新事实或它所在的分支、主题后，旧事实会恢复
@@ -261,13 +287,18 @@ backups include them, learning-tree exports exclude `sources`.
   不会和最新的更正一起回到回答中。用户手动编辑过的事实，以及升级前保存的事实（旧版本不记录
   手动编辑，可能含有用户自己的修正）都不会被自动替代。
 - **参考了哪些记忆**：每条回答下方列出实际进入提示的记忆编号及来源节点，来自其他分支或
-  主题的会标注；点击可跳到来源节点。被压缩掉的记忆不会列出。该列表随回答保存，但不随
+  主题的会标注；点击可跳到来源节点。已打开的对话里，来源主题或节点随后被删除的条目显示删除线且不能打开；列表显示后才被删除的来源会在点击时核对，提示「这条来源已删除」并留在当前对话；格式不完整的条目会被跳过。被压缩掉的记忆不会列出。该列表随回答保存，但不随
   学习树导出。保存的只有记录编号和范围，主题名称在显示时读取；记忆、来源节点或主题已删除
   的条目不再显示。删除主题、分支或记忆时，其他回答中指向它们的条目会一并移除，「参考了」列表
   不会再保留已删除主题的名称和编号；回答正文或工具步骤中已经引用的文字（例如历史检索结果里的
   主题名称）属于该回答本身，会留在回答和导出中，不会被改写。
-- **主题内全文搜索**：学习树搜索框除了即时匹配标题和引用，还会向服务端查询提问、已完成
-  回答、学习笔记和当前事实中的原文片段，作为第二组结果展示；选择回答结果会跳转并高亮对应段落。
+- **主题内全文搜索**：学习树搜索框除了即时匹配标题和引用，还会向服务端查询当前主题的问题、
+  已完成回答、学习笔记和当前事实中的原文片段，作为第二组结果展示，标明匹配的是问题、回答、
+  笔记还是记忆（片段去掉 Markdown 标记）；选择问题或回答结果会跳转到匹配文字并高亮，加粗、
+  列表、代码和链接等格式化回答中也能定位。记录中的匹配只对应当前查询和主题：修改查询或切换主题
+  会立即隐藏旧结果，失败的搜索不会留下旧结果；查询最长 300 个字符。结果最多显示 30 个，还有更多时
+  计数显示为「30+ 个结果」；服务端尚未返回时显示「正在搜索…」，而不是「没有找到相关问题」；
+  记录搜索失败（离线或服务端出错）时显示「历史记录搜索失败」，有即时匹配时也会在计数后注明。
   索引由 SQLite FTS5（三元组分词）和触发器维护，触发器按由来源记录推算的 rowid 定位索引行，
   删除大主题或保存流式回答不会随索引增大而变慢；启动时索引缺失、计数不符或触发器来自其他
   版本会自动重建；短于 3 个字符的查询、不支持 FTS5 或无法打开已有索引（例如数据库换到另一个
@@ -277,7 +308,7 @@ backups include them, learning-tree exports exclude `sources`.
   不返回提问（包括正在回答的这个问题）；默认只查当前路径，`tree`/`all` 范围需在回答开始时
   已经启用；两个开关互相独立，`all` 在当前路径之外加入
   其他主题，只有「同主题的其他分支」也开启时才包含当前主题的其他分支；当前主题即使已归档，
-  `all` 也能查到它的路径。它不写入数据库，演示模式不会提供。提供这个工具会让回答变成可调用
+  `all` 也能查到它的路径。它不写入数据库，演示模式不会提供。回答的工具步骤中显示为「搜索学习记录」，与逐段读取对话原文的「回查原文」区分。提供这个工具会让回答变成可调用
   工具的请求，需要为工具结果预留空间：上下文窗口为 32,768 时，开关打开后历史压缩会提前约
   15%–20%。不支持工具调用的模型接口（例如没有工具模板的 Ollama 模型、未启用工具解析的 vLLM）
   仍能回答：第一次被拒的回答会去掉只读工具重新发送，本次运行期间该接口和模型不再附带它们。

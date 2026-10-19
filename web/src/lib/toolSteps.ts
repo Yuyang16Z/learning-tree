@@ -1,4 +1,30 @@
-import type { ToolStep } from "../types";
+import type { McpServer, ToolStep } from "../types";
+import { managedMcpPreset } from "./chatTools";
+
+type Translate = (zh: string, en: string) => string;
+
+/** Interface names of the app's own tools as [zh, en] pairs. */
+const BUILT_IN_TOOLS = new Map<string, [string, string]>([
+  ["fetch", ["读取网页", "Read webpage"]],
+  ["web_search", ["联网搜索", "Web search"]],
+  ["search_available_tools", ["查找可用工具", "Find available tools"]],
+  ["read_learning_source", ["回查原文", "Read source passages"]],
+  ["search_learning_history", ["搜索学习记录", "Search learning history"]],
+  ["read_document_source", ["查阅文档", "Read document"]],
+  ["read_tool_result", ["回看工具结果", "Reread tool result"]],
+]);
+
+/** A tool step's name: built-in tools and the managed web-research MCP's tools are translated. */
+export function toolStepLabel(tool: string, t: Translate, servers: readonly McpServer[] = []): string {
+  const builtIn = BUILT_IN_TOOLS.get(tool);
+  if (builtIn) return t(...builtIn);
+  for (const server of servers) {
+    if (managedMcpPreset(server) !== "web-research") continue;
+    if (tool === `mcp_${server.id}_web_search`) return t("联网搜索", "Web search");
+    if (tool === `mcp_${server.id}_read_webpage`) return t("读取网页", "Read webpage");
+  }
+  return tool;
+}
 
 /** A step's pointer to the complete result stored for its call. */
 export type ToolReference = Pick<ToolStep, "call_index" | "truncated" | "request_id" | "node_id">;

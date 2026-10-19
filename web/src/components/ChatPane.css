@@ -17,6 +17,8 @@
 .chat-source-bar button { border: 0; background: none; color: var(--teal); font-size: 11px; padding: 3px 0; flex: none; }
 .chat-source-bar button:hover { text-decoration: underline; }
 .chat-error { margin: 10px 24px 0; padding: 9px 12px; color: var(--danger); background: var(--err-bg); font-size: 12px; border-radius: 8px; max-height: 96px; overflow: auto; flex: none; overflow-wrap: anywhere; }
+.chat-error .chat-error-reload { border: 0; background: none; color: var(--teal); font-size: 12px; padding: 0 0 0 6px; }
+.chat-error .chat-error-reload:hover { text-decoration: underline; }
 .chat-reading { position: relative; min-height: 0; display: flex; flex-direction: column; flex: 1; }
 .chat-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 .chat-messages { width: 100%; max-width: 806px; margin: 0 auto; padding: 38px 40px 44px; }
@@ -78,6 +80,7 @@
 .chat-sources { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; font-size: 11px; color: var(--muted); }
 .chat-sources .chat-source-link { border: 0; background: var(--panel-2); color: var(--teal); border-radius: 999px; padding: 2px 9px; font-size: 11px; line-height: 1.6; }
 .chat-sources .chat-source-link:hover:not(:disabled) { text-decoration: underline; }
+.chat-sources .chat-source-link.is-deleted { color: var(--muted); text-decoration: line-through; }
 .chat-reasoning { font-size: 11px; color: var(--muted); margin: 8px 0 12px; }
 .chat-reasoning summary { cursor: pointer; padding: 4px 0; }
 .chat-reasoning > div { max-height: 260px; overflow: auto; white-space: pre-wrap; line-height: 1.7; border-left: 1px solid var(--border); padding-left: 12px; margin-top: 7px; }

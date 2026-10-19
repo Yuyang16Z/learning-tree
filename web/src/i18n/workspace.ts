@@ -60,6 +60,7 @@ const diagnostics: [string, string][] = [
   ["分支已永久删除。", "Branch permanently deleted."],
   ["分支已删除，刷新记录失败，请重新选择节点。", "The branch was deleted, but refreshing failed. Select the node again."],
   ["学习记录已导出。", "Learning history exported."],
+  ["这条来源已删除。", "This source was deleted."],
   ["学习记录已导入为新主题。", "Learning records imported as a new topic."],
   ["备份文件不能超过 25 MB。", "The backup file must be 25 MB or smaller."],
   ["无法读取这个 JSON 备份。", "This JSON backup could not be read."],

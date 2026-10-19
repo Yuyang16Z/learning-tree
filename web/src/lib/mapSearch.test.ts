@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { formatMessage, type MessageParams } from "../i18n/locale";
 import type { SearchHit, TreeNode } from "../types";
-import { createMapSearcher, localMatches, mergeSearchResults, searchAnchor } from "./mapSearch";
+import { createMapSearcher, currentHits, hitKindLabel, localMatches, mergeSearchResults, plainSnippet, searchAnchor, searchFailed, searchPending, searchStatusText, type RemoteHits } from "./mapSearch";
 
 function node(id: number, title: string, seed_text: string | null = null): TreeNode {
   return { id, parent_id: id === 1 ? null : 1, tree_id: 7, title, seed_text, has_summary: false };
@@ -36,11 +37,63 @@ describe("map search result groups", () => {
     expect(few.remote).toHaveLength(2);
   });
 
+  it("says when more matches exist than the capped list shows", () => {
+    const many = Array.from({ length: 40 }, (_, index) => node(index + 1, `pivot ${index}`));
+    expect(mergeSearchResults(localMatches(many, "pivot"), [], many).more).toBe(true);
+    const some = many.slice(0, 20);
+    const serverPage = Array.from({ length: 30 }, (_, index) => hit("message", (index % 20) + 1, "pivot", index + 100));
+    expect(mergeSearchResults([], serverPage, some).more).toBe(true);
+    const cut = Array.from({ length: 12 }, (_, index) => hit("message", index + 1, "pivot", index + 200));
+    const cutResult = mergeSearchResults(localMatches(some, "pivot"), cut, some);
+    expect([cutResult.local.length, cutResult.remote.length, cutResult.more]).toEqual([20, 10, true]);
+    const fits = mergeSearchResults(localMatches(some, "pivot"), cut.slice(0, 10), some);
+    expect([fits.local.length + fits.remote.length, fits.more]).toEqual([30, false]);
+    expect(mergeSearchResults(localMatches(nodes, "pivot"), [hit("message", 1, "…pivot…", 12)], nodes).more).toBe(false);
+  });
+
   it("anchors only message hits, with a verbatim snippet", () => {
     expect(searchAnchor(hit("message", 1, "…选一个 pivot，把数组分成两边…", 12))).toEqual({ messageId: 12, text: "选一个 pivot，把数组分成两边" });
     expect(searchAnchor(hit("message", 1, "……", 12))).toEqual({ messageId: 12 });
     expect(searchAnchor(hit("note", 2, "笔记"))).toBeUndefined();
     expect(searchAnchor(hit("title", 2, "分支"))).toBeUndefined();
+  });
+
+  it("anchors a Markdown answer hit on matching text the rendered answer contains", () => {
+    const anchor = (snippet: string, query: string) => searchAnchor(hit("message", 1, snippet, 12), query)?.text;
+    expect(anchor("…快速排序**选一个 pivot**，然后\n\n- 把数组分成两边再递归。…", "pivot")).toBe("选一个 pivot");
+    expect(anchor("…ally: **median-of-three** keeps the pivot stable…", " Median-of-three ")).toBe("median-of-three");
+    expect(anchor("…\n- partition the array around the pivot\n- recurse…", "partition")).toBe("partition the array around the pivot");
+    expect(anchor("…\n2. Take a random pivot element.\n…", "random")).toBe("Take a random pivot element.");
+    expect(anchor("…use `pivot = arr[0]` here…", "pivot")).toBe("pivot = arr");
+    expect(anchor("…see [the pivot rule](https://example.com/pivot) for…", "pivot rule")).toBe("the pivot rule");
+    expect(anchor("…first part.\n\nThe pivot is chosen…", "pivot")).toBe("The pivot is chosen");
+    expect(anchor("…## Pivot choice\nThe…", "pivot")).toBe("Pivot choice");
+    expect(anchor("…> quoted pivot line…", "pivot")).toBe("quoted pivot line");
+  });
+
+  it("falls back to the longest plain stretch when the query is not in the snippet verbatim", () => {
+    const anchor = (snippet: string, query: string) => searchAnchor(hit("message", 1, snippet, 12), query)?.text;
+    expect(anchor("…**the pivôt rule** matters…", "pivot")).toBe("the pivôt rule");
+    expect(anchor("…**", "pivot")).toBeUndefined();
+  });
+
+  it("labels question hits as questions and anchors them on the question turn", () => {
+    expect(searchAnchor(hit("question", 1, "… matter for KESTREL-88?", 31), "kestrel-88")).toEqual({ messageId: 31, text: "matter for KESTREL-88?" });
+    expect(searchAnchor(hit("question", 1, "问题", null))).toBeUndefined();
+    const zh = (text: string) => text;
+    const en = (_zh: string, text: string) => text;
+    expect(hitKindLabel("question", zh)).toBe("问题");
+    expect(hitKindLabel("question", en)).toBe("Question");
+    expect(hitKindLabel("message", zh)).toBe("回答");
+    expect(hitKindLabel("message", en)).toBe("Answer");
+    expect(["title", "note", "memory"].map(kind => hitKindLabel(kind as SearchHit["kind"], en))).toEqual(["Title", "Note", "Memory"]);
+    expect(hitKindLabel("unknown" as SearchHit["kind"], en)).toBe("Record");
+  });
+
+  it("shows Markdown snippets as plain text", () => {
+    expect(plainSnippet("…快速排序**选一个 pivot**，然后\n\n- 把数组分成两边再递归。…")).toBe("…快速排序选一个 pivot，然后 把数组分成两边再递归。…");
+    expect(plainSnippet("…see [the pivot rule](https://example.com/pivot), `code`, _emphasis_, *stress*, but 2*3 and snake_case…")).toBe("…see the pivot rule, code, emphasis, stress, but 2*3 and snake_case…");
+    expect(plainSnippet("## Heading\n> quoted\n1. first\n- second ~~old~~")).toBe("Heading quoted first second old");
   });
 });
 
@@ -92,6 +145,83 @@ describe("debounced topic search", () => {
     release([hit("message", 2, "fresh", 13)]);
     await vi.advanceTimersByTimeAsync(0);
     expect(delivered.map(hits => hits[0].snippet)).toEqual(["fresh"]);
+  });
+
+  it("shows server hits only for the topic and query they answer, also after a failed request", async () => {
+    vi.useFakeTimers();
+    let fail = false;
+    const search = vi.fn(async (_treeId: number, query: string) => {
+      if (fail) throw new Error("422");
+      return [hit("message", 1, `…${query}…`, 12)];
+    });
+    let remote: RemoteHits | null = null;
+    const searcher = createMapSearcher({ search, delayMs: 10 });
+    const run = (treeId: number, query: string) => searcher.run(treeId, query, hits => { remote = { treeId, query: query.trim(), hits }; });
+    run(7, "pivot");
+    await vi.advanceTimersByTimeAsync(10);
+    expect(currentHits(remote, 7, " pivot ").map(item => item.snippet)).toEqual(["…pivot…"]);
+    // The next keystroke hides them before its own request is even sent.
+    expect(currentHits(remote, 7, "pivot 归并")).toEqual([]);
+    expect(currentHits(remote, 8, "pivot")).toEqual([]);
+    fail = true;
+    run(7, "pivot 归并");
+    await vi.advanceTimersByTimeAsync(10);
+    expect(search).toHaveBeenCalledTimes(2);
+    expect(currentHits(remote, 7, "pivot 归并")).toEqual([]);
+    expect(currentHits(null, 7, "pivot")).toEqual([]);
+  });
+
+  it("is pending until the current query's search answers or fails", async () => {
+    vi.useFakeTimers();
+    let fail = false;
+    const search = vi.fn(async () => { if (fail) throw new Error("offline"); return [hit("message", 1, "pivot", 12)]; });
+    let remote: RemoteHits | null = null;
+    const failures: string[] = [];
+    const searcher = createMapSearcher({ search, delayMs: 10 });
+    const run = (treeId: number, query: string) => searcher.run(treeId, query, hits => { remote = { treeId, query: query.trim(), hits }; }, () => {
+      failures.push(query);
+      remote = { treeId, query: query.trim(), hits: [], failed: true };
+    });
+    expect(searchPending(remote, 7, "   ")).toBe(false);
+    expect(searchPending(remote, null, "pivot")).toBe(false);
+    run(7, "pivot");
+    expect(searchPending(remote, 7, "pivot")).toBe(true);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(searchPending(remote, 7, " pivot ")).toBe(false);
+    expect(searchPending(remote, 7, "pivots")).toBe(true);
+    expect(searchFailed(remote, 7, "pivot")).toBe(false);
+    fail = true;
+    run(7, "pivots");
+    await vi.advanceTimersByTimeAsync(10);
+    expect(failures).toEqual(["pivots"]);
+    expect(searchPending(remote, 7, "pivots")).toBe(false);
+    expect(currentHits(remote, 7, "pivots")).toEqual([]);
+    // The failure belongs to that topic and query only.
+    expect(searchFailed(remote, 7, " pivots ")).toBe(true);
+    expect([searchFailed(remote, 7, "pivot"), searchFailed(remote, 8, "pivots"), searchFailed(null, 7, "pivots")]).toEqual([false, false, false]);
+    // A request that was cancelled or superseded reports nothing.
+    run(7, "pivot again");
+    await vi.advanceTimersByTimeAsync(5);
+    run(8, "pivot again");
+    searcher.cancel();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(failures).toEqual(["pivots"]);
+  });
+
+  it("claims no matches only after the history search answered, and names a failed one", () => {
+    const en = (zh: string, text: string, params?: MessageParams) => formatMessage("en", zh, text, params);
+    const zh = (text: string, english: string, params?: MessageParams) => formatMessage("zh-CN", text, english, params);
+    const none = { count: 0, more: false };
+    expect(searchStatusText(none, "pending", en)).toBe("Searching…");
+    expect(searchStatusText(none, "failed", en)).toBe("History search failed");
+    expect(searchStatusText(none, "failed", zh)).toBe("历史记录搜索失败");
+    expect(searchStatusText(none, "answered", en)).toBe("No matching questions");
+    expect(searchStatusText(none, "answered", zh)).toBe("没有找到相关问题");
+    // Instant matches are counted at once; a failed history search is still named beside them.
+    expect(searchStatusText({ count: 2, more: false }, "pending", en)).toBe("2 results");
+    expect(searchStatusText({ count: 2, more: false }, "failed", en)).toBe("2 results · History search failed");
+    expect(searchStatusText({ count: 30, more: true }, "failed", zh)).toBe("30+ 个结果 · 历史记录搜索失败");
+    expect(searchStatusText({ count: 30, more: true }, "answered", en)).toBe("30+ results");
   });
 
   it("ignores blank queries and failed requests", async () => {
