@@ -176,7 +176,9 @@ def build_context(
     protected_system = _full_system([], current, "")
 
     def count(s, ms):
-        return estimate_request_tokens(s, ms, tool_defs, protocol)
+        # The definitions cost the same in every request of this build: add their
+        # estimate instead of serializing them again for each count.
+        return estimate_request_tokens(s, ms, protocol=protocol) + tool_schema_cost
 
     document_note = ""
     if documents:
@@ -193,6 +195,7 @@ def build_context(
         document_note = render_document_context(documents, question, document_budget)
     system = _full_system(ancestors, current, memory_note, document_note)
     messages = _wire(units) + [last]
+    full_estimate = count(system, messages)
 
     if diagnostics is not None:
         # This core and the stable prefix contain prompt text (the current quote,
@@ -200,13 +203,13 @@ def build_context(
         # or loggable diagnostics payload.
         diagnostics.update(
             compacted=False,
-            raw_estimate=count(system, messages),
+            raw_estimate=full_estimate,
             protected_system=protected_system,
             stable_system=stable_prefix(ancestors),
         )
-    if count(system, messages) <= assembly_budget:
+    if full_estimate <= assembly_budget:
         if diagnostics is not None:
-            diagnostics["estimated_input_tokens"] = count(system, messages)
+            diagnostics["estimated_input_tokens"] = full_estimate
         return system, messages
 
     # The current question, selected passage and current note are mandatory.
@@ -226,8 +229,9 @@ def build_context(
     recent_limit = int(available * 0.60)
     recent = []
     recent_cost = 0
+    empty_request = estimate_request_tokens("", [], protocol=protocol)
     for unit in reversed(units):
-        cost = count("", _wire([unit])) - count("", [])
+        cost = estimate_request_tokens("", _wire([unit]), protocol=protocol) - empty_request
         if recent_cost + cost > recent_limit:
             break
         recent.insert(0, unit)

@@ -844,3 +844,51 @@ def test_compacted_context_adds_no_empty_memory_or_directory_heading():
     system, _ = build_context(ancestors, current, [], "继续解释", memory_note=note, policy=policy)
     assert "当前路径来源" not in system and "历史记忆" not in system
     assert current.seed_text in system
+
+
+def test_tool_definitions_are_estimated_a_fixed_number_of_times_per_build(monkeypatch):
+    """The schema cost is the same for every history unit. Serializing the definitions
+    again for each unit made compaction on long paths with many MCP tools several
+    times slower; the count must not grow with the units the builder considers."""
+    import app.context_budget as budget
+    from app.context import build_context
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": f"mcp_1_tool_{index}",
+                "description": "Synthetic remote tool. " * 30,
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for index in range(40)
+    ]
+    serialized = []
+    original = budget._json_tokens
+
+    def counting(value):
+        if value is tools:
+            serialized.append(value)
+        return original(value)
+
+    monkeypatch.setattr(budget, "_json_tokens", counting)
+    counts = []
+    for length in (10, 120):
+        ancestors, current = synthetic_path(length=length)
+        # One large old answer forces compaction; every short recent unit gets costed.
+        ancestors[0][1][1].content = "早期背景与条件。" * 7000
+        serialized.clear()
+        diagnostics = {}
+        system, messages = build_context(
+            ancestors,
+            current,
+            [],
+            "继续解释",
+            policy=ContextPolicy(window_tokens=65536, output_tokens=4096),
+            tool_defs=tools,
+            diagnostics=diagnostics,
+        )
+        assert diagnostics["compacted"] and len(messages) > length // 2
+        counts.append(len(serialized))
+    assert counts[0] == counts[1] <= 3, counts
