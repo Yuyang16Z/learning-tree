@@ -980,3 +980,64 @@ def test_retrieval_evaluation_request_estimates_match_the_app(tmp_path):
 )
 def test_retrieval_evaluation_key_terms(question, term):
     assert load("scripts/evaluate_retrieval.py").key_term(question) == term
+
+
+def test_demo_recording_doubles_take_the_calls_the_app_makes(tmp_path, monkeypatch):
+    """record_demo.py swaps only the provider boundary, so its doubles must accept every
+    argument the routes pass, including keyword options added later."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from sqlmodel import Session, SQLModel, create_engine
+
+    import app.service as service
+    from app.models import ModelConfig
+    from app.routers import nodes, trees
+
+    demo = load("scripts/record_demo.py")
+    monkeypatch.setattr(demo, "CHUNK_DELAY", 0)
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'demo.db'}", connect_args={"check_same_thread": False}
+    )
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(nodes, "engine", engine)
+    monkeypatch.setattr(service, "engine", engine)
+    # The script replaces llm.stream_chat and llm.complete before the routers import them.
+    monkeypatch.setattr(nodes, "stream_chat", demo.scripted_stream)
+    monkeypatch.setattr(nodes, "complete", demo.scripted_complete)
+    nodes._GENERATIONS.clear()
+    with Session(engine) as session:
+        session.add(
+            ModelConfig(
+                label="Offline demo",
+                base_url="mock://offline",
+                llm_model="mock",
+                api_key="mock",
+                is_default=True,
+            )
+        )
+        session.commit()
+    app = FastAPI()
+    app.include_router(nodes.router)
+    app.include_router(trees.router)
+
+    def session_override():
+        with Session(engine) as session:
+            yield session
+
+    app.dependency_overrides[nodes.get_session] = session_override
+    try:
+        client = TestClient(app)
+        root = client.post("/trees", json={"title": "Overfitting"}).json()["root_node_id"]
+        response = client.post(f"/nodes/{root}/ask", json={"question": demo.QUESTION})
+        events = [
+            json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")
+        ]
+        assert events[-1].get("done") is True, events[-1]
+        assert "".join(event.get("delta", "") for event in events) == demo.MAIN_ANSWER
+        explained = client.post(f"/nodes/{root}/explain", json={"text": "validation set"})
+        assert explained.json() == {"explanation": demo.EXPLANATION}
+    finally:
+        for generation in list(nodes._GENERATIONS.values()):
+            generation.stop.set()
+        nodes._GENERATIONS.clear()
+        engine.dispose()

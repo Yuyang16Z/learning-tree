@@ -31,7 +31,9 @@ class ModelCalibration(SQLModel, table=True):
     """Learned ratio between provider-reported and locally estimated input tokens.
 
     Side data outside the change feed: it is updated after answers, so it must not
-    make every open window reload the model list or be reset by editing a model."""
+    make every open window reload the model list. Label, key, window and reserve edits
+    keep it; it is deleted with its model or when an edit switches the model's protocol,
+    address or name, and writes require the model to exist (ids are reused)."""
 
     config_id: int = Field(primary_key=True)
     samples: int = 0

@@ -424,6 +424,38 @@ def test_extractor_normalizes_object_facts_and_sends_existing_facts_only_when_gi
     assert "supersedes" in llm._EXTRACT_SYSTEM and "answer、引用、代码、转述" in llm._EXTRACT_SYSTEM
 
 
+def test_one_malformed_supersedes_value_keeps_the_rest_of_the_turn(monkeypatch):
+    replies = [
+        [
+            {"text": "保留的事实", "type": "definition"},
+            # str.isdigit() accepts superscripts and circled digits; int() does not.
+            {"text": "上标编号", "supersedes": "²"},
+            {"text": "全角编号", "supersedes": "１２"},
+        ],
+        [
+            {"text": "保留的事实", "type": "definition"},
+            # Decimal, but past int()'s 4,300-digit limit: only this item is dropped.
+            {"text": "超长编号", "supersedes": "1" * 5000},
+            {"text": "圈号编号", "supersedes": "①"},
+        ],
+    ]
+    monkeypatch.setattr(
+        llm, "complete", lambda *args: json.dumps({"preferences": [], "facts": replies.pop(0)})
+    )
+    kept = {"text": "保留的事实", "type": "definition", "terms": [], "supersedes": None}
+    first = llm.extract_memories(SPEC, QUESTION, "回答", {"enabled": False}, [])
+    assert first["facts"] == [
+        kept,
+        {"text": "上标编号", "type": "conclusion", "terms": [], "supersedes": None},
+        {"text": "全角编号", "type": "conclusion", "terms": [], "supersedes": 12},
+    ]
+    second = llm.extract_memories(SPEC, QUESTION, "回答", {"enabled": False}, [])
+    assert second["facts"] == [
+        kept,
+        {"text": "圈号编号", "type": "conclusion", "terms": [], "supersedes": None},
+    ]
+
+
 def test_structured_fact_supersedes_a_current_path_fact_without_deleting_it(store, monkeypatch):
     calls = extract(monkeypatch, {"preferences": [], "facts": ["旧结论"]})
     service.extract_and_save(SPEC, 1, 1, QUESTION, "回答")

@@ -60,7 +60,7 @@ describe('stream recovery boundaries', () => {
     expect(result).not.toHaveProperty('summary');
   });
   it('hands numeric diagnostics to their handler without leaking them into the result', async () => {
-    const report = { estimated_input_tokens: 1234, actual_input_tokens: 1100, cached_input_tokens: 800, output_tokens: 42, compacted: false, tool_rounds: 2, calibration_ratio: 1, timings_ms: { retrieval: 10, tools: 20, summary: 0, model: 300, total: 400 } };
+    const report = { estimated_input_tokens: 1234, actual_input_tokens: 1100, cached_input_tokens: 800, output_tokens: 42, requests: 3, largest_request: { estimated_input_tokens: 500, actual_input_tokens: 460, cached_input_tokens: 300 }, compacted: false, tool_rounds: 2, calibration_ratio: 1, timings_ms: { retrieval: 10, tools: 20, summary: 0, model: 300, total: 400 } };
     const events = [
       { started: true, node_id: 9 },
       { diagnostics: 'not an object' },

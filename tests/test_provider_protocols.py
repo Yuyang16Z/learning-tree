@@ -52,7 +52,8 @@ TOOLS = [
 ]
 
 
-def sse(blocks=None, stop="end_turn", *, terminal=True, usage=None):
+def sse(blocks=None, stop="end_turn", *, terminal=True, usage=None, start_usage=None):
+    """Anthropic event stream; start_usage replaces message_start's usage verbatim."""
     blocks = blocks or [{"type": "text", "text": "你好"}]
     events = [
         {
@@ -65,14 +66,19 @@ def sse(blocks=None, stop="end_turn", *, terminal=True, usage=None):
                 "content": [],
                 "stop_reason": None,
                 "stop_sequence": None,
-                "usage": {"input_tokens": 10, "output_tokens": 1, **(usage or {})},
+                "usage": (
+                    start_usage
+                    if start_usage is not None
+                    else {"input_tokens": 10, "output_tokens": 1, **(usage or {})}
+                ),
             },
         }
     ]
     for index, block in enumerate(blocks):
         initial = dict(block)
         if block["type"] == "text":
-            initial["text"] = ""
+            # Some proxies put the first text in the block start; "prefix" emulates them.
+            initial["text"] = initial.pop("prefix", "")
             deltas = [{"type": "text_delta", "text": block["text"]}]
         elif block["type"] == "thinking":
             initial.update(thinking="", signature="")
@@ -359,16 +365,37 @@ TOOL_USE = {"type": "tool_use", "id": "toolu_a", "name": "mcp_1_lookup", "input"
 @pytest.mark.parametrize(
     "prefix,system",
     [
-        ("短前缀", "短前缀\n其余系统提示"),  # below the cacheable minimum
+        ("短前缀", "短前缀\n其余系统提示"),  # too short for its own breakpoint
         (CACHE_PREFIX, "另一段开头" + CACHE_PREFIX),  # fit_request replaced the system
         (None, CACHE_PREFIX + CACHE_TAIL),  # no prefix supplied
     ],
+    ids=["short-prefix", "replaced-system", "no-prefix"],
 )
 def test_system_stays_a_plain_string_without_a_usable_cache_prefix(monkeypatch, prefix, system):
     monkeypatch.setattr(adapter, "_CACHE_CONTROL_UNSUPPORTED", set())
     _, bodies, _ = mock_anthropic(monkeypatch, [sse()])
     list(llm.stream_chat(SPEC, system, [{"role": "user", "content": "问题"}], cache_prefix=prefix))
-    assert bodies[0]["system"] == system and "cache_control" not in bodies[0]
+    assert bodies[0]["system"] == system
+    # An answer request (one that supplies a prefix) still caches its conversation.
+    assert bodies[0].get("cache_control") == ({"type": "ephemeral"} if prefix else None)
+
+
+def test_short_stable_heads_still_cache_the_conversation_of_answer_requests(monkeypatch):
+    monkeypatch.setattr(adapter, "_CACHE_CONTROL_UNSUPPORTED", set())
+    _, bodies, _ = mock_anthropic(
+        monkeypatch, [sse(), sse([TOOL_USE], stop="tool_use"), sse(), sse()]
+    )
+    head = "固定规则。\n学习路径：根节点（node=1）"
+    history = [{"role": "user", "content": "问题"}]
+    list(llm.stream_chat(SPEC, head + CACHE_TAIL, history, cache_prefix=head))
+    list(
+        llm.run_agent(SPEC, head + CACHE_TAIL, history, TOOLS, lambda *a: "资料", cache_prefix=head)
+    )
+    assert llm.complete(SPEC, head, history) == "你好"
+    answers, summary = bodies[:3], bodies[3]
+    assert all(body["cache_control"] == {"type": "ephemeral"} for body in answers)
+    assert all(isinstance(body["system"], str) for body in answers)
+    assert "cache_control" not in summary, "requests without a prefix stay unmarked"
 
 
 @pytest.mark.parametrize("path", ["stream", "agent"])
@@ -435,6 +462,27 @@ def test_anthropic_usage_sums_cache_tokens_into_input_and_reports_cached_reads(m
     )
     assert llm.complete(SPEC, "系统", [{"role": "user", "content": "问题"}], diagnostics=plain)
     assert len(plain["rounds"]) == 2 and plain["rounds"][1]["output_tokens"] == 12
+
+
+@pytest.mark.parametrize("path", ["stream", "agent"])
+def test_anthropic_usage_without_input_counts_is_unknown_rather_than_zero(monkeypatch, path):
+    # A proxy that leaves the input counts out of message_start reports nothing.
+    mock_anthropic(monkeypatch, [sse(start_usage={"output_tokens": 1})])
+    history = [{"role": "user", "content": "问题"}]
+    diagnostics = {}
+    if path == "stream":
+        list(llm.stream_chat(SPEC, "系统", history, diagnostics=diagnostics))
+    else:
+        list(llm.run_agent(SPEC, "系统", history, TOOLS, lambda *a: "", diagnostics=diagnostics))
+    (round_one,) = diagnostics["rounds"]
+    assert round_one["input_tokens"] is None and round_one["cached_input_tokens"] is None
+    assert round_one["output_tokens"] == 12
+    # A reported cache read alone still counts as input.
+    mock_anthropic(monkeypatch, [sse(start_usage={"cache_read_input_tokens": 7})])
+    partial = {}
+    list(llm.stream_chat(SPEC, "系统", history, diagnostics=partial))
+    assert partial["rounds"][0]["input_tokens"] == 7
+    assert partial["rounds"][0]["cached_input_tokens"] == 7
 
 
 def test_anthropic_tool_loop_records_every_round_and_counts_tool_rounds(monkeypatch):
@@ -531,6 +579,82 @@ def test_parallel_tool_results_and_signed_blocks_are_preserved(monkeypatch):
             {"type": "tool_result", "tool_use_id": "toolu_b", "content": "资料-B"},
         ],
     }
+
+
+TOOL_HISTORY_REJECTION = (
+    "Requests which include `tool_use` or `tool_result` blocks must define tools."
+)
+
+
+@pytest.mark.parametrize("deep", [False, True])
+def test_anthropic_final_round_keeps_tool_definitions_and_forbids_calls(monkeypatch, deep):
+    bodies = []
+    responses = [sse([TOOL_USE], stop="tool_use"), sse([{"type": "text", "text": "根据资料作答"}])]
+
+    def handler(request):
+        # Anthropic refuses tool blocks in a request that defines no tools.
+        body = json.loads(request.content)
+        bodies.append(body)
+        blocks = [
+            block
+            for message in body["messages"]
+            if isinstance(message["content"], list)
+            for block in message["content"]
+        ]
+        if not body.get("tools") and any(b["type"] in ("tool_use", "tool_result") for b in blocks):
+            error = {"type": "invalid_request_error", "message": TOOL_HISTORY_REJECTION}
+            return httpx.Response(400, json={"type": "error", "error": error})
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=responses.pop(0)
+        )
+
+    monkeypatch.setattr(
+        adapter,
+        "client",
+        lambda spec: Anthropic(
+            base_url=adapter.base_url(spec.base_url),
+            api_key=spec.api_key,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+            max_retries=0,
+        ),
+    )
+    events = list(
+        llm.run_agent(
+            SPEC,
+            "系统",
+            [{"role": "user", "content": "查资料"}],
+            TOOLS,
+            lambda *args: "资料",
+            max_rounds=1,
+            deep=deep,
+        )
+    )
+    assert events[-1] == {"type": "delta", "text": "根据资料作答"}
+    assert len(bodies) == 2 and "tool_choice" not in bodies[0]
+    # The synthesis round still defines the same tools, so the tool history stays valid
+    # and the cached prefix (tools first) still matches, but no call is allowed.
+    assert bodies[1]["tools"] == bodies[0]["tools"]
+    assert bodies[1]["tool_choice"] == {"type": "none"}
+    assert "工具调用已达本轮上限" in bodies[1]["system"]
+    assert bodies[1]["messages"][-1]["content"][0]["type"] == "tool_result"
+
+
+def test_anthropic_tool_turns_keep_text_a_proxy_sends_in_the_block_start(monkeypatch):
+    first = [{"type": "text", "prefix": "我先", "text": "查一下。"}, TOOL_USE]
+    final = [{"type": "text", "prefix": "前缀", "text": "正文"}]
+    _, bodies, _ = mock_anthropic(monkeypatch, [sse(first, stop="tool_use"), sse(final)])
+    events = list(
+        llm.run_agent(SPEC, "系统", [{"role": "user", "content": "查"}], TOOLS, lambda *a: "资料")
+    )
+    deltas = [event["text"] for event in events if event["type"] == "delta"]
+    assert "".join(deltas) == "我先查一下。\n\n前缀正文"
+    assert bodies[1]["messages"][-2]["content"][0] == {"type": "text", "text": "我先查一下。"}
+    # The plain stream already relayed such a prefix; both paths now agree.
+    _, _, _ = mock_anthropic(monkeypatch, [sse(final)])
+    assert list(llm.stream_chat(SPEC, "系统", [{"role": "user", "content": "问"}])) == [
+        ("text", "前缀"),
+        ("text", "正文"),
+    ]
 
 
 def test_incomplete_tool_arguments_never_execute(monkeypatch):
@@ -764,6 +888,26 @@ def test_openai_stream_requests_and_reads_the_usage_chunk(monkeypatch, usage, ca
     assert round_one["estimated_input_tokens"] == estimate_request_tokens(
         "系统", [{"role": "user", "content": "问题"}]
     )
+
+
+def test_openai_usage_without_prompt_tokens_is_unknown_rather_than_zero(monkeypatch):
+    monkeypatch.setattr(llm, "_STREAM_OPTIONS_UNSUPPORTED", set())
+    answer = [({"role": "assistant", "content": "答"}, None), ({}, "stop")]
+    monkeypatch.setattr(
+        llm,
+        "_client",
+        openai_client(lambda request: openai_stream(answer, {"completion_tokens": 3})),
+    )
+    spec = LLMSpec("兼容", "https://provider.test/v1", "custom-model", "synthetic-key")
+    diagnostics = {}
+    list(
+        llm.stream_chat(
+            spec, "系统", [{"role": "user", "content": "问题"}], diagnostics=diagnostics
+        )
+    )
+    (round_one,) = diagnostics["rounds"]
+    assert round_one["input_tokens"] is None and round_one["cached_input_tokens"] is None
+    assert round_one["output_tokens"] == 3
 
 
 def test_openai_stream_options_rejection_falls_back_once_per_base_url(monkeypatch):
@@ -1168,6 +1312,249 @@ def test_openai_malformed_or_truncated_tool_arguments_never_execute(monkeypatch)
                 )
             )
     assert not responses
+
+
+def lookup_fragment(arguments, call_id=None, index=None, name="mcp_1_lookup"):
+    fragment = {"function": {"arguments": arguments}}
+    if name:
+        fragment["function"]["name"] = name
+        fragment["type"] = "function"
+    if call_id:
+        fragment["id"] = call_id
+    if index is not None:
+        fragment["index"] = index
+    return fragment
+
+
+@pytest.mark.parametrize(
+    "fragments,expected",
+    [
+        # Qwen3 behind some OpenAI-compatible servers opens a call at index 1 and
+        # streams its continuations at index 0 without an id or name.
+        (
+            [
+                lookup_fragment('{"q":', "call_a", 1),
+                lookup_fragment('"A"}', index=0, name=None),
+            ],
+            [("call_a", {"q": "A"})],
+        ),
+        # Two complete calls that share index 0 but carry different ids.
+        (
+            [
+                lookup_fragment('{"q":"A"}', "call_a", 0),
+                lookup_fragment('{"q":"B"}', "call_b", 0),
+            ],
+            [("call_a", {"q": "A"}), ("call_b", {"q": "B"})],
+        ),
+        # Argument pieces of one call that carry no index at all.
+        (
+            [lookup_fragment('{"q":', "call_a"), lookup_fragment('"A"}', name=None)],
+            [("call_a", {"q": "A"})],
+        ),
+        # Complete calls without an index, as Gemini- and Ollama-style servers send them.
+        (
+            [lookup_fragment('{"q":"A"}', "call_a"), lookup_fragment('{"q":"B"}', "call_b")],
+            [("call_a", {"q": "A"}), ("call_b", {"q": "B"})],
+        ),
+        (
+            [lookup_fragment('{"q":"A"}'), lookup_fragment('{"q":"B"}')],
+            [("call_0", {"q": "A"}), ("call_1", {"q": "B"})],
+        ),
+    ],
+    ids=[
+        "index-drift",
+        "shared-index",
+        "split-without-index",
+        "complete-without-index",
+        "complete-without-index-or-id",
+    ],
+)
+def test_openai_tool_fragments_survive_shifted_reused_or_missing_indexes(
+    monkeypatch, fragments, expected
+):
+    monkeypatch.setattr(llm, "_STREAM_OPTIONS_UNSUPPORTED", set())
+    bodies = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        bodies.append(body)
+        if len(bodies) > 1:
+            return openai_stream([({"role": "assistant", "content": "答案"}, None), ({}, "stop")])
+        chunks = [({"role": "assistant", "content": None, "tool_calls": fragments[:1]}, None)]
+        chunks += [({"tool_calls": [fragment]}, None) for fragment in fragments[1:]]
+        return openai_stream([*chunks, ({}, "tool_calls")])
+
+    monkeypatch.setattr(llm, "_client", openai_client(handler))
+    spec = LLMSpec("兼容", "https://provider.test/v1", "qwen3-32b", "synthetic-key")
+    executed = []
+
+    def execute(name, args):
+        executed.append((name, args))
+        return f"资料-{args['q']}"
+
+    events = list(llm.run_agent(spec, "系统", [{"role": "user", "content": "查"}], TOOLS, execute))
+    assert executed == [("mcp_1_lookup", args) for _, args in expected]
+    assert events[-1] == {"type": "delta", "text": "答案"}
+    calls = bodies[1]["messages"][-1 - len(expected)]["tool_calls"]
+    assert [(c["id"], json.loads(c["function"]["arguments"])) for c in calls] == expected
+    results = [m["tool_call_id"] for m in bodies[1]["messages"] if m["role"] == "tool"]
+    assert results == [call_id for call_id, _ in expected]
+
+
+@pytest.mark.parametrize("arguments", ["null", "[]", '"text"', "3"])
+def test_tool_arguments_that_are_not_objects_never_execute(monkeypatch, arguments):
+    monkeypatch.setattr(llm, "_STREAM_OPTIONS_UNSUPPORTED", set())
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 1:
+            return openai_stream(tool_call_fragments([(0, "call_a", "mcp_1_lookup", arguments)]))
+        return openai_stream(
+            [({"role": "assistant", "content": "已按定义重试"}, None), ({}, "stop")]
+        )
+
+    monkeypatch.setattr(llm, "_client", openai_client(handler))
+    spec = LLMSpec("兼容", "https://provider.test/v1", "custom-model", "synthetic-key")
+    events = list(
+        llm.run_agent(
+            spec,
+            "系统",
+            [{"role": "user", "content": "查"}],
+            TOOLS,
+            lambda *args: pytest.fail("non-object arguments must not execute"),
+        )
+    )
+    assert [event["type"] for event in events] == ["tool_start", "tool_end", "delta"]
+    assert events[0]["args"] == json.loads(arguments)
+    # The model gets a fixed error it can recover from instead of a failed answer.
+    assert json.loads(events[1]["result"])["error"] == "invalid_arguments"
+    assert bodies[1]["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "call_a",
+        "content": events[1]["result"],
+    }
+    assert events[-1]["text"] == "已按定义重试"
+
+
+REASONING_REJECTION = "The `reasoning_content` in the thinking mode must be passed back to the API."
+
+
+def reasoning_endpoint(bodies, first_round, *, thinking):
+    """Emulate the two OpenAI-compatible message rules around reasoning_content.
+
+    A thinking endpoint (DeepSeek) streams the field and, once a request no longer ends
+    on a user message, rejects it unless every assistant message carries the field (an
+    empty string is accepted). A strict endpoint (OpenAI) never streams it and rejects
+    any message that carries it.
+    """
+
+    def handler(request):
+        body = json.loads(request.content)
+        bodies.append(body)
+        messages = body["messages"]
+        carried = ["reasoning_content" in m for m in messages if m["role"] == "assistant"]
+        if thinking and messages[-1]["role"] != "user" and not all(carried):
+            return httpx.Response(400, json={"error": {"message": REASONING_REJECTION}})
+        if not thinking and any("reasoning_content" in m for m in messages):
+            return httpx.Response(
+                400,
+                json={"error": {"message": "Additional properties are not allowed"}},
+            )
+        if len(bodies) == 1:
+            return openai_stream(first_round)
+        final = [({"role": "assistant", "content": "有依据的答案"}, None), ({}, "stop")]
+        if thinking:
+            final.insert(
+                0, ({"role": "assistant", "content": None, "reasoning_content": "整理"}, None)
+            )
+        return openai_stream(final)
+
+    return handler
+
+
+LOOKUP_CALL = {
+    "index": 0,
+    "id": "call_a",
+    "type": "function",
+    "function": {"name": "mcp_1_lookup", "arguments": '{"q":"A"}'},
+}
+
+
+@pytest.mark.parametrize(
+    "first_round,thinking,echoed",
+    [
+        (
+            [
+                ({"role": "assistant", "content": None, "reasoning_content": "先想想，"}, None),
+                ({"reasoning_content": "需要查资料。"}, None),
+                ({"tool_calls": [LOOKUP_CALL]}, None),
+                ({}, "tool_calls"),
+            ],
+            True,
+            "先想想，需要查资料。",
+        ),
+        # An empty chain of thought still announces the field, as null.
+        (
+            [
+                (
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "reasoning_content": None,
+                        "tool_calls": [LOOKUP_CALL],
+                    },
+                    None,
+                ),
+                ({}, "tool_calls"),
+            ],
+            True,
+            "",
+        ),
+        (
+            [
+                ({"role": "assistant", "content": None, "tool_calls": [LOOKUP_CALL]}, None),
+                ({}, "tool_calls"),
+            ],
+            False,
+            None,
+        ),
+    ],
+    ids=["thinking", "empty-thinking", "strict"],
+)
+def test_openai_tool_rounds_pass_reasoning_content_back_only_to_endpoints_that_send_it(
+    monkeypatch, first_round, thinking, echoed
+):
+    monkeypatch.setattr(llm, "_STREAM_OPTIONS_UNSUPPORTED", set())
+    bodies = []
+    monkeypatch.setattr(
+        llm, "_client", openai_client(reasoning_endpoint(bodies, first_round, thinking=thinking))
+    )
+    spec = LLMSpec("兼容", "https://provider.test/v1", "deepseek-flash", "synthetic-key")
+    history = [
+        {"role": "user", "content": "早先的问题"},
+        {"role": "assistant", "content": "早先的回答"},
+        {"role": "user", "content": "现在的问题"},
+    ]
+    original_history = deepcopy(history)
+    executed = []
+
+    def execute(name, args):
+        executed.append((name, args))
+        return "资料"
+
+    events = list(llm.run_agent(spec, "系统", history, TOOLS, execute))
+    assert executed == [("mcp_1_lookup", {"q": "A"})]
+    assert "".join(e["text"] for e in events if e["type"] == "delta") == "有依据的答案"
+    assert history == original_history and len(bodies) == 2
+    assistants = [m for m in bodies[1]["messages"] if m["role"] == "assistant"]
+    assert [m["content"] for m in assistants] == ["早先的回答", None]
+    if echoed is None:
+        assert not any("reasoning_content" in m for body in bodies for m in body["messages"])
+    else:
+        # The tool-call turn returns its own reasoning; an earlier answer, whose
+        # reasoning is never replayed, carries the field empty.
+        assert [m["reasoning_content"] for m in assistants] == ["", echoed]
 
 
 def test_anthropic_narration_streams_before_tool_start_and_final_text_is_not_rechunked(monkeypatch):

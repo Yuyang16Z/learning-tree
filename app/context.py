@@ -24,15 +24,35 @@ COMPACTION_NOTICE = (
     "可用 read_learning_source 回查。历史图片若未作为图像附送，则本轮不可见。]"
 )
 # Request estimates are token-scale units; summary and document producers budget
-# UTF-8 bytes. 2.5 bytes per unit matches the estimator's visible-ASCII density
-# (about 2.6 bytes per unit) and under-fills CJK text (about 3.7), so a converted
-# budget is always re-checked with the estimator before it counts against the request.
+# UTF-8 bytes. The rate is measured on the material a producer draws from: visible
+# ASCII runs about 2.6 bytes per unit and CJK about 3.7, but two-byte scripts
+# (Cyrillic, Greek, Arabic, Hebrew) only about 1.8, so a fixed rate that suits ASCII
+# would hand them about 1.4 times the room. The rate stays within [1.7, 2.5] (2.5
+# still under-fills CJK), and a converted budget is always re-checked with the
+# estimator before it counts against the request.
 BYTES_PER_UNIT = 2.5
+MIN_BYTES_PER_UNIT = 1.7
+_DENSITY_SAMPLE_CHARS = 65536
 
 
-def byte_budget(units: int) -> int:
+def bytes_per_unit(texts) -> float:
+    """UTF-8 bytes per estimate unit of the text a byte-budgeted producer draws from."""
+    material = "\n".join(text for text in texts if text)
+    if len(material) > _DENSITY_SAMPLE_CHARS:
+        # Sixteen evenly spaced windows keep the measurement cheap on very long paths.
+        width, stride = _DENSITY_SAMPLE_CHARS // 16, len(material) // 16
+        material = "".join(material[i * stride : i * stride + width] for i in range(16))
+    units = estimate_text_tokens(material)
+    if not units:
+        return BYTES_PER_UNIT
+    # A 5% margin: the producer's headings and citations differ from the sampled text.
+    measured = 0.95 * len(material.encode("utf-8")) / units
+    return max(MIN_BYTES_PER_UNIT, min(BYTES_PER_UNIT, measured))
+
+
+def byte_budget(units: int, rate: float = BYTES_PER_UNIT) -> int:
     """Convert request-estimate room into the UTF-8 byte budget a producer expects."""
-    return max(0, int(units * BYTES_PER_UNIT))
+    return max(0, int(units * rate))
 
 
 def make_content(text: str, images: list[str] | None):
@@ -156,18 +176,26 @@ def build_context(
     protected_system = _full_system([], current, "")
 
     def count(s, ms):
-        return estimate_request_tokens(s, ms, tool_defs, protocol)
+        # The definitions cost the same in every request of this build: add their
+        # estimate instead of serializing them again for each count.
+        return estimate_request_tokens(s, ms, protocol=protocol) + tool_schema_cost
 
     document_note = ""
     if documents:
         from .document_context import render_document_context
 
         mandatory_cost = count(protected_system, [last])
-        # render_document_context budgets bytes; a third of the remaining room, capped.
-        document_budget = min(5000, byte_budget(max(0, (assembly_budget - mandatory_cost) // 3)))
+        # render_document_context budgets bytes; a third of the remaining room, capped,
+        # converted at the density of the documents' own text.
+        document_rate = bytes_per_unit(
+            section.get("text") for doc in documents for section in doc.get("sections") or []
+        )
+        document_room = max(0, (assembly_budget - mandatory_cost) // 3)
+        document_budget = min(5000, byte_budget(document_room, document_rate))
         document_note = render_document_context(documents, question, document_budget)
     system = _full_system(ancestors, current, memory_note, document_note)
     messages = _wire(units) + [last]
+    full_estimate = count(system, messages)
 
     if diagnostics is not None:
         # This core and the stable prefix contain prompt text (the current quote,
@@ -175,13 +203,13 @@ def build_context(
         # or loggable diagnostics payload.
         diagnostics.update(
             compacted=False,
-            raw_estimate=count(system, messages),
+            raw_estimate=full_estimate,
             protected_system=protected_system,
             stable_system=stable_prefix(ancestors),
         )
-    if count(system, messages) <= assembly_budget:
+    if full_estimate <= assembly_budget:
         if diagnostics is not None:
-            diagnostics["estimated_input_tokens"] = count(system, messages)
+            diagnostics["estimated_input_tokens"] = full_estimate
         return system, messages
 
     # The current question, selected passage and current note are mandatory.
@@ -201,8 +229,9 @@ def build_context(
     recent_limit = int(available * 0.60)
     recent = []
     recent_cost = 0
+    empty_request = estimate_request_tokens("", [], protocol=protocol)
     for unit in reversed(units):
-        cost = count("", _wire([unit])) - count("", [])
+        cost = estimate_request_tokens("", _wire([unit]), protocol=protocol) - empty_request
         if recent_cost + cost > recent_limit:
             break
         recent.insert(0, unit)
@@ -220,19 +249,29 @@ def build_context(
         line = f"node={node.id}：{node.title}"
         if estimate_text_tokens("\n".join(directory + [line])) <= directory_budget:
             directory.append(line)
-    base += "\n当前路径来源（部分目录）：\n" + "\n".join(directory)
+    # Headings only above kept entries: an empty one would claim omitted material.
+    if directory:
+        base += "\n当前路径来源（部分目录）：\n" + "\n".join(directory)
     memory_lines = []
     memory_limit = min(3500, available // 6)
     # Keep each sourced memory intact, including multiline qualifications.
     for line in re.split(r"(?m)(?=^- \[(?:记忆|偏好) \d+(?:；来源节点 \d+)?\] )", memory_note):
+        if not line.strip():
+            continue  # No memory at all splits into one empty piece.
         if estimate_text_tokens("\n".join(memory_lines + [line])) <= memory_limit:
             memory_lines.append(line)
     if memory_lines:
         base += "\n历史记忆（可能省略条目）：\n" + "\n".join(memory_lines)
     messages = _wire(recent) + [last]
     summary_room = max(0, assembly_budget - count(base, messages) - 256)
-    # Summary producers (summarize_history, summarize_sources) budget UTF-8 bytes.
-    summary_bytes = byte_budget(summary_room)
+    # Summary producers (summarize_history, summarize_sources) budget UTF-8 bytes; the
+    # room is converted at the density of the older material they draw on.
+    summary_rate = bytes_per_unit(
+        text
+        for node, ms in old_sources
+        for text in (node.learning_note, node.seed_text, *(m.content for m in ms))
+    )
+    summary_bytes = byte_budget(summary_room, summary_rate)
     summary_query = question + "\n" + (current.seed_text or "")
     summary = None
     if summary_resolver and old_sources and summary_room >= 512:

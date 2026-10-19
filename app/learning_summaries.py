@@ -21,7 +21,11 @@ from sqlmodel import Session, select
 from .context_budget import ContextPolicy, text_tokens
 from .context_compaction import _terms, summarize_sources
 from .models import ContextSummary, KnowledgeTree, Message, Node
-from .summary_generation import SUMMARY_PROMPT_VERSION, summarize_learning_context
+from .summary_generation import (
+    SUMMARY_PROMPT_VERSION,
+    fits_input_budget,
+    summarize_learning_context,
+)
 
 BLOCK_TARGET = 8000
 BLOCK_MAX = 24000
@@ -303,7 +307,12 @@ def summarize_history(
     ):
         return None
     model_fingerprint = _hash([spec.protocol, spec.base_url, spec.llm_model])
-    hard_limit = min(BLOCK_MAX, max(0, ContextPolicy.from_spec(spec).input_budget - 4000))
+    # Block partition and eligibility are UTF-8 byte limits. They come from the
+    # uncalibrated budget, read as one byte per estimate unit: conservative, since
+    # ordinary text costs at most about 0.6 unit per byte, and stable, so a learned
+    # calibration ratio never re-keys cached blocks or switches summaries off. The
+    # calibrated budget gates each summary request itself (fits_input_budget).
+    hard_limit = min(BLOCK_MAX, max(0, ContextPolicy.from_spec(spec).raw_input_budget - 4000))
     blocks = _blocks(sources, model_fingerprint, hard_limit)
     namespace = _namespace(engine)
     summaries = {}
@@ -317,9 +326,18 @@ def summarize_history(
                 summaries[block.key] = row.content
     candidate = None
     query_terms = _terms(query)
-    # Score outside the shared claim lock; only the eligibility/claim is atomic.
+    # Score and size-check outside the shared claim lock; only the claim is atomic.
+    # A block whose request the calibrated budget would refuse never takes this
+    # question's one model call, nor starts a failure cooldown.
     ranked_missing = sorted(
-        enumerate(blocks),
+        (
+            (index, block)
+            for index, block in enumerate(blocks)
+            if block.key not in summaries
+            and MIN_INPUT_BYTES <= block.input_bytes <= hard_limit
+            and budget >= block.output_limit + text_tokens(block.heading)
+            and fits_input_budget(spec, block.records, block.output_limit)
+        ),
         key=lambda item: (-_relevance(item[1], query_terms), item[0]),
     )
     with _LOCK:
@@ -327,10 +345,6 @@ def summarize_history(
         # this question. Equal-scoring blocks keep chronological cache fill.
         for _, block in ranked_missing:
             state_key = (namespace, block.key)
-            if block.key in summaries or not MIN_INPUT_BYTES <= block.input_bytes <= hard_limit:
-                continue
-            if budget < block.output_limit + text_tokens(block.heading):
-                continue
             if state_key in _INFLIGHT or time.monotonic() < _FAILURES.get(state_key, 0):
                 continue
             _INFLIGHT.add(state_key)

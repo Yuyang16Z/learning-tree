@@ -43,13 +43,26 @@ export interface ToolResultPage {
   node_id: number; request_id: string; call_index: number; tool: string; truncated: boolean;
   text: string; start: number; end: number; total_chars: number; next_start: number | null;
 }
-/** Numbers only: how an answer's request was budgeted, what the provider reported and how long each phase took. */
+/** One provider request's input: the app's estimate and, when reported, the provider's counts. */
+export interface RequestInput {
+  estimated_input_tokens: number;
+  actual_input_tokens: number | null;
+  cached_input_tokens: number | null;
+}
+/** Numbers only: how an answer's requests were budgeted, what the provider reported and how long each phase took. */
 export interface AnswerDiagnostics {
+  /** Summed over every provider request of the answer (each tool round and the final answer); a reported total is null when any request left that count out. */
   estimated_input_tokens: number;
   actual_input_tokens: number | null;
   cached_input_tokens: number | null;
   output_tokens: number | null;
+  /** How many provider requests the totals add up; absent from diagnostics stored before it was recorded. */
+  requests?: number;
+  /** The request with the largest estimate: the context a single request carried. */
+  largest_request?: RequestInput | null;
   compacted: boolean;
+  /** Memory records the answer was given (the "Referenced" line lists them); absent from older diagnostics. */
+  memory_count?: number;
   tool_rounds: number;
   /** The agent budget that ended the tool rounds early (time limit or tool-result size); null when none did. */
   tool_budget_stop?: 'time' | 'tokens' | null;

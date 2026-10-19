@@ -30,15 +30,37 @@ from app.models import ModelConfig
         ("claude-opus-5-5", 1_000_000),
         ("claude-fable-5-1", 1_000_000),
         ("claude-sonnet-4-5-20250929", 200_000),
+        # A date suffix is not a minor version: these are Claude 4.0 ids.
+        ("claude-sonnet-4-20250514", 200_000),
+        ("claude-opus-4-20250514", 200_000),
+        ("claude-sonnet-4-20250514-thinking", 200_000),
+        ("anthropic/claude-opus-4-20250514", 200_000),
+        ("claude-opus-4-1-20250805", 200_000),
+        ("claude-3-5-sonnet-20241022", 200_000),
+        ("claude-sonnet-4-6-20260217", 1_000_000),
         ("claude-3-7-sonnet", 200_000),
         ("anthropic/claude-sonnet-4-6", 1_000_000),
         ("gpt-4.1-mini", 1_047_576),
         ("gpt-4o-mini", 128_000),
-        ("gpt-5", 400_000),
+        # OpenAI lists gpt-5 at 400,000 including up to 128,000 of output; its input
+        # stops at 272,000, which is what this app's window minus reserve must not pass.
+        ("gpt-5", 272_000),
+        ("gpt-5-mini", 272_000),
+        ("gpt-5.1", 272_000),
+        ("gpt-5-chat-latest", 128_000),
+        ("gpt-5.1-chat-latest", 128_000),
+        ("openai/gpt-5-chat", 128_000),
         ("o3", 200_000),
         ("o4-mini", 200_000),
         ("qwen3-235b-a22b", 131_072),
         ("kimi-k2-0905", 262_144),
+        ("kimi-k2-0905-preview", 262_144),
+        ("kimi-k2-turbo-preview", 262_144),
+        ("kimi-k2-thinking", 262_144),
+        ("moonshotai/Kimi-K2-Instruct-0905", 262_144),
+        # The July 2025 weights have a 128K window.
+        ("kimi-k2-0711-preview", 131_072),
+        ("moonshotai/Kimi-K2-Instruct", 131_072),
         ("glm-4.6", 204_800),
         ("glm-4.5-air", 131_072),
         ("gemini-2.5-pro", 1_048_576),
@@ -182,6 +204,13 @@ def test_anthropic_model_info_supplies_input_and_output_limits(monkeypatch):
     }
 
 
+def test_every_discovery_note_has_an_exact_interface_translation():
+    from pathlib import Path
+
+    table = (Path(__file__).resolve().parents[1] / "web/src/i18n/workspace.ts").read_text()
+    assert all(f'["{note}", "' in table for note in DISCOVERY_NOTES.values())
+
+
 def test_demo_models_never_construct_a_provider_client(monkeypatch):
     monkeypatch.setattr(llm, "_client", lambda spec: pytest.fail("no client in demo mode"))
     monkeypatch.setattr(adapter, "client", lambda spec: pytest.fail("no client in demo mode"))
@@ -245,6 +274,175 @@ def test_discover_route_uses_the_stored_key_and_never_echoes_it(tmp_path, monkey
         assert api.post("/models/discover", json={"llm_model": "x"}).status_code == 422
         with Session(engine) as session:
             assert session.get(ModelConfig, 4).context_window == 32768, "nothing is stored"
+    finally:
+        app.dependency_overrides.clear()
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"base_url": "https://some-other-relay.test/v1"},
+        {"base_url": "https://provider.test/other/v1"},
+        {"protocol": "anthropic"},
+    ],
+    ids=["other-host", "other-path", "other-protocol"],
+)
+def test_discover_route_never_sends_a_stored_key_to_another_endpoint(
+    tmp_path, monkeypatch, changes
+):
+    from app.main import app
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'discover.db'}", connect_args={"check_same_thread": False}
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            ModelConfig(
+                id=4,
+                label="Stored",
+                base_url="https://provider.test/v1",
+                llm_model="deepseek-chat",
+                api_key="stored-secret-key",
+            )
+        )
+        session.commit()
+    requests = []
+    openai_models(
+        monkeypatch,
+        [{"id": "deepseek-chat", "object": "model", "context_length": 65536}],
+        requests=requests,
+    )
+    monkeypatch.setattr(adapter, "client", lambda spec: pytest.fail("no request may be sent"))
+
+    def session_override():
+        with Session(engine) as session:
+            yield session
+
+    app.dependency_overrides[db.get_session] = session_override
+    try:
+        api = TestClient(app)
+        body = {
+            "protocol": "openai",
+            "base_url": "https://provider.test/v1",
+            "llm_model": "deepseek-chat",
+            "api_key": "",
+            "config_id": 4,
+            **changes,
+        }
+        found = api.post("/models/discover", json=body)
+        assert found.status_code == 200, found.text
+        assert requests == [], "the stored key stays with its own address and protocol"
+        assert found.json() == {
+            "context_window": model_catalog.lookup("deepseek-chat"),
+            "max_output_tokens": None,
+            "source": "catalog",
+            "note": DISCOVERY_NOTES["catalog_needs_key"],
+        }
+        unknown = api.post("/models/discover", json={**body, "llm_model": "custom-model"})
+        assert unknown.json() == {
+            "context_window": None,
+            "max_output_tokens": None,
+            "source": "unknown",
+            "note": DISCOVERY_NOTES["unknown_needs_key"],
+        }
+        assert requests == [] and "stored-secret-key" not in found.text + unknown.text
+        # The saved endpoint, spelled with a trailing slash, still uses the stored key.
+        same = {**body, "protocol": "openai", "base_url": "https://provider.test/v1/"}
+        assert api.post("/models/discover", json=same).json()["source"] == "provider"
+        assert [r.headers["authorization"] for r in requests] == ["Bearer stored-secret-key"]
+    finally:
+        app.dependency_overrides.clear()
+        engine.dispose()
+
+
+def test_saving_a_changed_address_with_a_blank_key_keeps_the_stored_key_for_it(
+    tmp_path, monkeypatch
+):
+    """Only Detect withholds a stored key from an edited endpoint; saving the edit does not.
+
+    A blank key field means "keep the current key", also after the protocol or address
+    changed, so Test and later answers send that key to the new address. SECURITY.md and
+    docs/operations.md describe exactly this; asking for a key there is a product change.
+    """
+    from app.main import app
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'repoint.db'}", connect_args={"check_same_thread": False}
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            ModelConfig(
+                id=4,
+                label="Stored",
+                base_url="https://provider.test/v1",
+                llm_model="deepseek-chat",
+                api_key="stored-secret-key",
+            )
+        )
+        session.commit()
+    requests = []
+
+    def handler(request):
+        requests.append((request.url.host, request.headers.get("authorization")))
+        return httpx.Response(
+            200,
+            json={
+                "id": "ping",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "deepseek-chat",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "length",
+                        "message": {"role": "assistant", "content": "ok"},
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(
+        llm,
+        "_client",
+        lambda spec: OpenAI(
+            base_url=spec.base_url,
+            api_key=spec.api_key,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+            max_retries=0,
+        ),
+    )
+
+    def session_override():
+        with Session(engine) as session:
+            yield session
+
+    app.dependency_overrides[db.get_session] = session_override
+    try:
+        api = TestClient(app)
+        edited = {
+            "label": "Stored",
+            "protocol": "openai",
+            "base_url": "https://some-other-relay.test/v1",
+            "llm_model": "deepseek-chat",
+            "api_key": "",
+            "max_tokens": 4096,
+            "context_window": 32768,
+        }
+        detect = {key: edited[key] for key in ("protocol", "base_url", "llm_model", "api_key")}
+        detected = api.post("/models/discover", json={**detect, "config_id": 4})
+        assert detected.json()["note"] == DISCOVERY_NOTES["catalog_needs_key"]
+        assert requests == [], "Detect in the edited form sends nothing to the new address"
+        saved = api.put("/models/4", json=edited)
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["base_url"] == edited["base_url"]
+        assert "stored-secret-key" not in saved.text
+        with Session(engine) as session:
+            assert session.get(ModelConfig, 4).api_key == "stored-secret-key"
+        assert api.post("/models/4/test").json() == {"ok": True, "detail": "连接成功"}
+        assert requests == [("some-other-relay.test", "Bearer stored-secret-key")]
     finally:
         app.dependency_overrides.clear()
         engine.dispose()

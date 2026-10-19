@@ -1,5 +1,6 @@
 """Versioned summaries use temporary SQLite and synthetic provider responses only."""
 
+import json
 import threading
 from dataclasses import replace
 
@@ -7,9 +8,10 @@ import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app import learning_summaries as summaries
-from app.context_budget import text_tokens
+from app.context_budget import ContextPolicy, estimate_request_tokens, text_tokens
 from app.llm import LLMSpec
 from app.models import ContextSummary, KnowledgeTree, Memory, Message, Node
+from app.summary_generation import _SYSTEM
 
 
 @pytest.fixture
@@ -477,3 +479,86 @@ def test_superseded_assistant_cannot_become_a_fresh_summary(workspace):
         session.commit()
     assert summaries.summarize_history(engine, spec, old, "query", 4000) is None
     assert calls == []
+
+
+def _long_node(engine, node_id=5, pairs=8):
+    """A child of node 1 with several question/answer pairs, about 1.5 KB each."""
+    answer = "Answer {index}: a parser accepts nested structure only when the grammar allows it. "
+    with Session(engine) as session:
+        session.add(Node(id=node_id, tree_id=1, parent_id=1, title="Long", status="complete"))
+        for index in range(pairs):
+            session.add_all(
+                [
+                    Message(
+                        id=node_id * 100 + 2 * index,
+                        node_id=node_id,
+                        role="user",
+                        content=f"Question {index}: when does the parser accept this input?",
+                    ),
+                    Message(
+                        id=node_id * 100 + 2 * index + 1,
+                        node_id=node_id,
+                        role="assistant",
+                        content=answer.format(index=index) * 14,
+                    ),
+                ]
+            )
+        session.commit()
+
+
+def test_calibration_neither_rekeys_nor_disables_cached_block_summaries(workspace):
+    """Block partition and eligibility are byte limits taken from the uncalibrated budget,
+    so a learned estimator ratio never orphans cached summaries or switches them off."""
+    engine, sources, spec, calls = workspace
+    _long_node(engine)
+    small = replace(spec, context_window=16384, max_tokens=4096)
+    expected = None
+    for _ in range(10):  # At most one new model summary per call: fill every eligible block.
+        before = len(calls)
+        expected = summaries.summarize_history(engine, small, sources(5), "parser", 20000)
+        if len(calls) == before:
+            break
+    assert expected and expected.count("模型摘要") >= 2
+    keys = {row.key for row in records(engine)}
+    filled = len(calls)
+    for ratio in (1.05, 1.1, 1.3, 2.3, 3.0):
+        calibrated = replace(small, calibration=ratio)
+        result = summaries.summarize_history(engine, calibrated, sources(5), "parser", 20000)
+        assert result == expected, ratio
+    assert len(calls) == filled, "a ratio change re-keyed a block and paid for a new summary"
+    assert {row.key for row in records(engine)} == keys
+
+
+def test_a_block_the_calibrated_budget_refuses_never_takes_the_summary_call(workspace):
+    """Eligibility ignores calibration, so the calibrated request gate is checked before
+    the one summary call is claimed: a refused block yields it to one that fits."""
+    engine, sources, spec, calls = workspace
+    russian = (
+        "parser: синтаксический анализатор принимает вложенную структуру "
+        "только по правилам грамматики. "
+    )
+    _long_node(engine, pairs=1)
+    with Session(engine) as session:
+        session.get(Message, 501).content = russian * 40  # About 7 KB: an eligible block.
+        session.commit()
+    calibrated = replace(spec, context_window=16384, max_tokens=4096, calibration=3.0)
+
+    def request_units(payload, limit):
+        message = json.dumps(
+            {"max_output_bytes": limit, "sources": payload},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return estimate_request_tokens(_SYSTEM, [{"role": "user", "content": message}])
+
+    path = sources(1, 5)
+    assert summaries.summarize_history(engine, calibrated, path, "parser", 20000)
+    assert len(calls) == 1 and all(
+        item["source_id"].startswith("node=1,") for item in calls[0][1]
+    ), "the more relevant block whose request cannot fit was skipped, not attempted"
+    assert (
+        request_units(calls[0][1], calls[0][2]) <= ContextPolicy.from_spec(calibrated).input_budget
+    )
+    # No failure cooldown was started: at a ratio that fits, the block is summarized now.
+    summaries.summarize_history(engine, replace(calibrated, calibration=1.0), path, "parser", 20000)
+    assert len(calls) == 2 and calls[1][1][0]["source_id"].startswith("node=5,")

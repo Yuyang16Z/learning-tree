@@ -14,7 +14,7 @@ from sqlalchemy import delete
 from sqlalchemy.orm import defer
 from sqlmodel import Session, select
 
-from ..calibration import record_usage
+from ..calibration import calibration_sample, record_usage
 from ..config import settings
 from ..context import BASE_SYSTEM, build_context, context_messages, make_content
 from ..context_budget import ContextBudgetExceeded, ContextPolicy, estimate_request_tokens
@@ -721,7 +721,22 @@ def _persist(target_id: int, generation: Generation, label: str) -> None:
     # Deletion must not slip between the source check and assistant-message INSERT.
     with _REQUEST_LOCK, generation.lock, Session(engine) as session:
         node = session.get(Node, target_id)
-        if not node or node.request_id != generation.request_id:
+        if not node:
+            return
+        if node.request_id != generation.request_id:
+            # A retry took the node over after Stop. The producer reports diagnostics
+            # only once its stream returns; keep them on the stopped attempt's own
+            # message, and touch nothing the retry owns.
+            stopped = session.get(Message, generation.message_id) if generation.message_id else None
+            if (
+                stopped is not None
+                and stopped.node_id == target_id
+                and stopped.diagnostics is None
+                and generation.diagnostics
+            ):
+                stopped.diagnostics = generation.diagnostics
+                session.add(stopped)
+                session.commit()
             return
         message = session.get(Message, generation.message_id) if generation.message_id else None
         if message is None:
@@ -1058,6 +1073,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
         # Provider rounds (estimates, reported usage) collected by stream_chat/run_agent.
         usage: dict = {}
         context_stats: dict = {}
+        # Memory records that survived context assembly (ids and titles only).
+        kept_sources: list[dict] = []
         # The tool call in progress (numbered from 1) and complete texts by call index.
         call: dict = {"index": 0, "args": None}
         complete_texts: dict[int, str] = {}
@@ -1070,19 +1087,47 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             rounds = usage.get("rounds") or []
 
             def total(key: str) -> int | None:
-                values = [r.get(key) for r in rounds if r.get(key) is not None]
-                return int(sum(values)) if values else None
+                # A total some request did not report is unknown: a partial sum would
+                # set an answer-wide estimate against part of its usage.
+                values = [r.get(key) for r in rounds]
+                if not values or any(value is None for value in values):
+                    return None
+                return int(sum(values))
+
+            def largest() -> dict | None:
+                # The request with the largest estimate (the later one on a tie): what a
+                # single request carried, which the summed totals are not.
+                if not rounds:
+                    return None
+                _, peak = max(
+                    enumerate(rounds),
+                    key=lambda item: (item[1].get("estimated_input_tokens") or 0, item[0]),
+                )
+
+                def number(key: str) -> int | None:
+                    value = peak.get(key)
+                    return None if value is None else int(value)
+
+                return {
+                    "estimated_input_tokens": int(peak.get("estimated_input_tokens") or 0),
+                    "actual_input_tokens": number("input_tokens"),
+                    "cached_input_tokens": number("cached_input_tokens"),
+                }
 
             def ms(seconds: float) -> int:
                 return int(round(max(0.0, seconds) * 1000))
 
             report = {
+                # Summed over every provider request: each tool round and the final answer.
                 "estimated_input_tokens": total("estimated_input_tokens")
                 or int(context_stats.get("estimated_input_tokens") or 0),
                 "actual_input_tokens": total("input_tokens"),
                 "cached_input_tokens": total("cached_input_tokens"),
                 "output_tokens": total("output_tokens"),
+                "requests": len(rounds),
+                "largest_request": largest(),
                 "compacted": bool(context_stats.get("compacted")),
+                "memory_count": len(kept_sources),
                 "tool_rounds": int(usage.get("tool_rounds") or 0),
                 # "time" or "tokens" when an agent budget ended the tool rounds early.
                 "tool_budget_stop": usage.get("tool_budget_stop"),
@@ -1469,16 +1514,14 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             try:
                 report_diagnostics()
                 if generation.status == "complete" and not is_mock:
-                    report = generation.diagnostics or {}
-                    if report.get("actual_input_tokens"):
-                        # Calibrate the estimator from real usage only; the recorder
-                        # ignores small requests, and demo answers never learn.
-                        record_usage(
-                            engine,
-                            config_id,
-                            int(report.get("estimated_input_tokens") or 0),
-                            int(report["actual_input_tokens"]),
-                        )
+                    # Calibrate the estimator from real usage only, pairing each request's
+                    # estimate with its own reported input; demo answers never learn.
+                    sample = calibration_sample(usage.get("rounds") or [])
+                    if sample:
+                        # Folded only into the model this answer used: not into a model
+                        # that was deleted or switched to another one meanwhile.
+                        identity = (spec.protocol, spec.base_url, spec.llm_model)
+                        record_usage(engine, config_id, *sample, model=identity)
             except Exception:
                 pass
             if stream and hasattr(stream, "close"):

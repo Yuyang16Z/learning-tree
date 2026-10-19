@@ -484,6 +484,25 @@ def test_anthropic_native_blocks_are_not_double_counted_with_mirrored_fields():
     assert estimate_request_tokens("系统", messages, protocol="openai") > original_count
 
 
+def test_reasoning_content_is_counted_where_it_is_sent():
+    messages = [{"role": "user", "content": "查询"}, *tool_group(size=20)]
+    reasoning = "先确认来源，再比较两个条件。" * 800
+    echoed = copy.deepcopy(messages)
+    echoed[1]["reasoning_content"] = reasoning
+    # OpenAI-compatible thinking endpoints receive the field back on assistant turns.
+    assert estimate_request_tokens("系统", echoed) == estimate_request_tokens(
+        "系统", messages
+    ) + estimate_text_tokens(reasoning)
+    # The Anthropic adapter never sends it, so it costs nothing there.
+    assert estimate_request_tokens("系统", echoed, protocol="anthropic") == (
+        estimate_request_tokens("系统", messages, protocol="anthropic")
+    )
+    policy = ContextPolicy(8192, 1024)
+    assert estimate_text_tokens(reasoning) > policy.input_budget
+    with pytest.raises(ContextBudgetExceeded):
+        fit_request("系统", echoed, policy=policy)
+
+
 def test_no_input_capacity_returns_actionable_budget_error():
     with pytest.raises(ContextBudgetExceeded) as caught:
         fit_request(
@@ -798,3 +817,78 @@ def test_context_diagnostics_report_estimates_without_private_source_text():
     assert diagnostics["estimated_input_tokens"] == estimate_request_tokens(system, messages)
     assert diagnostics["estimated_input_tokens"] <= policy.input_budget
     assert private_marker not in json.dumps(diagnostics)
+
+
+def test_compacted_context_adds_no_empty_memory_or_directory_heading():
+    """A heading promising omitted memories or a source directory needs entries under it."""
+    from app.context import build_context
+
+    ancestors, current = synthetic_path(length=12)
+    for _, messages in ancestors:
+        messages[1].content = "较早的解释与条件。" * 300
+    policy = ContextPolicy(window_tokens=32768, output_tokens=4096)
+    diagnostics = {}
+    system, _ = build_context(
+        ancestors, current, [], "继续解释", memory_note="", policy=policy, diagnostics=diagnostics
+    )
+    assert diagnostics["compacted"] and "当前路径来源（部分目录）：\nnode=1：" in system
+    assert "历史记忆" not in system, "no memory was retrieved, so none can have been omitted"
+    note = "以下是历史学习材料：\n【当前学习路径的相关记忆】\n- [记忆 3；来源节点 1] 需要授权。"
+    system, _ = build_context(ancestors, current, [], "继续解释", memory_note=note, policy=policy)
+    assert (
+        "历史记忆（可能省略条目）：\n" in system and "- [记忆 3；来源节点 1] 需要授权。" in system
+    )
+    # Mandatory input between the compaction share and the hard budget leaves no room
+    # for directory lines or memories: their headings go too.
+    current.seed_text = filler("", int(policy.input_budget * 0.8), "引")
+    system, _ = build_context(ancestors, current, [], "继续解释", memory_note=note, policy=policy)
+    assert "当前路径来源" not in system and "历史记忆" not in system
+    assert current.seed_text in system
+
+
+def test_tool_definitions_are_estimated_a_fixed_number_of_times_per_build(monkeypatch):
+    """The schema cost is the same for every history unit. Serializing the definitions
+    again for each unit made compaction on long paths with many MCP tools several
+    times slower; the count must not grow with the units the builder considers."""
+    import app.context_budget as budget
+    from app.context import build_context
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": f"mcp_1_tool_{index}",
+                "description": "Synthetic remote tool. " * 30,
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for index in range(40)
+    ]
+    serialized = []
+    original = budget._json_tokens
+
+    def counting(value):
+        if value is tools:
+            serialized.append(value)
+        return original(value)
+
+    monkeypatch.setattr(budget, "_json_tokens", counting)
+    counts = []
+    for length in (10, 120):
+        ancestors, current = synthetic_path(length=length)
+        # One large old answer forces compaction; every short recent unit gets costed.
+        ancestors[0][1][1].content = "早期背景与条件。" * 7000
+        serialized.clear()
+        diagnostics = {}
+        system, messages = build_context(
+            ancestors,
+            current,
+            [],
+            "继续解释",
+            policy=ContextPolicy(window_tokens=65536, output_tokens=4096),
+            tool_defs=tools,
+            diagnostics=diagnostics,
+        )
+        assert diagnostics["compacted"] and len(messages) > length // 2
+        counts.append(len(serialized))
+    assert counts[0] == counts[1] <= 3, counts

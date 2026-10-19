@@ -11,7 +11,7 @@ import { copyText } from "../lib/clipboard";
 import { hasManagedWebSearch, managedMcpPreset, selectedChatTools } from "../lib/chatTools";
 import { matchesDeletedWorkspace, onWorkspaceDeletion, type WorkspaceDeletion } from "../lib/workspace";
 import { fullResultSource, type FullResultSource } from "../lib/toolSteps";
-import { budgetStopLabel } from "../lib/answerDiagnostics";
+import { diagnosticsText } from "../lib/answerDiagnostics";
 import { DocumentCards } from "./DocumentCards";
 import { ChatTurnNavigator, turnKey } from "./ChatTurnNavigator";
 import { markTarget, toggleUnderstanding, UNDERSTANDING_LEVELS, UNDERSTANDING_TEXT } from "../lib/understanding";
@@ -156,19 +156,16 @@ function ToolSteps({ steps, mcpServers, nodeId }: { steps: ToolStep[]; mcpServer
     return <details className="chat-reasoning" key={i}><summary>{toolLabels[step.tool] ?? step.tool}{step.result === null ? t(" · 进行中", " · Running") : t(" · 已完成", " · Done")}</summary>{step.result !== null && (source ? <FullToolResult preview={step.result} source={source} /> : <div>{step.result}</div>)}</details>;
   })}</>;
 }
-/** Numbers only, collapsed by default: how the request was budgeted and what the provider reported. */
+/** Numbers only, collapsed by default: how the requests were budgeted and what the provider reported. */
 function DiagnosticsBlock({ data }: { data?: AnswerDiagnostics | null }) {
   const { t, locale } = useI18n();
   if (!data || !data.timings_ms) return null;
   const n = (value: number | null | undefined) => value == null ? "–" : value.toLocaleString(locale === "en" ? "en-US" : "zh-CN");
-  const seconds = ((data.timings_ms.total ?? 0) / 1000).toFixed(1);
-  const context = data.actual_input_tokens != null
-    ? t("上下文：估算 {est} · 实际 {actual} tokens", "Context: est. {est} · actual {actual} tokens", { est: n(data.estimated_input_tokens), actual: n(data.actual_input_tokens) })
-    : t("上下文：估算 {est} tokens", "Context: est. {est} tokens", { est: n(data.estimated_input_tokens) });
-  const cached = data.cached_input_tokens ? t("（缓存 {cached}）", " (cached {cached})", { cached: n(data.cached_input_tokens) }) : "";
-  const parts = [context + cached, data.tool_rounds ? t("工具 {rounds} 轮", "{rounds} tool rounds", { rounds: data.tool_rounds }) : null, budgetStopLabel(data.tool_budget_stop, t), `${seconds} s`].filter(Boolean);
+  // Context is one request's input; with tool rounds the sum over requests is a line of its own.
+  const { summary, total } = diagnosticsText(data, t, n);
   const timing = (label: string, ms: number | undefined) => `${label} ${((ms ?? 0) / 1000).toFixed(2)} s`;
-  return <details className="chat-reasoning chat-diagnostics"><summary>{parts.join(" · ")}</summary><div>
+  return <details className="chat-reasoning chat-diagnostics"><summary>{summary}</summary><div>
+    {total && <>{total}{"\n"}</>}
     {t("输出 {tokens} tokens", "Output {tokens} tokens", { tokens: n(data.output_tokens) })} · {data.compacted ? t("历史已压缩", "History compacted") : t("历史完整", "Full history")} · {t("校准系数 {ratio}", "Calibration ratio {ratio}", { ratio: (data.calibration_ratio ?? 1).toFixed(2) })}{"\n"}
     {[timing(t("检索", "Retrieval"), data.timings_ms.retrieval), timing(t("整理", "Summary"), data.timings_ms.summary), timing(t("模型", "Model"), data.timings_ms.model), timing(t("工具", "Tools"), data.timings_ms.tools), timing(t("总计", "Total"), data.timings_ms.total)].join(" · ")}
   </div></details>;

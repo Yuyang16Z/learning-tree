@@ -123,10 +123,12 @@ async function api(route, body) {
     await send({ context_status: 'summarizing' });
     await send({ delta: 'Synthetic answer content' });
     await expectLabel('Responding');
-    await send({ diagnostics: { estimated_input_tokens: 1234, actual_input_tokens: 1100, cached_input_tokens: 800, output_tokens: 42, compacted: false, tool_rounds: 2, calibration_ratio: 1, timings_ms: { retrieval: 10, tools: 20, summary: 0, model: 4000, total: 4200 } } });
+    // Totals add up every provider request of the answer; the context is its largest single request.
+    await send({ diagnostics: { estimated_input_tokens: 3600, actual_input_tokens: 3300, cached_input_tokens: 2000, output_tokens: 42, requests: 3, largest_request: { estimated_input_tokens: 1234, actual_input_tokens: 1100, cached_input_tokens: 800 }, compacted: false, tool_rounds: 2, calibration_ratio: 1, timings_ms: { retrieval: 10, tools: 20, summary: 0, model: 4000, total: 4200 } } });
     const diagnosticsSummary = page.locator('.chat-live details.chat-diagnostics summary');
     await diagnosticsSummary.waitFor();
     assert.equal(await diagnosticsSummary.innerText(), 'Context: est. 1,234 · actual 1,100 tokens (cached 800) · 2 tool rounds · 4.2 s');
+    assert.match(await page.locator('.chat-live details.chat-diagnostics > div').textContent(), /^Input across 3 requests: est\. 3,600 · actual 3,300 tokens \(cached 2,000\)\n/);
     await expectLabel('Responding');
     assert.equal(await page.locator('.notice').count(), 0);
     await finish();
