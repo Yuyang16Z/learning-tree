@@ -1,0 +1,32 @@
+.chat-style-menu { position: relative; min-width: 0; }
+.chat-pane .chat-style-button { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 156px; height: 32px; padding: 0 9px 0 7px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 11px; }
+.chat-pane .chat-style-button:hover, .chat-pane .chat-style-button[aria-expanded="true"], .chat-pane .chat-style-button.is-active { color: var(--teal); background: var(--teal-bg); }
+.chat-pane .chat-style-button.is-unavailable { color: var(--danger); }
+.chat-style-button svg { flex: none; }
+.chat-style-current { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-style-dropdown { position: absolute; bottom: 40px; left: 0; z-index: 20; width: 340px; max-width: calc(100vw - 32px); max-height: min(470px, 64vh); overflow: auto; padding: 8px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); box-shadow: 0 8px 35px #00000012; }
+.chat-style-dropdown [role="menu"] { display: grid; gap: 1px; }
+.chat-pane .chat-style-option { position: relative; display: grid; gap: 1px; width: 100%; padding: 7px 9px 7px 27px; border: 0; border-radius: 7px; background: none; color: var(--text); text-align: left; }
+.chat-pane .chat-style-option:hover, .chat-pane .chat-style-option:focus-visible { background: var(--panel); }
+.chat-pane .chat-style-option:focus-visible { outline-offset: -2px; }
+.chat-style-option[aria-checked="true"]::before { content: "✓"; position: absolute; left: 10px; top: 7px; color: var(--teal); font-size: 12px; line-height: 1.5; }
+.chat-style-title { font-size: 12px; line-height: 1.5; }
+.chat-style-description { color: var(--muted); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.chat-pane .chat-style-option.is-unavailable { cursor: default; }
+.chat-style-option.is-unavailable .chat-style-title { color: var(--danger); }
+.chat-style-notes { display: grid; gap: 6px; margin-top: 6px; padding: 9px 9px 3px; border-top: 1px solid var(--border); color: var(--muted); font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
+.chat-style-notes p { margin: 0; }
+.chat-style-notes [role="alert"] { color: var(--danger); }
+.chat-style-notes ul { margin: 3px 0 0; padding-left: 16px; }
+.chat-style-notes code { font-size: 10px; color: var(--text); }
+.chat-style-notes a { color: var(--teal); text-underline-offset: 2px; }
+/* In the question bubble, above the question text; never inside the answer label. */
+.chat-style-tag { display: block; width: fit-content; max-width: 100%; margin: 0 0 5px; padding: 0 8px; overflow: hidden; border-radius: 999px; background: var(--teal-bg); color: var(--teal); font-size: 10px; line-height: 1.8; text-overflow: ellipsis; white-space: nowrap; }
+.chat-style-tag.is-unavailable { background: var(--panel); color: var(--muted); }
+@media (max-width: 650px) {
+  /* Narrow composers anchor the list to the whole composer so it never runs off the screen. */
+  .chat-compose-box { position: relative; }
+  .chat-style-menu { position: static; }
+  .chat-pane .chat-style-button { max-width: 96px; }
+  .chat-style-dropdown { left: 0; right: 0; bottom: calc(100% + 6px); width: auto; max-width: none; }
+}

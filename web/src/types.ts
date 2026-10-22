@@ -1,4 +1,5 @@
-export interface Tree { id: number; title: string; root_node_id: number; archived: boolean }
+/** `learning_preset`: the learning style new questions in this topic use; null = the default way. */
+export interface Tree { id: number; title: string; root_node_id: number; archived: boolean; learning_preset?: string | null }
 export type NodeStatus = 'idle' | 'pending' | 'complete' | 'error' | 'interrupted';
 export type TitleState = 'legacy' | 'manual' | 'empty' | 'pending' | 'ai' | 'fallback';
 /** The learner's own mark on a node: not yet / roughly / can explain. Absent or null = not marked. */
@@ -23,6 +24,8 @@ export interface LearningFields {
   source_end?: number | null;
   learning_note?: string | null;
   understanding?: Understanding | null;
+  /** The learning style the question was asked with, as stored; null = the default way. */
+  learning_preset?: string | null;
   revision_of?: number | null;
   request_id?: string | null;
 }
@@ -98,6 +101,19 @@ export interface ReturnSummary {
   note: string | null;
   excerpts: { category: ReturnExcerptCategory; text: string; node_id: number; message_id: number | null }[];
   source: { node_id: number; message_id: number | null; start: number | null; end: number | null; text: string | null };
+}
+/** A teaching style: built in, or a custom file whose id is `custom:<file name>`. */
+export interface LearningPreset {
+  id: string;
+  source: 'builtin' | 'custom';
+  title_zh: string; title_en: string;
+  description_zh: string; description_en: string;
+  instruction: string;
+}
+/** Usable styles in display order, and custom files that could not be used (a fixed reason each). */
+export interface LearningPresetList {
+  presets: LearningPreset[];
+  errors: { file: string; reason: string }[];
 }
 export interface DocumentSummary {
   id: string; name: string; media_type: string; size: number; characters: number; warnings: string[];

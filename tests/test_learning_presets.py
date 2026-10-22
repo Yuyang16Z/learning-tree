@@ -266,6 +266,29 @@ def test_listing_endpoint_returns_display_order_with_instructions(directory):
     assert all("order" not in item and "name" not in item for item in body["presets"])
 
 
+def test_every_fixed_preset_message_has_an_exact_interface_translation():
+    from pathlib import Path
+
+    table = (Path(__file__).resolve().parents[1] / "web/src/i18n/workspace.ts").read_text()
+    messages = [
+        presets.UNKNOWN_PRESET,
+        presets.TOO_LARGE,
+        presets.TOO_MANY,
+        presets.NOT_UTF8,
+        presets.UNREADABLE,
+        presets.NO_SETTINGS,
+        presets.BAD_LINE,
+        presets.UNKNOWN_KEY,
+        presets.DUPLICATE_KEY,
+        presets.MISSING_TITLE,
+        presets.LONG_VALUE,
+        presets.BAD_ORDER,
+        presets.EMPTY_INSTRUCTION,
+        presets.LONG_INSTRUCTION,
+    ]
+    assert all(f'["{message}", "' in table for message in messages)
+
+
 def test_the_prompt_section_names_the_style_and_keeps_the_request_first():
     socratic = presets.preset_catalog()["socratic"]
     section = presets.preset_section(socratic)

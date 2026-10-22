@@ -16,6 +16,7 @@ import type {
   SourceAnchor,
   NavigationAnchor,
   DocumentSummary,
+  LearningPresetList,
   Understanding,
 } from "./types";
 import { Sidebar } from "./components/Sidebar";
@@ -27,6 +28,7 @@ import { mergePendingTitles, pollPendingTitles } from "./lib/titlePolling";
 import { resumeAnswer } from "./lib/answerStream";
 import { keepIfSame, planRefresh, watchChanges } from "./lib/changeFeed";
 import { restoreUnderstanding, withUnderstanding } from "./lib/understanding";
+import { requestedPreset, restoreTopicPreset, withTopicPreset } from "./lib/learningPresets";
 import { finishToolStep, startToolStep } from "./lib/toolSteps";
 import { locateSource } from "./lib/sourceLinks";
 import { onPairingRequired } from "./lib/phonePairing";
@@ -64,6 +66,10 @@ export default function App() {
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
   const [sendingImages, setSendingImages] = useState<string[]>([]);
   const [sendingDocuments, setSendingDocuments] = useState<DocumentSummary[]>([]);
+  const [sendingPreset, setSendingPreset] = useState<string | null>(null);
+  const [learningPresets, setLearningPresets] = useState<LearningPresetList | null>(null);
+  const [learningPresetsFailed, setLearningPresetsFailed] = useState(false);
+  const presetsRequest = useRef(0);
   const [err, setErr] = useState<string | null>(null);
   const [theme, setTheme] = useState<"light" | "dark" | "system">(
     () => (localStorage.getItem("bl-theme") as "light" | "dark" | "system") || "system",
@@ -158,6 +164,19 @@ export default function App() {
     setMcpServers(keepIfSame(await api.listMcp()));
   }
 
+  // Custom styles are local files, so the list is read again whenever the menu opens.
+  async function loadLearningPresets() {
+    const ticket = ++presetsRequest.current;
+    try {
+      const list = await api.listLearningPresets();
+      if (ticket !== presetsRequest.current) return;
+      setLearningPresets(keepIfSame<LearningPresetList | null>(list));
+      setLearningPresetsFailed(false);
+    } catch {
+      if (ticket === presetsRequest.current) setLearningPresetsFailed(true);
+    }
+  }
+
   useEffect(() => {
     const resolve = (): "light" | "dark" =>
       theme === "system"
@@ -179,6 +198,7 @@ export default function App() {
     clearLegacyRecovery();
     loadModels().catch((e) => setErr(String(e)));
     loadMcp().catch((e) => setErr(String(e)));
+    void loadLearningPresets();
     loadTrees()
       .then((t) => {
         const saved = readSaved<number | null>("bl-tree", null);
@@ -320,6 +340,20 @@ export default function App() {
     }
   }
 
+  // The open topic's style applies to its next questions at once; restore it if the save fails.
+  async function changeLearningPreset(treeId: number, value: string | null) {
+    const previous = trees.find(tree => tree.id === treeId)?.learning_preset ?? null;
+    setTrees(current => withTopicPreset(current, treeId, value));
+    try {
+      const updated = await api.updateTree(treeId, { learning_preset: value });
+      setTrees(current => withTopicPreset(current, treeId, updated.learning_preset ?? null));
+    } catch (error) {
+      setTrees(current => restoreTopicPreset(current, treeId, value, previous));
+      void loadLearningPresets();  // A custom file may have been removed meanwhile.
+      throw error;
+    }
+  }
+
   // Stop an answer started in another window or on another device.
   async function stopNode(nodeId: number) {
     try { await api.stop(nodeId); await syncThread(); }
@@ -429,6 +463,9 @@ export default function App() {
     }, { once: true });
     requestRef.current = { from: fromId, origin, tree: treeId, requestId };
     streamTargetRef.current = null;
+    // The composer's style goes with every question; a retry is answered in its node's own.
+    const learningPreset = requestedPreset(trees.find(tree => tree.id === treeId)?.learning_preset, learningPresets);
+    setSendingPreset(payload.mode === 'retry' ? threadRef.current.find(row => row.node_id === fromId)?.learning_preset ?? null : learningPreset);
     setPendingQuestion(payload.question); setSendingImages(payload.images ?? []); setSendingDocuments(payload.documents ?? []);
     setLive(''); setLiveReasoning(''); setLiveSteps([]); setLiveDiagnostics(null); setLiveSources([]); setContextStatus(null);
     setStreaming(true); setStreamFromId(origin); setErr(null);
@@ -460,6 +497,7 @@ export default function App() {
           question: payload.question, config_id: activeModelId,
           images: payload.images, document_ids: payload.document_ids, tools: payload.tools, deep_think: payload.deep,
           mode: payload.mode, request_id: requestId, question_message_id: payload.question_message_id,
+          learning_preset: learningPreset,
         }, handlers, ctrl.signal);
       } catch (e) {
         if (!isStreamLost(e) || ctrl.signal.aborted) throw e;
@@ -504,7 +542,7 @@ export default function App() {
       }
       abortRef.current = null; requestRef.current = null; streamTargetRef.current = null;
       setStreaming(false); setStreamFromId(null); setLive(''); setLiveReasoning('');
-      setLiveSteps([]); setLiveDiagnostics(null); setLiveSources([]); setPendingQuestion(null); setSendingImages([]); setSendingDocuments([]);
+      setLiveSteps([]); setLiveDiagnostics(null); setLiveSources([]); setPendingQuestion(null); setSendingImages([]); setSendingDocuments([]); setSendingPreset(null);
     }
     return succeeded;
   }
@@ -752,6 +790,12 @@ export default function App() {
         onAddMock={addMock}
         mcpServers={mcpServers.filter((s) => s.enabled)}
         onTestMcp={(id) => api.testMcp(id)}
+        learningPresets={learningPresets}
+        learningPresetsFailed={learningPresetsFailed}
+        topicPreset={activeTree?.learning_preset ?? null}
+        onLearningPresetChange={activeTreeId == null ? undefined : id => changeLearningPreset(activeTreeId, id)}
+        onReloadPresets={() => void loadLearningPresets()}
+        sendingPreset={sendingPreset}
       />
       </ErrorBoundary>
       </div>
