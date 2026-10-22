@@ -413,3 +413,12 @@ def test_self_test_names_the_understanding_marks_as_the_interface_does():
     for chinese, english in labels:
         assert chinese in self_test and english in self_test, (chinese, english)
     assert "只是建议" in self_test and "学习者自己标记" in self_test
+
+
+def test_self_test_is_scoped_to_the_learning_path_the_model_sees():
+    """Only the path from the root to the current question reaches the model, never the
+    topic's other branches, so Self-test promises a quiz on that path, not on the topic."""
+    self_test = presets.preset_catalog()["self-test"]
+    assert "学习路径" in self_test.instruction and "主题" not in self_test.instruction
+    assert "学习路径" in self_test.description_zh and "主题" not in self_test.description_zh
+    assert "learning path" in self_test.description_en
