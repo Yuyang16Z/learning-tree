@@ -33,6 +33,16 @@ async function poll(callback, label) {
   assert(models.length && models.every(model => model.llm_model === 'mock'));
   const styled = await api('/trees', { title: 'Learning style fixture' });
   const plain = await api('/trees', { title: 'Default style fixture' });
+  // A failed question asked Socratically, in a topic whose style is now Explain it back.
+  const failedTopic = await api('/trees/import', {
+    format: 'branch-learning', version: 1, tree: { title: 'Retry style fixture' },
+    nodes: [{ id: 1, parent_id: null, title: 'Synthetic failed question', kind: 'root', status: 'error', error: 'Synthetic provider failure', learning_preset: 'socratic' }],
+    messages: [
+      { id: 1, node_id: 1, role: 'user', content: 'Synthetic failed question asked Socratically' },
+      { id: 2, node_id: 1, role: 'assistant', content: 'Synthetic partial answer.', status: 'error' },
+    ],
+  });
+  await api(`/trees/${failedTopic.id}`, { learning_preset: 'feynman' }, 'PATCH');
   fs.mkdirSync(presetsDirectory, { recursive: true });
   const customFile = path.join(presetsDirectory, 'smoke-analogy.md');
   fs.writeFileSync(customFile, '---\ntitle_zh: 合成类比\ntitle_en: Synthetic analogies\ndescription_zh: 合成说明\ndescription_en: A synthetic custom style\norder: 1\n---\nSynthetic instruction for the browser check.\n');
@@ -207,6 +217,38 @@ async function poll(callback, label) {
     await chooseStyle('Socratic questions', 'Explain it back');
     assert.equal(await page.locator('.chat-error').count(), 0, 'a later successful save clears the message about the failed one');
     checks.push('A failed save restores the previous style and says so; a later successful save clears the message');
+
+    // While a question waits for its answer, its bubble shows the style it is asked with.
+    const held = [];
+    await page.route('**/api/nodes/*/ask', route => { held.push(route); });
+    const liveTag = page.locator('.chat-live .chat-question .chat-style-tag');
+    await input.fill('Synthetic question answered while held');
+    await input.press('Enter');
+    await poll(async () => held.length === 1, 'the held question');
+    await liveTag.waitFor();
+    assert.equal(await liveTag.textContent(), 'Learning style: Explain it back', 'a new question shows the composer style while it is answered');
+    await held.shift().continue();
+    await page.getByRole('button', { name: 'Send question', exact: true }).waitFor();
+    await tagOf('Synthetic question answered while held').filter({ hasText: 'Explain it back' }).waitFor();
+    // A retry is answered in its own style, whatever the composer shows.
+    await topics.getByRole('button', { name: 'Retry style fixture', exact: true }).click();
+    await page.getByRole('heading', { name: 'Retry style fixture', exact: true, level: 1 }).waitFor();
+    await styleButton('Explain it back').waitFor();
+    await tagOf('Synthetic failed question asked Socratically').filter({ hasText: 'Socratic questions' }).waitFor();
+    await turn('Synthetic failed question asked Socratically').getByRole('button', { name: 'Retry', exact: true }).click();
+    await poll(async () => held.length === 1, 'the held retry');
+    await liveTag.waitFor();
+    assert.equal(await liveTag.textContent(), 'Learning style: Socratic questions', "a retry shows its own style, not the composer's");
+    assert.equal(asks[asks.length - 1].mode, 'retry');
+    await held.shift().continue();
+    await poll(async () => (await api(`/nodes/${failedTopic.root_node_id}`)).status === 'complete', 'the retried answer');
+    await page.unroute('**/api/nodes/*/ask');
+    assert.equal((await api(`/nodes/${failedTopic.root_node_id}`)).learning_preset, 'socratic');
+    await tagOf('Synthetic failed question asked Socratically').filter({ hasText: 'Socratic questions' }).waitFor();
+    await topics.getByRole('button', { name: styled.title, exact: true }).click();
+    await page.getByRole('heading', { name: styled.title, exact: true, level: 1 }).waitFor();
+    await styleButton('Explain it back').waitFor();
+    checks.push('While a question is answered its bubble shows its style: the composer style for a new question, the node style for a retry');
 
     // Another device adds a custom style and chooses it after this page read the list.
     const peerFile = path.join(presetsDirectory, 'smoke-peer.md');
