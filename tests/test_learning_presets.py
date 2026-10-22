@@ -346,3 +346,15 @@ def test_the_prompt_section_names_the_style_and_keeps_the_request_first():
     assert section.startswith("学习方式：苏格拉底提问")
     assert socratic.instruction in section
     assert section.endswith("\n" + presets.STYLE_RULES)
+
+
+def test_styles_that_review_the_learners_work_confirm_it_when_it_is_right():
+    """Mistake review and Explain it back look at the learner's own work. Correct work is
+    confirmed rather than searched for an invented mistake (say plainly what is known),
+    and a bare final answer is not reviewed as if it showed its steps."""
+    catalog = presets.preset_catalog()
+    review = catalog["mistake-review"].instruction
+    assert "完全正确" in review and "不要硬找错误" in review
+    assert "补上步骤" in review
+    feynman = catalog["feynman"].instruction
+    assert "准确" in feynman and "不必硬找" in feynman
