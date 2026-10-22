@@ -24,6 +24,7 @@ from ..documents import (
     parse_document_limited,
     safe_document_name,
 )
+from ..learning_presets import PRESET_ID, UNKNOWN_PRESET, preset_catalog
 from ..learning_summaries import invalidate_summaries
 from ..models import (
     KnowledgeTree,
@@ -100,6 +101,7 @@ def list_trees(
             title=tree.title,
             root_node_id=roots.get(tree.id, 0),
             archived=tree.archived,
+            learning_preset=tree.learning_preset,
         )
         for tree in session.exec(query)
     ]
@@ -110,8 +112,14 @@ def update_tree(tree_id: int, body: TreePatch, session: Session = Depends(get_se
     tree = session.get(KnowledgeTree, tree_id)
     if not tree:
         raise HTTPException(404, "知识树不存在")
-    # Sidebar metadata never rewrites root questions, branches, messages or memories.
-    for field, value in body.model_dump(exclude_unset=True).items():
+    changes = body.model_dump(exclude_unset=True)
+    # A topic default must be a style that exists now; null returns to the default way.
+    preset = changes.get("learning_preset")
+    if preset is not None and preset not in preset_catalog():
+        raise HTTPException(422, UNKNOWN_PRESET)
+    # Sidebar metadata and the topic's learning style never rewrite root questions,
+    # branches, messages, memories or the style earlier questions were asked with.
+    for field, value in changes.items():
         setattr(tree, field, value)
     session.add(tree)
     session.commit()
@@ -123,6 +131,7 @@ def update_tree(tree_id: int, body: TreePatch, session: Session = Depends(get_se
         title=tree.title,
         root_node_id=root.id if root else 0,
         archived=tree.archived,
+        learning_preset=tree.learning_preset,
     )
 
 
@@ -150,6 +159,11 @@ class PortableNode(Portable):
     learning_note: str | None = Field(default=None, max_length=10000)
     # Exported only when marked; backups without it import as "not marked".
     understanding: Understanding | None = None
+    # The style a question was asked with, exported only when set; backups without it
+    # import as asked in the default way. An id unknown here is kept as history.
+    learning_preset: str | None = Field(
+        default=None, max_length=80, pattern=rf"^{PRESET_ID.pattern}$"
+    )
     revision_of: int | None = None
 
 
@@ -351,6 +365,13 @@ def export_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
                 **(
                     {"understanding": node.understanding}
                     if node.understanding in UNDERSTANDING_LEVELS
+                    else {}
+                ),
+                # Likewise only questions asked with a style; the topic's own default
+                # is local organization, like archiving, and is not exported.
+                **(
+                    {"learning_preset": node.learning_preset}
+                    if node.learning_preset and PRESET_ID.fullmatch(node.learning_preset)
                     else {}
                 ),
             }

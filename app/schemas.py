@@ -63,6 +63,8 @@ class TreeOut(BaseModel):
     title: str
     root_node_id: int
     archived: bool = False
+    # Learning-style preset id for new questions in this topic; None = the default way.
+    learning_preset: str | None = None
 
 
 class TreePatch(BaseModel):
@@ -70,6 +72,8 @@ class TreePatch(BaseModel):
 
     title: str | None = Field(default=None, min_length=1, max_length=300)
     archived: bool | None = Field(default=None, strict=True)
+    # A preset id, or null to return new questions to the default way of answering.
+    learning_preset: str | None = Field(default=None, max_length=80)
 
     @field_validator("title", mode="before")
     @classmethod
@@ -79,8 +83,10 @@ class TreePatch(BaseModel):
     @model_validator(mode="after")
     def require_changes(self):
         if not self.model_fields_set:
-            raise ValueError("Provide a title or archive status")
-        if any(getattr(self, field) is None for field in self.model_fields_set):
+            raise ValueError("Provide a title, archive status or learning style")
+        if any(
+            getattr(self, field) is None for field in self.model_fields_set - {"learning_preset"}
+        ):
             raise ValueError("Title and archive status cannot be null")
         return self
 
