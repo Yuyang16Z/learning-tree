@@ -31,14 +31,18 @@ SYSTEM_OMISSION = (
 )
 
 
-class ContextBudgetExceeded(ValueError):
-    """A safe, actionable error: never embeds user content or provider data."""
+BUDGET_EXCEEDED = (
+    "本轮问题、引用、图片或工具信息超出上下文预算。请缩短输入、减少图片或工具，"
+    "或在模型设置中填写该模型实际支持的更大上下文窗口。"
+)
 
-    def __init__(self):
-        super().__init__(
-            "本轮问题、引用、图片或工具信息超出上下文预算。请缩短输入、减少图片或工具，"
-            "或在模型设置中填写该模型实际支持的更大上下文窗口。"
-        )
+
+class ContextBudgetExceeded(ValueError):
+    """A safe, actionable error: never embeds user content or provider data. `message`
+    is another fixed text naming a more specific cause, such as a learning style."""
+
+    def __init__(self, message: str = BUDGET_EXCEEDED):
+        super().__init__(message)
 
 
 @dataclass(frozen=True)

@@ -48,6 +48,13 @@ _OPEN_FLAGS = (
 
 # Fixed, user-facing reasons (paired with English in web/src/i18n/workspace.ts).
 UNKNOWN_PRESET = "这个学习方式不存在或已不可用，请重新选择。"
+# The style alone pushes the mandatory input over the model's budget. Retry keeps a
+# question's style, so the way out is another style or a larger window.
+STYLE_TOO_LONG = (
+    "当前学习方式的说明过长，和本轮问题一起超出了上下文预算。"
+    "请换用较短的学习方式后编辑问题重新提问（重试会沿用原来的方式），"
+    "或改用上下文窗口更大的模型。"
+)
 TOO_LARGE = "文件超过 16 KB。"
 TOO_MANY = "自定义学习方式超过 50 个，这个文件没有载入。"
 NOT_UTF8 = "文件需要使用 UTF-8 编码。"

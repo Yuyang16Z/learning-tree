@@ -10,7 +10,7 @@ from .context_budget import (
     estimate_text_tokens,
 )
 from .context_compaction import summarize_sources
-from .learning_presets import LearningPreset, preset_section
+from .learning_presets import STYLE_TOO_LONG, LearningPreset, preset_section
 from .memory_preferences import split_profile
 from .models import Message, Node
 
@@ -224,9 +224,17 @@ def build_context(
     # The current question, selected passage and current note are mandatory, and so is
     # the chosen learning style, which stays the last section of the compacted prompt.
     style = "\n" + preset_section(preset) if preset is not None else ""
+
+    def too_large(without_style: str, ms) -> ContextBudgetExceeded:
+        # Name the style when the input would fit without it: shortening the question
+        # would not help, and a retry keeps the style.
+        if style and count(without_style, ms) <= hard_budget:
+            return ContextBudgetExceeded(STYLE_TOO_LONG)
+        return ContextBudgetExceeded()
+
     base = _full_system([], current, "", document_note) + "\n" + COMPACTION_NOTICE
     if count(base + style, [last]) > hard_budget:
-        raise ContextBudgetExceeded()
+        raise too_large(base, [last])
     if diagnostics is not None:
         # The ancestor path is replaced by excerpts here; only the fixed rules stay.
         diagnostics["stable_system"] = BASE_SYSTEM
@@ -301,9 +309,9 @@ def build_context(
             summary = summarize_sources(old_sources, summary_query, summary_bytes)
     if summary:
         base += "\n较早学习记录（仅供参考，不代表已核实事实或用户已经掌握）：\n" + summary
+    if count(base + style, messages) > hard_budget:
+        raise too_large(base, messages)
     base += style
-    if count(base, messages) > hard_budget:
-        raise ContextBudgetExceeded()
     if diagnostics is not None:
         diagnostics.update(compacted=True, estimated_input_tokens=count(base, messages))
     return base, messages

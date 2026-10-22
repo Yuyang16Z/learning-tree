@@ -59,7 +59,7 @@ The menu lists every file that cannot be used, with a fixed reason such as a mis
 
 The chosen style is added as the last section of the system prompt for that question: a heading with the style's name, its instruction, and a sentence saying that your explicit request in the current question wins and that the style does not lower factual standards. Because it comes last, the stable head of the prompt (the fixed rules and the learning path) is the same whichever style you choose, so provider prompt caching keeps working.
 
-The style is part of the protected core of the request, like the current question and quote: history compaction and request fitting never drop it, and it counts against the model's input budget, so a long custom instruction leaves less room for history. When the mandatory input including the style cannot fit, the question fails with the usual budget message.
+The style is part of the protected core of the request, like the current question and quote: history compaction and request fitting never drop it, and it counts against the model's input budget, so a long custom instruction leaves less room for history. When the mandatory input fits only without the style, the question fails before any model call with a message that names the learning style. **Retry** keeps a question's style, so choose a shorter style and edit the question to ask again, or use a model with a larger context window.
 
 ## Privacy
 
@@ -85,6 +85,6 @@ A style asks the model to teach in a certain way; models may not follow it perfe
 
 **自定义方式**：每种方式一个文件，放在仓库根目录的 `learning-presets/`，或 `.env` 中 `LEARNING_PRESETS_DIR` 指定的目录（相对路径从仓库根目录算起）；Docker 镜像读取数据卷中的 `/data/learning-presets`。每次打开菜单都会重新读取，无需重启；文件名、修改时间和大小不变时复用已解析的结果。文件格式见上方示例：前两行 `---` 之间是设置，之后是教学说明。规则很严格：文件名只能用小写字母、数字和连字符，以字母或数字开头，`.md` 之前最多 48 个字符（例如 `my-style.md`），名字不符合规则的 Markdown 文件（如 `My Style.md`、`my_style.md`、`analogy.MD`）会作为无法使用的文件列出，原因是命名规则；`README.md`、隐藏文件（以 `.` 开头）、其他类型的文件、子目录和符号链接（包括被链接的目录）都会被忽略；设置每行一个「键: 值」，只能使用 `title_zh`、`title_en`（必填）、`description_zh`、`description_en` 和 `order`（整数），每个值一行且不超过 120 个字符，未知或重复的键会让文件无法使用；教学说明可以是纯文本或 Markdown，不能为空，最多 4,000 个字符；最多读取 50 个文件（按文件名顺序），每个不超过 16 KB，使用 UTF-8，可带 BOM 或 Windows 换行。自定义方式排在内置方式之后，按 `order` 再按文件名排序，没有 `order` 的排在最后；其 id 为 `custom:` 加文件名（不含 `.md`），因此即使同名也不会替换内置方式。菜单会列出无法使用的文件和固定的原因，不显示文件内容或目录路径。删除某个文件后，用过它的主题和问题保留其 id 作为记录并显示「已不可用」，新问题按默认方式回答，直到你选择其他方式。
 
-**如何发送给模型**：所选方式作为该问题系统提示的最后一节：方式名称、教学说明，以及一句说明——本次问题中的明确要求优先，学习方式不降低事实准确的要求。因为放在最后，系统提示的稳定开头（固定规则和学习路径）不受影响，服务商的提示缓存照常生效。学习方式和当前问题、引用一样属于必须保留的部分：历史压缩和请求裁剪都不会删掉它，它也计入模型的输入预算，过长的自定义说明会挤占历史空间。
+**如何发送给模型**：所选方式作为该问题系统提示的最后一节：方式名称、教学说明，以及一句说明——本次问题中的明确要求优先，学习方式不降低事实准确的要求。因为放在最后，系统提示的稳定开头（固定规则和学习路径）不受影响，服务商的提示缓存照常生效。学习方式和当前问题、引用一样属于必须保留的部分：历史压缩和请求裁剪都不会删掉它，它也计入模型的输入预算，过长的自定义说明会挤占历史空间。如果去掉学习方式才放得下必须发送的内容，问题会在调用模型之前失败，提示指明是学习方式的说明过长；「重试」会沿用原来的方式，因此请换用较短的方式后编辑问题重新提问，或改用上下文窗口更大的模型。
 
 **隐私与局限**：无论内置还是自定义，教学说明都会随使用它的每个问题发送给所配置的回答模型，请不要在自定义文件中写入隐私内容。自定义文件只保存在本机：`.gitignore` 会排除 `learning-presets/` 中除 README 以外的文件，`scripts/check_release.py` 也会拒绝被刻意暂存的此类文件。演示模型不发送请求，但同样保存学习方式。模型不一定能完美遵循学习方式：苏格拉底式回答仍可能直接给出完整解答，自测题可能附带答案。学习方式只改变讲解的组织方式，不改变事实；重要内容仍需自行核对。学习方式也不会改变工具、记忆检索或发送的历史。

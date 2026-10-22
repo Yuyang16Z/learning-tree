@@ -301,6 +301,7 @@ def test_every_fixed_preset_message_has_an_exact_interface_translation():
     table = (Path(__file__).resolve().parents[1] / "web/src/i18n/workspace.ts").read_text()
     messages = [
         presets.UNKNOWN_PRESET,
+        presets.STYLE_TOO_LONG,
         presets.TOO_LARGE,
         presets.TOO_MANY,
         presets.NOT_UTF8,

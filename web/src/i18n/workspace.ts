@@ -44,6 +44,7 @@ const diagnostics: [string, string][] = [
   ["理解标记没有保存，已恢复原来的标记。", "Your understanding mark was not saved; the previous mark is back."],
   ["学习方式没有保存，已恢复原来的选择。", "The learning style was not saved; the previous choice is back."],
   ["这个学习方式不存在或已不可用，请重新选择。", "This learning style does not exist or is no longer available. Choose another one."],
+  ["当前学习方式的说明过长，和本轮问题一起超出了上下文预算。请换用较短的学习方式后编辑问题重新提问（重试会沿用原来的方式），或改用上下文窗口更大的模型。", "This learning style's instructions are too long to fit in the context budget together with this question. Choose a shorter style and edit the question to ask again (Retry keeps the original style), or use a model with a larger context window."],
   ["文件超过 16 KB。", "The file is larger than 16 KB."],
   ["自定义学习方式超过 50 个，这个文件没有载入。", "There are more than 50 custom learning styles; this file was not loaded."],
   ["文件需要使用 UTF-8 编码。", "The file must use UTF-8 encoding."],

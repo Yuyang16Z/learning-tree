@@ -398,8 +398,57 @@ def test_a_style_that_cannot_fit_makes_the_mandatory_input_too_large():
     current = Node(id=1, tree_id=1, title="当前")
     policy = ContextPolicy(8192, 4096)
     build_context([], current, [], "问" * 200, policy=policy)  # Fits without the style.
-    with pytest.raises(ContextBudgetExceeded):
+    with pytest.raises(ContextBudgetExceeded) as raised:
         build_context([], current, [], "问" * 200, policy=policy, preset=long_style)
+    # The style is the cause, so the message names it: a retry keeps the style and would
+    # fail the same way, so shortening the question would not help.
+    assert str(raised.value) == presets.STYLE_TOO_LONG
+    # Selected tools reserve room too; the style is still what does not fit.
+    with pytest.raises(ContextBudgetExceeded) as raised:
+        build_context(
+            [], current, [], "问" * 200, policy=policy, tool_defs=[TOOL], preset=long_style
+        )
+    assert str(raised.value) == presets.STYLE_TOO_LONG
+    # A question too large on its own keeps the general message, style or not.
+    general = ContextBudgetExceeded().args[0]
+    for preset in (None, long_style):
+        with pytest.raises(ContextBudgetExceeded) as raised:
+            build_context([], current, [], "问" * 6000, policy=policy, preset=preset)
+        assert str(raised.value) == general != presets.STYLE_TOO_LONG
+
+
+def test_an_answer_that_fails_on_its_long_style_says_so_and_retry_keeps_it(api):
+    client, engine, calls = api
+    directory = presets.CUSTOM_DIRECTORY
+    directory.mkdir()
+    (directory / "long.md").write_text(
+        "---\ntitle_zh: 很长的方式\ntitle_en: Long style\n---\n" + "请用类比讲解。" * 571 + "\n",
+        encoding="utf-8",
+    )
+    assert presets.list_presets()[1] == [], "the style is within the file limits"
+    with Session(engine) as session:
+        session.add(
+            ModelConfig(
+                id=3,
+                label="Small window",
+                base_url="https://offline.invalid/v1",
+                llm_model="synthetic-small",
+                api_key="synthetic-key-never-sent",
+                context_window=8192,
+                max_tokens=4096,
+            )
+        )
+        session.commit()
+    failed = ask(client, 1, "什么是类比？", config_id=3, learning_preset="custom:long")
+    assert failed["status"] == "error"
+    assert client.get("/nodes/1").json()["error"] == presets.STYLE_TOO_LONG
+    assert calls["stream"] == [], "it fails before any model call"
+    retried = ask(client, 1, "", mode="retry", config_id=3, learning_preset=None)
+    assert retried["status"] == "error"
+    assert client.get("/nodes/1").json()["error"] == presets.STYLE_TOO_LONG
+    assert stored(engine, 1) == "custom:long"
+    # The default model's larger window has room for it.
+    assert ask(client, 1, "", mode="retry", config_id=1)["done"]
 
 
 def test_legacy_schema_gains_nullable_style_columns(tmp_path, monkeypatch):
