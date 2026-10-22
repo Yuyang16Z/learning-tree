@@ -28,6 +28,7 @@ from ..document_context import (
     make_document_reader,
 )
 from ..documents import DocumentAttachment, document_summary, resolve_documents
+from ..learning_presets import UNKNOWN_PRESET, preset_catalog
 from ..learning_summaries import invalidate_summaries, summarize_history
 from ..llm import (
     LLMSpec,
@@ -39,6 +40,7 @@ from ..llm import (
     tools_unsupported,
 )
 from ..models import (
+    KnowledgeTree,
     Memory,
     MemoryEmbedding,
     Message,
@@ -312,6 +314,8 @@ def node_metadata(
         "understanding": (
             node.understanding if node.understanding in UNDERSTANDING_LEVELS else None
         ),
+        # Stored as asked: a style deleted since is shown as unavailable, not hidden.
+        "learning_preset": node.learning_preset,
         "revision_of": node.revision_of,
         "request_id": node.request_id,
     }
@@ -364,7 +368,11 @@ def _qa_rows(
         answer = attempts[-1] if attempts else None
         meta = node_metadata(node, messages)
         if i < len(pairs) - 1:
-            meta.update(status=answer.status if answer else "complete", error=None)
+            # Only a node's last question was asked with its stored style; earlier pairs
+            # of a legacy node, or those a revision copied, used none.
+            meta.update(
+                status=answer.status if answer else "complete", error=None, learning_preset=None
+            )
         rows.append(
             {
                 "node_id": node.id,
@@ -902,6 +910,9 @@ def follow(
 @router.post("/{node_id}/ask")
 def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> StreamingResponse:
     title_needed = False
+    # Read the learning styles before taking the lock: custom styles are local files.
+    # The answer keeps this snapshot even if a file changes while it runs.
+    presets = preset_catalog()
     with _REQUEST_LOCK:
         node = _get(session, node_id)
         if body.request_id:
@@ -969,6 +980,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 raise HTTPException(409, "此节点没有可重试的问题")
             if body.question and body.question != question.content:
                 raise HTTPException(409, "修改问题请使用 revise，重试会沿用原问题")
+            # A retry answers the same question in the style it was asked with.
+            preset_id = node.learning_preset
             target = node
             question_text, question_images = question.content, question.images
             question_documents = resolve_documents(
@@ -976,6 +989,21 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             )
             current_messages = [m for m in previous_messages if m.id < question.id]
         else:
+            if "learning_preset" in body.model_fields_set:
+                # An explicit choice: an id, or null for the default way of answering.
+                preset_id = body.learning_preset
+                if preset_id is not None and preset_id not in presets:
+                    raise HTTPException(422, UNKNOWN_PRESET)
+            else:
+                # Not chosen: a revision keeps its original question's style, any other
+                # question takes the topic's default. A style deleted since answers, and
+                # is stored, as the default.
+                if body.mode == "revise":
+                    inherited = node.learning_preset
+                else:
+                    topic = session.get(KnowledgeTree, node.tree_id)
+                    inherited = topic.learning_preset if topic else None
+                preset_id = inherited if inherited in presets else None
             question_text, question_images = body.question.strip(), body.images
             question_documents = resolve_documents(session, body.document_ids, node.tree_id)
             if not question_text and not question_images and not question_documents:
@@ -1012,6 +1040,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     source_start=node.source_start,
                     source_end=node.source_end,
                     learning_note=node.learning_note,
+                    learning_preset=preset_id,
                 )
             elif previous_messages:
                 target = Node(
@@ -1020,9 +1049,11 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     parent_id=node.id,
                     kind="followup",
                     title=question_text[:24] or "图片提问",
+                    learning_preset=preset_id,
                 )
             else:
                 target = node
+                target.learning_preset = preset_id
                 if not target.seed_text:
                     target.title = question_text[:24] or "图片提问"
             if body.mode != "revise":
@@ -1118,6 +1149,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             for m in context_messages(messages)
             if m.id is not None
         }
+        # None when the question uses no style, or one that no longer exists.
+        preset = presets.get(preset_id) if preset_id else None
         generation = Generation(request_id, label=spec.label)
         _GENERATIONS[target_id] = generation
         # Snapshot configuration only. In particular, demo mode never lists MCP
@@ -1223,6 +1256,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 protocol=spec.protocol,
                 documents=context_documents,
                 diagnostics=preflight_stats,
+                preset=preset,
             )
             if generation.stop.is_set():
                 return
@@ -1339,6 +1373,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 diagnostics=context_stats,
                 documents=context_documents,
                 tool_schema_budget=schema_budget if tool_catalog else 0,
+                preset=preset,
             )
             # Compaction makes the read-only readers available even without tools.
             present = {item["function"]["name"] for item in context_defs}
@@ -1362,6 +1397,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     diagnostics=context_stats,
                     documents=context_documents,
                     tool_schema_budget=schema_budget if tool_catalog else 0,
+                    preset=preset,
                 )
             source_reader = None
             history_search = None
@@ -1417,6 +1453,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                         diagnostics=context_stats,
                         documents=context_documents,
                         tool_schema_budget=schema_budget if tool_catalog else 0,
+                        preset=preset,
                         summary_resolver=lambda sources, query, budget: summarize_history(
                             engine,
                             spec,

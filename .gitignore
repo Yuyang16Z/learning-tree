@@ -20,6 +20,9 @@
 mcp-data/
 learning-materials/*
 !learning-materials/README.md
+# The learner's own teaching styles; only the README with an example is published.
+learning-presets/*
+!learning-presets/README.md
 # Keep legacy local libraries private after upgrading.
 学习资料/
 artifacts/

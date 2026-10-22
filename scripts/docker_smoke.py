@@ -34,6 +34,12 @@ def main(base: str) -> None:
     status, _ = request(base, "/trees", headers={"Host": "attacker.example"})
     assert status == 400, f"foreign Host header accepted ({status})"
 
+    # The built-in learning styles ship inside app/, so the image must carry them.
+    status, text = request(base, "/learning-presets")
+    builtins = [p["id"] for p in json.loads(text)["presets"]] if status == 200 else []
+    expected = ["socratic", "feynman", "worked-examples", "compare", "mistake-review", "self-test"]
+    assert builtins == expected, (status, text[:300])
+
     status, text = request(base, "/trees", method="POST", body={"title": "container smoke"})
     assert status == 200, (status, text)
     tree = json.loads(text)
@@ -42,14 +48,20 @@ def main(base: str) -> None:
         base,
         f"/nodes/{tree['root_node_id']}/ask",
         method="POST",
-        body={"question": "What is a container?", "request_id": "docker-smoke"},
+        body={
+            "question": "What is a container?",
+            "request_id": "docker-smoke",
+            "learning_preset": "socratic",
+        },
     )
     events = [json.loads(line[6:]) for line in text.splitlines() if line.startswith("data: ")]
     assert status == 200 and events and events[-1].get("done") is True, (status, events[-1:])
     assert any("delta" in event for event in events), "no streamed answer text"
 
     status, text = request(base, f"/trees/{tree['id']}")
-    assert status == 200 and json.loads(text)[0]["status"] == "complete", (status, text)
+    root = json.loads(text)[0] if status == 200 else {}
+    assert root.get("status") == "complete", (status, text)
+    assert root.get("learning_preset") == "socratic", (status, text)
     print("container smoke test passed")
 
 

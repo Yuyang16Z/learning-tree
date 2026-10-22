@@ -10,6 +10,7 @@ from .context_budget import (
     estimate_text_tokens,
 )
 from .context_compaction import summarize_sources
+from .learning_presets import STYLE_TOO_LONG, LearningPreset, preset_section
 from .memory_preferences import split_profile
 from .models import Message, Node
 
@@ -118,9 +119,11 @@ def stable_prefix(ancestors) -> str:
     return "\n".join([BASE_SYSTEM, *_path_lines(ancestors)])
 
 
-def _full_system(ancestors, current, memory_note, document_note=""):
+def _full_system(ancestors, current, memory_note, document_note="", preset=None):
     # Stable-first order: fixed rules and the ancestor path change least often,
-    # then the current node, note and quote, and the per-turn material last.
+    # then the current node, note and quote, and the per-turn material last. The
+    # learner's chosen teaching style closes the prompt: the cached stable prefix
+    # stays the same whichever style a question uses.
     lines = [
         BASE_SYSTEM,
         *_path_lines(ancestors),
@@ -134,6 +137,8 @@ def _full_system(ancestors, current, memory_note, document_note=""):
         lines.append(document_note)
     if memory_note:
         lines.append(memory_note)
+    if preset is not None:
+        lines.append(preset_section(preset))
     return "\n".join(lines)
 
 
@@ -152,7 +157,11 @@ def build_context(
     documents: list[dict] | None = None,
     tool_schema_budget: int = 0,
     summary_resolver: Callable[[list, str, int], str | None] | None = None,
+    preset: LearningPreset | None = None,
 ) -> tuple[str, list[dict]]:
+    """`preset` is the learning style the question was asked with. Like the current
+    question and quote it is mandatory: it ends the system prompt, belongs to the
+    protected core that request fitting keeps, and counts against every budget."""
     policy = policy or ContextPolicy()
     # Leave room for tool-call metadata and a bounded result on the next round;
     # otherwise a full system summary can leave no space for its own source read.
@@ -173,7 +182,7 @@ def build_context(
     sources = ancestors + [(current, current_messages)]
     units = _units(sources)
     last = {"role": "user", "content": make_content(question, question_images)}
-    protected_system = _full_system([], current, "")
+    protected_system = _full_system([], current, "", preset=preset)
 
     def count(s, ms):
         # The definitions cost the same in every request of this build: add their
@@ -193,7 +202,7 @@ def build_context(
         document_room = max(0, (assembly_budget - mandatory_cost) // 3)
         document_budget = min(5000, byte_budget(document_room, document_rate))
         document_note = render_document_context(documents, question, document_budget)
-    system = _full_system(ancestors, current, memory_note, document_note)
+    system = _full_system(ancestors, current, memory_note, document_note, preset)
     messages = _wire(units) + [last]
     full_estimate = count(system, messages)
 
@@ -212,19 +221,36 @@ def build_context(
             diagnostics["estimated_input_tokens"] = full_estimate
         return system, messages
 
-    # The current question, selected passage and current note are mandatory.
+    # The current question, selected passage and current note are mandatory, and so is
+    # the chosen learning style, which stays the last section of the compacted prompt.
+    style = "\n" + preset_section(preset) if preset is not None else ""
+
+    def too_large(without_style: str, ms) -> ContextBudgetExceeded:
+        # Name the style only when it is a material part of the input (at least a quarter
+        # of the budget) and the input would fit without it: then a shorter question would
+        # not help, and a retry keeps the style. A short style that merely tips a
+        # near-limit question over keeps the general message, which asks for shorter input.
+        if style:
+            without = count(without_style, ms)
+            if (
+                without <= hard_budget
+                and (count(without_style + style, ms) - without) * 4 >= hard_budget
+            ):
+                return ContextBudgetExceeded(STYLE_TOO_LONG)
+        return ContextBudgetExceeded()
+
     base = _full_system([], current, "", document_note) + "\n" + COMPACTION_NOTICE
-    if count(base, [last]) > hard_budget:
-        raise ContextBudgetExceeded()
+    if count(base + style, [last]) > hard_budget:
+        raise too_large(base, [last])
     if diagnostics is not None:
         # The ancestor path is replaced by excerpts here; only the fixed rules stay.
         diagnostics["stable_system"] = BASE_SYSTEM
     profile, memory_note = split_profile(memory_note)
     # User-edited preferences are not automatically abbreviated into fragments.
     # Preserve them before older turns if possible; mandatory question/source wins.
-    if profile and count(base + "\n" + profile, [last]) <= assembly_budget - 256:
+    if profile and count(base + "\n" + profile + style, [last]) <= assembly_budget - 256:
         base += "\n" + profile
-    available = max(0, assembly_budget - count(base, [last]))
+    available = max(0, assembly_budget - count(base + style, [last]))
     # Keep recent complete turns, reserving room for old conditions and sources.
     recent_limit = int(available * 0.60)
     recent = []
@@ -263,7 +289,7 @@ def build_context(
     if memory_lines:
         base += "\n历史记忆（可能省略条目）：\n" + "\n".join(memory_lines)
     messages = _wire(recent) + [last]
-    summary_room = max(0, assembly_budget - count(base, messages) - 256)
+    summary_room = max(0, assembly_budget - count(base + style, messages) - 256)
     # Summary producers (summarize_history, summarize_sources) budget UTF-8 bytes; the
     # room is converted at the density of the older material they draw on.
     summary_rate = bytes_per_unit(
@@ -290,8 +316,9 @@ def build_context(
             summary = summarize_sources(old_sources, summary_query, summary_bytes)
     if summary:
         base += "\n较早学习记录（仅供参考，不代表已核实事实或用户已经掌握）：\n" + summary
-    if count(base, messages) > hard_budget:
-        raise ContextBudgetExceeded()
+    if count(base + style, messages) > hard_budget:
+        raise too_large(base, messages)
+    base += style
     if diagnostics is not None:
         diagnostics.update(compacted=True, estimated_input_tokens=count(base, messages))
     return base, messages

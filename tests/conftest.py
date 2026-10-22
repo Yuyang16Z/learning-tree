@@ -29,3 +29,11 @@ def isolated_phone_access_token(tmp_path, monkeypatch):
 
     monkeypatch.setattr(access_token, "TOKEN_PATH", tmp_path / "runtime" / "phone-access-token")
     access_token.pairing_failures.reset()
+
+
+@pytest.fixture(autouse=True)
+def isolated_learning_presets(tmp_path, monkeypatch):
+    """No test may read the learner's own styles in the repository's learning-presets/."""
+    from app import learning_presets
+
+    monkeypatch.setattr(learning_presets, "CUSTOM_DIRECTORY", tmp_path / "learning-presets")

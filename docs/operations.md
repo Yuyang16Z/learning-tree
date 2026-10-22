@@ -27,6 +27,7 @@ An occupied port is not forcibly freed. Ctrl+C stops the app. Use one backend pe
 | `.runtime/retrieval/models/` | Pinned public embedding/reranker weights; no chat records. |
 | `.backups/` | Private database copies including credentials. |
 | `learning-materials/` | Files exposed to the optional file tool; only its public README is tracked. |
+| `learning-presets/` | Your own [learning styles](learning-presets.md), one Markdown file each (`LEARNING_PRESETS_DIR`; `/data/learning-presets` in Docker); only its public README is tracked. |
 | `学习资料/` (legacy) | Existing learning files remain accessible in place after upgrading and stay excluded from Git. |
 | `mcp-data/` | MCP knowledge graph and browser artifacts. |
 | Browser storage | Drafts, positions, language and a content-free deletion notice for other open tabs. |
@@ -103,6 +104,8 @@ For full recovery, stop the app, keep a copy of the current data file, and copy 
 Tree JSON import creates a new tree and remaps references. Limits are 25 MiB, 2,000 nodes and 12,000 messages. Backups containing question documents use version 2, include original bytes and integrity hashes, and are reparsed on import; version-1 backups remain supported. Embedded originals count toward the JSON limit, so large collections may need a private SQLite backup. Automatic preference/factual memory, the user-managed preference profile and MCP memory are not included. Exported conversations and documents can still be private even though model keys are excluded. See [document formats and data flow](documents.md).
 
 A node's understanding mark (**Not yet**, **Roughly**, **Can explain**) is exported as an optional `understanding` field, written only for marked nodes, and restored on import; older backups import with no marks. App versions released before this field existed reject backups that contain it, because their import format accepts no unknown fields; exports of topics without marks remain importable there. To move a marked topic to an older version, clear its marks before exporting.
+
+The [learning style](learning-presets.md) a question was asked with is exported the same way, as an optional `learning_preset` field written only for questions that used a style, and restored on import; older backups import as questions asked the default way. A topic's own default style is local organization, like archiving, and is not exported. App versions released before this field existed reject backups that contain it, for the same reason; exports of topics whose questions used no style remain importable there. A question's style cannot be cleared in the app, so to move such a topic to an older version, import a copy of the exported JSON with its `learning_preset` fields removed.
 
 ## Troubleshooting
 

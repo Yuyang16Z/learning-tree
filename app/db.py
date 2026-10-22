@@ -69,6 +69,7 @@ engine = create_engine(
 _ADDED_COLUMNS = {
     "knowledgetree": {
         "archived": "BOOLEAN NOT NULL DEFAULT 0",
+        "learning_preset": "TEXT",  # Nullable: existing topics answer in the default way.
     },
     "modelconfig": {
         "protocol": "TEXT NOT NULL DEFAULT 'openai'",
@@ -85,6 +86,7 @@ _ADDED_COLUMNS = {
         "source_end": "INTEGER",
         "learning_note": "TEXT",
         "understanding": "TEXT",  # Nullable: existing nodes read as "not marked".
+        "learning_preset": "TEXT",  # Nullable: existing questions used no style.
         "revision_of": "INTEGER",
         "request_id": "TEXT",
         "title_state": "TEXT NOT NULL DEFAULT 'legacy'",

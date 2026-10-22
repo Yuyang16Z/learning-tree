@@ -205,6 +205,26 @@ def test_learning_library_rejects_symlinked_roots(tmp_path, directory_name, targ
         launch.library_directories()
 
 
+def test_custom_learning_styles_are_ignored_except_their_readme():
+    paths = ["learning-presets/my-style.md", "learning-presets/nested/notes.md"]
+    ignored = (
+        subprocess.check_output(
+            ["git", "check-ignore", "--no-index", "--stdin", "-z"],
+            input=b"\0".join(path.encode() for path in paths) + b"\0",
+            cwd=ROOT,
+        )
+        .decode()
+        .rstrip("\0")
+        .split("\0")
+    )
+    assert ignored == paths
+    for public in ("learning-presets/README.md", "app/learning_presets/socratic.md"):
+        assert (
+            subprocess.run(["git", "check-ignore", "--no-index", "-q", public], cwd=ROOT).returncode
+            == 1
+        )
+
+
 def test_private_learning_files_are_ignored_in_both_directory_names():
     paths = [
         "learning-materials/private.txt",
@@ -243,6 +263,9 @@ def test_private_learning_files_are_ignored_in_both_directory_names():
         ("desktop/macos/LearningTree.swift", None),
         ("docs/中文.md", "ASCII"),
         ("learning-materials/README.md", None),
+        ("learning-presets/my-style.md", "private/generated"),
+        ("learning-presets/README.md", None),
+        ("app/learning_presets/socratic.md", None),
     ],
 )
 def test_release_check_rejects_private_libraries_and_non_ascii_paths(
