@@ -28,7 +28,7 @@ import { mergePendingTitles, pollPendingTitles } from "./lib/titlePolling";
 import { resumeAnswer } from "./lib/answerStream";
 import { keepIfSame, planRefresh, watchChanges } from "./lib/changeFeed";
 import { restoreUnderstanding, withUnderstanding } from "./lib/understanding";
-import { nodeQuestionPreset, requestedPreset, restoreTopicPreset, withTopicPreset } from "./lib/learningPresets";
+import { askInStyle, nodeQuestionPreset, presetForQuestion, requestedPreset, restoreTopicPreset, withTopicPreset } from "./lib/learningPresets";
 import { finishToolStep, startToolStep } from "./lib/toolSteps";
 import { locateSource } from "./lib/sourceLinks";
 import { onPairingRequired } from "./lib/phonePairing";
@@ -164,16 +164,21 @@ export default function App() {
     setMcpServers(keepIfSame(await api.listMcp()));
   }
 
-  // Custom styles are local files, so the list is read again whenever the menu opens.
-  async function loadLearningPresets() {
+  // Custom styles are local files, so the list is read again whenever the menu opens, a topic
+  // changes elsewhere, or a question would use a style the loaded list does not know.
+  // Resolves to the list read (newer reads still win the state), or null when it failed.
+  async function loadLearningPresets(): Promise<LearningPresetList | null> {
     const ticket = ++presetsRequest.current;
     try {
       const list = await api.listLearningPresets();
-      if (ticket !== presetsRequest.current) return;
-      setLearningPresets(keepIfSame<LearningPresetList | null>(list));
-      setLearningPresetsFailed(false);
+      if (ticket === presetsRequest.current) {
+        setLearningPresets(keepIfSame<LearningPresetList | null>(list));
+        setLearningPresetsFailed(false);
+      }
+      return list;
     } catch {
       if (ticket === presetsRequest.current) setLearningPresetsFailed(true);
+      return null;
     }
   }
 
@@ -281,6 +286,8 @@ export default function App() {
       plan.models && loadModels(),
       plan.mcp && loadMcp(),
       plan.topics && syncTopics(),
+      // A topic may now use a custom style added after this page read the list.
+      plan.topics && loadLearningPresets(),
       plan.map && treeId !== null && syncMap(treeId),
       plan.thread && syncThread(),
     ]);
@@ -463,9 +470,11 @@ export default function App() {
     }, { once: true });
     requestRef.current = { from: fromId, origin, tree: treeId, requestId };
     streamTargetRef.current = null;
-    // The composer's style goes with every question; a retry is answered in its node's own.
-    const learningPreset = requestedPreset(trees.find(tree => tree.id === treeId)?.learning_preset, learningPresets);
-    setSendingPreset(payload.mode === 'retry' ? nodeQuestionPreset(threadRef.current, fromId) : learningPreset);
+    // The composer's style goes with every question; a retry is answered in its node's own
+    // (the server ignores the field then).
+    const retry = payload.mode === 'retry';
+    const topicPreset = trees.find(tree => tree.id === treeId)?.learning_preset ?? null;
+    setSendingPreset(retry ? nodeQuestionPreset(threadRef.current, fromId) : requestedPreset(topicPreset, learningPresets));
     setPendingQuestion(payload.question); setSendingImages(payload.images ?? []); setSendingDocuments(payload.documents ?? []);
     setLive(''); setLiveReasoning(''); setLiveSteps([]); setLiveDiagnostics(null); setLiveSources([]); setContextStatus(null);
     setStreaming(true); setStreamFromId(origin); setErr(null);
@@ -493,12 +502,19 @@ export default function App() {
     try {
       let meta: AskMeta;
       try {
-        meta = await api.ask(fromId, {
-          question: payload.question, config_id: activeModelId,
-          images: payload.images, document_ids: payload.document_ids, tools: payload.tools, deep_think: payload.deep,
-          mode: payload.mode, request_id: requestId, question_message_id: payload.question_message_id,
-          learning_preset: learningPreset,
-        }, handlers, ctrl.signal);
+        const send = (learningPreset: string | null) => {
+          if (!retry) setSendingPreset(learningPreset);
+          return api.ask(fromId, {
+            question: payload.question, config_id: activeModelId,
+            images: payload.images, document_ids: payload.document_ids, tools: payload.tools, deep_think: payload.deep,
+            mode: payload.mode, request_id: requestId, question_message_id: payload.question_message_id,
+            learning_preset: learningPreset,
+          }, handlers, ctrl.signal);
+        };
+        // A style the loaded list lacks may be newer than the list; one removed since the list was
+        // read is rejected before anything is stored and asked again the default way.
+        meta = retry ? await send(requestedPreset(topicPreset, learningPresets))
+          : await askInStyle(await presetForQuestion(topicPreset, learningPresets, loadLearningPresets), send, loadLearningPresets);
       } catch (e) {
         if (!isStreamLost(e) || ctrl.signal.aborted) throw e;
         // The answer keeps running on the server, e.g. after a phone locks: reattach when reachable.

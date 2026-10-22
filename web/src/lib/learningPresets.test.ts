@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { LearningPreset, LearningPresetList, Tree } from "../types";
-import { nodeQuestionPreset, presetChoice, presetDescription, presetTitle, questionTag, requestedPreset, restoreTopicPreset, STYLE_TEXT, styleLabel, styleOptions, withTopicPreset } from "./learningPresets";
+import { askInStyle, nodeQuestionPreset, presetChoice, presetForQuestion, presetDescription, presetTitle, questionTag, requestedPreset, restoreTopicPreset, STYLE_TEXT, styleLabel, styleOptions, withTopicPreset } from "./learningPresets";
 
 function preset(id: string, extra: Partial<LearningPreset> = {}): LearningPreset {
   return { id, source: id.startsWith("custom:") ? "custom" : "builtin", title_zh: `中文 ${id}`, title_en: `English ${id}`, description_zh: `说明 ${id}`, description_en: `About ${id}`, instruction: "合成说明", ...extra };
@@ -74,6 +74,57 @@ describe("learning style choices", () => {
     expect(questionTag("custom:deleted", list, "zh-CN")).toEqual({ text: "已不可用", unavailable: true });
     expect(questionTag("custom:deleted", list, "en")).toEqual({ text: "Unavailable", unavailable: true });
     expect(questionTag("socratic", null, "en")).toBeNull();
+  });
+});
+
+describe("styles the loaded list does not know", () => {
+  const builtins: LearningPresetList = { presets: [preset("socratic"), preset("feynman")], errors: [] };
+  const withNew: LearningPresetList = { presets: [...builtins.presets, preset("custom:new")], errors: [] };
+
+  it("reads the list again before sending a topic style it lacks, since the style may be newer than the list", async () => {
+    const reload = vi.fn(async () => withNew);
+    expect(await presetForQuestion("custom:new", builtins, reload)).toBe("custom:new");
+    expect(reload).toHaveBeenCalledTimes(1);
+    // Gone from the fresh list too: the default way.
+    expect(await presetForQuestion("custom:gone", builtins, vi.fn(async () => withNew))).toBeNull();
+    // No list at all, or it cannot be read: the server checks the stored id.
+    expect(await presetForQuestion("custom:new", null, vi.fn(async () => withNew))).toBe("custom:new");
+    expect(await presetForQuestion("custom:new", builtins, vi.fn(async () => null))).toBe("custom:new");
+  });
+
+  it("sends a known style or the default way without reading the list again", async () => {
+    const reload = vi.fn(async () => withNew);
+    expect(await presetForQuestion("feynman", builtins, reload)).toBe("feynman");
+    for (const value of [null, undefined, ""]) expect(await presetForQuestion(value, builtins, reload)).toBeNull();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  const rejected = Object.assign(new Error("这个学习方式不存在或已不可用，请重新选择。"), { status: 422 });
+
+  it("asks once more the default way when the server rejects a style the fresh list no longer has", async () => {
+    const send = vi.fn(async (value: string | null) => { if (value) throw rejected; return "answered"; });
+    expect(await askInStyle("custom:new", send, vi.fn(async () => builtins))).toBe("answered");
+    expect(send.mock.calls.map(([value]) => value)).toEqual(["custom:new", null]);
+  });
+
+  it("keeps any other failure, and a rejection the list does not explain", async () => {
+    const reload = vi.fn(async () => builtins);
+    const failing = (error: unknown) => vi.fn(async () => { throw error; });
+    // Still listed: the rejection was about something else.
+    let send = failing(rejected);
+    await expect(askInStyle("feynman", send, reload)).rejects.toBe(rejected);
+    expect(send).toHaveBeenCalledTimes(1);
+    // The list cannot be read: nothing confirms the style is gone.
+    send = failing(rejected);
+    await expect(askInStyle("custom:new", send, vi.fn(async () => null))).rejects.toBe(rejected);
+    expect(send).toHaveBeenCalledTimes(1);
+    // The default way, other statuses and lost connections are never asked twice.
+    for (const [value, error] of [[null, rejected], ["custom:new", Object.assign(new Error("busy"), { status: 409 })], ["custom:new", new Error("offline")]] as const) {
+      send = failing(error);
+      await expect(askInStyle(value, send, reload)).rejects.toBe(error);
+      expect(send).toHaveBeenCalledTimes(1);
+    }
+    expect(await askInStyle("socratic", async value => value, reload)).toBe("socratic");
   });
 });
 

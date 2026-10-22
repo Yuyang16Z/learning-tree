@@ -68,6 +68,34 @@ export function requestedPreset(current: string | null | undefined, list: Learni
   return list.presets.some(preset => preset.id === current) ? current : null;
 }
 
+/**
+ * What a question sends, checked against the server when the loaded list does not know the topic's style: the list
+ * may be older than the style (a file added since and chosen in another window or on another device), so it is read
+ * again first. A style the fresh list lacks too is sent as null, the default way; when the list cannot be read, the
+ * stored id is sent and the server checks it.
+ */
+export async function presetForQuestion(current: string | null | undefined, list: LearningPresetList | null, reload: () => Promise<LearningPresetList | null>): Promise<string | null> {
+  if (!current) return null;
+  if (list?.presets.some(preset => preset.id === current)) return current;
+  const fresh = await reload();
+  return fresh ? requestedPreset(current, fresh) : current;
+}
+
+/**
+ * Ask in `preset`. A style removed after the list was read is rejected by the server (HTTP 422); when a fresh list
+ * confirms it is gone, the question is asked once more the default way, as every vanished style answers.
+ */
+export async function askInStyle<T>(preset: string | null, send: (preset: string | null) => Promise<T>, reload: () => Promise<LearningPresetList | null>): Promise<T> {
+  try {
+    return await send(preset);
+  } catch (error) {
+    if (preset === null || (error as { status?: unknown } | null)?.status !== 422) throw error;
+    const fresh = await reload();
+    if (!fresh || fresh.presets.some(item => item.id === preset)) throw error;
+    return await send(null);
+  }
+}
+
 /** A question's tag: none for the default way (or while the list loads), else the style's title or "Unavailable". */
 export function questionTag(id: string | null | undefined, list: LearningPresetList | null, locale: Locale): { text: string; unavailable: boolean } | null {
   const choice = presetChoice(id, list);

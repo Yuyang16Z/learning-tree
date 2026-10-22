@@ -154,6 +154,33 @@ async function poll(callback, label) {
     await page.unroute(`**/api/trees/${styled.id}`);
     checks.push('A failed save restores the previous style and says so');
 
+    // Another device adds a custom style and chooses it after this page read the list.
+    const peerFile = path.join(presetsDirectory, 'smoke-peer.md');
+    fs.writeFileSync(peerFile, '---\ntitle_zh: 合成同步方式\ntitle_en: Synthetic peer style\n---\nSynthetic instruction chosen on another device.\n');
+    await api(`/trees/${styled.id}`, { learning_preset: 'custom:smoke-peer' }, 'PATCH');
+    await poll(async () => (await page.locator('.chat-style-button').getAttribute('aria-label')) !== 'Learning style: Socratic questions', 'the change feed');
+    assert.equal(await page.locator('.chat-style-button').getAttribute('aria-label'), 'Learning style: Synthetic peer style', 'a style chosen elsewhere is shown by name, not as unavailable');
+    const peerAsk = await ask('Synthetic question in a style chosen elsewhere');
+    assert.equal(peerAsk.learning_preset, 'custom:smoke-peer', 'the request carries the style chosen elsewhere');
+    await tagOf('Synthetic question in a style chosen elsewhere').filter({ hasText: 'Synthetic peer style' }).waitFor();
+    checks.push('A custom style chosen on another device after this page read the list is shown, sent and tagged by name');
+
+    // Its file is deleted while the page still lists it: the question is answered the default way.
+    fs.unlinkSync(peerFile);
+    const beforeVanished = asks.length;
+    await ask('Synthetic question after the listed style vanished');
+    assert.deepEqual(asks.slice(beforeVanished).map(body => body.learning_preset), ['custom:smoke-peer', null], 'a rejected style is asked once more the default way');
+    await styleButton('Unavailable').waitFor();
+    assert.equal(await page.locator('.chat-error').count(), 0, 'no error is left once the default way answered');
+    await poll(async () => (await api(`/trees/${styled.id}`)).every(node => node.status !== 'pending'), 'the default-way answer');
+    assert.equal(await tagOf('Synthetic question after the listed style vanished').count(), 0);
+    checks.push('A listed custom style deleted while the page is open answers the next question the default way and shows Unavailable');
+    await openMenu('Unavailable');
+    const restored = page.waitForResponse(response => response.request().method() === 'PATCH' && new URL(response.url()).pathname === `/api/trees/${styled.id}`);
+    await menu.getByRole('menuitemradio', { name: 'Socratic questions', exact: true }).click();
+    assert.equal((await restored).status(), 200);
+    await styleButton('Socratic questions').waitFor();
+
     await openMenu('Socratic questions');
     const savedCustom = page.waitForResponse(response => response.request().method() === 'PATCH' && new URL(response.url()).pathname === `/api/trees/${styled.id}`);
     await menu.getByRole('menuitemradio', { name: 'Synthetic analogies', exact: true }).click();
