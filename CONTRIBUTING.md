@@ -29,7 +29,7 @@ Most changes need no local retrieval models. To work on real embedding/reranking
 - Use descriptive ASCII filenames and paths, following the surrounding naming style. Use English for ordinary code comments, developer docstrings and the primary documentation.
 - Keep `README.zh-CN.md`, localized documentation, bilingual interface strings and multilingual test fixtures. Never translate saved user content.
 - Treat model prompts, tool descriptions and docstrings exposed through MCP as behavior-bearing text. Change them separately from comment cleanup and verify the affected tool schemas and behavior.
-- Keep private files in `learning-materials/` or the existing legacy library out of commits. The release check enforces ASCII source paths and rejects private data even when force-staged.
+- Keep private files in `learning-materials/`, the existing legacy library and custom learning styles in `learning-presets/` out of commits. The release check enforces ASCII source paths and rejects private data even when force-staged.
 
 ## Pull requests
 

@@ -27,6 +27,7 @@ An occupied port is not forcibly freed. Ctrl+C stops the app. Use one backend pe
 | `.runtime/retrieval/models/` | Pinned public embedding/reranker weights; no chat records. |
 | `.backups/` | Private database copies including credentials. |
 | `learning-materials/` | Files exposed to the optional file tool; only its public README is tracked. |
+| `learning-presets/` | Your own [learning styles](learning-presets.md), one Markdown file each (`LEARNING_PRESETS_DIR`; `/data/learning-presets` in Docker); only its public README is tracked. |
 | `学习资料/` (legacy) | Existing learning files remain accessible in place after upgrading and stay excluded from Git. |
 | `mcp-data/` | MCP knowledge graph and browser artifacts. |
 | Browser storage | Drafts, positions, language and a content-free deletion notice for other open tabs. |
