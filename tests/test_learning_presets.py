@@ -1,6 +1,8 @@
 """Learning-style preset files: a strict parser, ordered listing and safe error reports."""
 
 import os
+import re
+from pathlib import Path
 
 os.environ["DATABASE_URL"] = "sqlite://"
 os.environ["DEFAULT_API_KEY"] = ""
@@ -316,8 +318,6 @@ def test_listing_endpoint_returns_display_order_with_instructions(directory):
 
 
 def test_every_fixed_preset_message_has_an_exact_interface_translation():
-    from pathlib import Path
-
     table = (Path(__file__).resolve().parents[1] / "web/src/i18n/workspace.ts").read_text()
     messages = [
         presets.UNKNOWN_PRESET,
@@ -400,3 +400,16 @@ def test_compare_answers_first_and_names_a_few_real_neighbours_only():
     compare = presets.preset_catalog()["compare"].instruction
     assert compare.index("回答") < compare.index("对比表")
     assert "1–3" in compare and "不要硬凑" in compare
+
+
+def test_self_test_names_the_understanding_marks_as_the_interface_does():
+    """Answers follow the question's language, so the marks are named in both interface
+    languages exactly as the buttons read (web/src/lib/understanding.ts), and only as a
+    suggestion: the learner sets the mark."""
+    source = (Path(__file__).resolve().parents[1] / "web/src/lib/understanding.ts").read_text()
+    labels = re.findall(r'(?:open|partial|clear): \["([^"]+)", "([^"]+)"\]', source)
+    assert len(labels) == 3
+    self_test = presets.preset_catalog()["self-test"].instruction
+    for chinese, english in labels:
+        assert chinese in self_test and english in self_test, (chinese, english)
+    assert "只是建议" in self_test and "学习者自己标记" in self_test
