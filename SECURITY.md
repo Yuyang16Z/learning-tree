@@ -19,6 +19,8 @@ These narrow common browser and tool attacks; they do not make the API safe to p
 
 Local MCP servers are programs whose permissions follow the launching user's OS account. The file preset narrows the exposed library directory but is not a system sandbox. Remote MCP servers receive the tool arguments and content of the calls the model makes to them. Configure only trusted tools and endpoints. Model requests and selected tool calls send relevant content to those services.
 
+A custom [learning style](docs/learning-presets.md) is an instruction to the answer model with the weight of the app's own rules, sent with every question in the topics that choose it, including tool rounds; a style file from someone else can steer the model to send questions and learning paths elsewhere through the enabled tools. Use only style files you wrote or have read, and keep `LEARNING_PRESETS_DIR` outside the directories the file MCP server can write (`learning-materials/`, `学习资料/`).
+
 ## Reporting
 
 Use **Security → Report a vulnerability** in this repository when available. Otherwise open an issue asking for a private channel without exploit details, personal data or credentials. Do not attach real databases or `.env` files.
