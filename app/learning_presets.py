@@ -242,7 +242,8 @@ def custom_presets(directory: Path) -> tuple[list[LearningPreset], list[dict]]:
             )
             if result is None:
                 continue
-            fresh[name] = (key, result)
+            if result != UNREADABLE:  # Permissions can change without touching the file.
+                fresh[name] = (key, result)
             if isinstance(result, str):
                 errors.append({"file": name, "reason": result})
             else:

@@ -231,6 +231,17 @@ def test_parsed_files_are_reused_while_modification_time_and_size_are_unchanged(
     assert "custom:cached" not in presets.preset_catalog()
 
 
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs file permissions")
+def test_an_unreadable_file_is_reported_and_read_again_once_readable(directory):
+    path = write(directory, "locked.md", preset_file("锁定"))
+    path.chmod(0)
+    try:
+        assert presets.list_presets()[1] == [{"file": "locked.md", "reason": presets.UNREADABLE}]
+    finally:
+        path.chmod(0o600)
+    assert presets.preset_catalog()["custom:locked"].title_zh == "锁定"
+
+
 def test_a_missing_directory_lists_only_the_builtins():
     assert not presets.CUSTOM_DIRECTORY.exists()
     listed, errors = presets.list_presets()
