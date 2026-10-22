@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     # AGENT_TIME_LIMIT_SECONDS / AGENT_TOOL_TOKEN_BUDGET in .env.
     agent_time_limit_seconds: float = Field(default=180, gt=0)
     agent_tool_token_budget: int = Field(default=60000, gt=0)
+    # The learner's own teaching styles, one Markdown file each (app/learning_presets.py);
+    # a relative path starts at the project root. The Docker image uses
+    # /data/learning-presets in its volume. LEARNING_PRESETS_DIR in .env.
+    learning_presets_dir: str = "learning-presets"
 
     # Seed this default model at startup if a key is configured and no models exist.
     default_label: str = "DeepSeek"

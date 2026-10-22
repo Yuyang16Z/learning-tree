@@ -243,6 +243,8 @@ def e2e() -> None:
             LEARNING_TREE_E2E="1",
             LEARNING_TREE_E2E_BASE=base,
             LEARNING_TREE_E2E_PYTHON=sys.executable,
+            # Browser tests see only the built-in styles plus synthetic files they write here.
+            LEARNING_PRESETS_DIR=(Path(directory) / "learning-presets").as_posix(),
         )
         with background(server_args(port), env) as api:
             wait_ready(base, api)
@@ -254,6 +256,7 @@ def e2e() -> None:
             run([executable("node"), "scripts/node_deletion_smoke.cjs"], env=env)
             run([executable("node"), "scripts/web_tools_smoke.cjs"], env=env)
             run([executable("node"), "scripts/context_status_smoke.cjs"], env=env)
+            run([executable("node"), "scripts/learning_presets_smoke.cjs"], env=env)
 
 
 def main() -> None:

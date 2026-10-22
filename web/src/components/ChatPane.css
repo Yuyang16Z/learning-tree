@@ -137,8 +137,15 @@
 .chat-compose-box:focus-within { border-color: color-mix(in srgb, var(--teal), var(--border) 60%); box-shadow: 0 3px 15px #00000006; }
 .chat-compose-box textarea { width: 100%; border: 0; outline: 0; border-radius: 0; padding: 0 3px; min-height: 40px; max-height: 160px; resize: none; background: none; color: var(--text); font-size: 13px; line-height: 1.75; box-shadow: none; }
 .chat-compose-box textarea:focus, .chat-compose-box textarea:focus-visible { border: 0; outline: none; box-shadow: none; }
-.chat-compose-controls { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
-.chat-compose-right select { border: 0; background: transparent; color: var(--muted); font-size: 10px; padding: 6px 16px 6px 5px; max-width: 165px; cursor: pointer; box-shadow: none; }
+.chat-compose-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
+/* Narrow composers give way in order: the learning-style label truncates down to its icon, then the
+   model menu narrows, and only then do the menu and send button move to a second row. Each group
+   starts from its smallest form (three 32 px controls and two 5 px gaps; a 56 px model menu, a 5 px
+   gap and the 32 px send button) and grows, the model menu first; icons and send keep their size. */
+.chat-compose-left { flex: 1 1 106px; min-width: 0; }
+.chat-compose-left > .chat-icon-button, .chat-compose-left > .chat-tool-menu { flex: none; }
+.chat-compose-right { flex: 1000 1 93px; min-width: 0; max-width: max-content; margin-left: auto; }
+.chat-compose-right select { border: 0; background: transparent; color: var(--muted); font-size: 10px; padding: 6px 16px 6px 5px; min-width: 0; max-width: 165px; cursor: pointer; box-shadow: none; }
 .chat-send { background: var(--teal); color: #fff; border-radius: 10px; border: 0; width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center; flex: none; }
 .chat-send:hover { filter: brightness(1.07); }
 .chat-send:disabled { background: var(--panel-2); color: var(--muted); opacity: .7; }

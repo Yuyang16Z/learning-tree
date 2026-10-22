@@ -33,6 +33,7 @@ import type {
   SourceAnchor,
   DocumentSummary,
   DocumentDetail,
+  LearningPresetList,
   Understanding,
 } from "./types";
 
@@ -132,6 +133,8 @@ export interface AskBody {
   mode?: "continue" | "retry" | "revise";
   question_message_id?: number;
   request_id?: string;
+  /** The composer's learning style: an id, or null for the default way. A retry keeps the node's own. */
+  learning_preset?: string | null;
 }
 
 export type ContextStatus = "summarizing" | "ready";
@@ -236,7 +239,7 @@ export const api = {
   clearMemories: () => fetch(`${API}/memories`, { method: "DELETE" }).then(j<unknown>),
 
   listTrees: (includeArchived = false) => fetch(`${API}/trees${includeArchived ? '?include_archived=true' : ''}`).then(j<Tree[]>),
-  updateTree: (id: number, body: { title?: string; archived?: boolean }) =>
+  updateTree: (id: number, body: { title?: string; archived?: boolean; learning_preset?: string | null }) =>
     fetch(`${API}/trees/${id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(j<Tree>),
   createTree: (title: string, root_question?: string) =>
     jsonPost(`${API}/trees`, { title, root_question: root_question ?? null }).then(j<Tree>),
@@ -244,6 +247,10 @@ export const api = {
   searchTree: (id: number, q: string, limit = 30, signal?: AbortSignal) =>
     fetch(`${API}/trees/${id}/search?${new URLSearchParams({ q, limit: String(limit) })}`, { signal }).then(j<{ results: SearchHit[] }>).then(r => r.results),
   deleteTree: (id: number) => fetch(`${API}/trees/${id}`, { method: "DELETE" }).then(j<unknown>),
+
+  // Built-in and custom learning styles; custom files are read again on each request.
+  listLearningPresets: (signal?: AbortSignal) =>
+    fetch(`${API}/learning-presets`, { signal, cache: "no-store" }).then(j<LearningPresetList>),
 
   getNode: (id: number) => fetch(`${API}/nodes/${id}`).then(j<NodeDetail>),
   // One page of a tool call's stored complete result (the step shows a preview).

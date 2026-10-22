@@ -74,6 +74,7 @@ def main() -> int:
             or bool(re.search(r"\.(?:db|sqlite3?)(?:$|-)|\.(?:pem|key|p12)$", path.name))
             or path.parts[0] == "学习资料"
             or (path.parts[0] == "learning-materials" and name != "learning-materials/README.md")
+            or (path.parts[0] == "learning-presets" and name != "learning-presets/README.md")
             or path.name.startswith(("优化交付记录", "更新记录"))
         )
         if forbidden:

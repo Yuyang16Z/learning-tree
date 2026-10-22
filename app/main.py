@@ -14,6 +14,7 @@ from .changes import router as changes_router
 from .config import settings
 from .db import engine, init_db
 from .documents import router as document_router
+from .learning_presets import router as presets_router
 from .models import ModelConfig
 from .phone_access import router as phone_router
 from .routers import mcp_router, memory_router, models_router, nodes, trees
@@ -116,7 +117,7 @@ for module in (models_router, trees, nodes, mcp_router, memory_router):
     app.include_router(module.router)
     app.include_router(module.router, prefix="/api", include_in_schema=False)
 
-for extra_router in (document_router, changes_router, phone_router):
+for extra_router in (document_router, changes_router, phone_router, presets_router):
     app.include_router(extra_router)
     app.include_router(extra_router, prefix="/api", include_in_schema=False)
 

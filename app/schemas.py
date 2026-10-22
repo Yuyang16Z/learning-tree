@@ -63,6 +63,8 @@ class TreeOut(BaseModel):
     title: str
     root_node_id: int
     archived: bool = False
+    # Learning-style preset id for new questions in this topic; None = the default way.
+    learning_preset: str | None = None
 
 
 class TreePatch(BaseModel):
@@ -70,6 +72,8 @@ class TreePatch(BaseModel):
 
     title: str | None = Field(default=None, min_length=1, max_length=300)
     archived: bool | None = Field(default=None, strict=True)
+    # A preset id, or null to return new questions to the default way of answering.
+    learning_preset: str | None = Field(default=None, max_length=80)
 
     @field_validator("title", mode="before")
     @classmethod
@@ -79,8 +83,10 @@ class TreePatch(BaseModel):
     @model_validator(mode="after")
     def require_changes(self):
         if not self.model_fields_set:
-            raise ValueError("Provide a title or archive status")
-        if any(getattr(self, field) is None for field in self.model_fields_set):
+            raise ValueError("Provide a title, archive status or learning style")
+        if any(
+            getattr(self, field) is None for field in self.model_fields_set - {"learning_preset"}
+        ):
             raise ValueError("Title and archive status cannot be null")
         return self
 
@@ -107,6 +113,7 @@ class NodeOut(BaseModel):
     source_end: int | None = None
     learning_note: str | None = None
     understanding: Understanding | None = None
+    learning_preset: str | None = None
     revision_of: int | None = None
     request_id: str | None = None
 
@@ -138,6 +145,9 @@ class AskIn(BaseModel):
     document_ids: list[str] = Field(default_factory=list, max_length=4)
     tools: list[str] | None = None  # Tools enabled for this request, e.g. ["fetch", "web_search"].
     deep_think: bool = False  # Request reasoning and stream it separately from the answer.
+    # Learning-style preset id. Absent: the topic's default (revise: the original
+    # question's); null: the default way of answering. Retry ignores it.
+    learning_preset: str | None = Field(default=None, max_length=80)
 
 
 class TestOut(BaseModel):

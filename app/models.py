@@ -171,6 +171,10 @@ class KnowledgeTree(SQLModel, table=True):
     title: str
     archived: bool = False
     created_at: datetime = Field(default_factory=_now)
+    # The learning-style preset new questions in this topic are asked with
+    # (app/learning_presets.py); NULL = the default way of answering. Local
+    # organization like `archived`: not exported.
+    learning_preset: str | None = None
 
 
 class TreeIdSequence(SQLModel, table=True):
@@ -203,6 +207,9 @@ class Node(SQLModel, table=True):
     # The learner's own mark for this node: open | partial | clear; NULL = not marked.
     # Not source content: it never changes answers, titles, summaries or request state.
     understanding: str | None = None
+    # The learning-style preset this node's question was asked with; NULL = default.
+    # Kept as history when that style later disappears (its answer then used none).
+    learning_preset: str | None = None
     revision_of: int | None = None
     request_id: str | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_now)
