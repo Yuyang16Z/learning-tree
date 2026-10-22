@@ -24,7 +24,7 @@ Every built-in instruction says that your explicit request in the current questi
 - Every question that used a style shows a small tag with the style's name in its bubble. Changing the topic's style later never changes earlier questions.
 - **Retry** answers a question again in the style it was asked with. Editing a question creates a new version in the style the composer shows.
 - Inline **Explain**, branch titles, context summaries and memory extraction never use a style.
-- Topic exports keep the style of each question that used one, and imports restore it. The topic's own default is local organization, like archiving, and is not exported. Earlier versions of the app reject backups that contain question styles; exports of topics whose questions used none stay importable there.
+- Topic exports keep the style of each question that used one, and imports restore it. The topic's own default is local organization, like archiving, and is not exported. Earlier versions of the app reject backups that contain question styles; exports of topics whose questions used none stay importable there (see [updating and restoring](operations.md#updating-and-restoring)).
 
 ## Your own styles
 
