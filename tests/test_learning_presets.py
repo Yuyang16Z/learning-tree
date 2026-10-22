@@ -358,3 +358,11 @@ def test_styles_that_review_the_learners_work_confirm_it_when_it_is_right():
     assert "补上步骤" in review
     feynman = catalog["feynman"].instruction
     assert "准确" in feynman and "不必硬找" in feynman
+
+
+def test_worked_examples_grade_the_learners_practice_attempt():
+    """The learner's attempt at the practice problem is a new question in the same style;
+    it is graded step by step, not answered with a fresh worked example."""
+    worked = presets.preset_catalog()["worked-examples"].instruction
+    assert "批改" in worked and "第一个出错的步骤" in worked
+    assert "不要另起" in worked
