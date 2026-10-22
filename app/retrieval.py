@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import math
-import re
-import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field, replace
 
@@ -25,6 +23,9 @@ from .models import (
 from .preference_supplements import eligible_supplements
 from .schemas import RetrievalSettingsOut
 from .semantic_models import get_backend
+from .text_relevance import bm25
+from .text_relevance import normalized as _normalized
+from .text_relevance import tokens as _tokens
 
 INITIAL_RETRIEVAL_REVISION = "initial"
 
@@ -102,113 +103,14 @@ class RetrievalResult:
 
 
 _INVALID_SOURCE_STATES = {"pending", "error", "interrupted"}
-_STOP = {
-    "the",
-    "a",
-    "an",
-    "is",
-    "are",
-    "was",
-    "what",
-    "why",
-    "how",
-    "to",
-    "of",
-    "and",
-    "in",
-    "it",
-    "this",
-    "that",
-    "please",
-    "explain",
-    "为什么",
-    "什么",
-    "为何",
-    "怎么",
-    "如何",
-    "这个",
-    "那个",
-    "一下",
-    "请问",
-    "解释",
-    "为什",
-    "user",
-    "users",
-    "model",
-    "models",
-    "data",
-    "can",
-    "could",
-    "should",
-    "does",
-    "do",
-    "not",
-    "will",
-    "be",
-    "on",
-    "with",
-    "from",
-    "for",
-    "about",
-    "用户",
-    "可以",
-    "能够",
-    "进行",
-    "使用",
-    "我们",
-    "一个",
-    "问题",
-    "时候",
-    "需要",
-    "支持",
-    "是否",
-    "模型",
-}
-
-
-def _normalized(text: str) -> str:
-    return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
-
-
-def _tokens(text: str) -> list[str]:
-    """Latin terms plus Chinese bigrams; no whitespace-only tokenization of Chinese."""
-    normalized = _normalized(text)
-    words = re.findall(r"[a-z0-9_]+(?:[.+/-][a-z0-9_]+)*|[\u3400-\u9fff]+", normalized)
-    result: list[str] = []
-    for word in words:
-        if re.fullmatch(r"[\u3400-\u9fff]+", word):
-            parts = [word] if len(word) == 1 else [word[i : i + 2] for i in range(len(word) - 1)]
-            result.extend(part for part in parts if part not in _STOP)
-        elif word not in _STOP:
-            result.append(word)
-            result.extend(
-                part for part in re.split(r"[.+/-]", word) if part != word and part not in _STOP
-            )
-    # Preserve common complexity notation as an additional exact term.
-    result.extend(re.sub(r"\s+", "", item) for item in re.findall(r"o\([^)]{1,80}\)", normalized))
-    return result
 
 
 def _lexical_scores(query: str, candidates: list[MemoryHit]) -> dict[int, float]:
-    terms = set(_tokens(query))
-    if not terms:
-        return {}
     documents = [Counter(_tokens(item.content)) for item in candidates]
-    average = sum(sum(doc.values()) for doc in documents) / max(1, len(documents)) or 1
-    frequencies = Counter(term for doc in documents for term in doc)
-    scores: dict[int, float] = {}
-    for item, doc in zip(candidates, documents, strict=True):
-        length, score = sum(doc.values()), 0.0
-        for term in terms:
-            tf = doc[term]
-            if tf:
-                idf = math.log(
-                    1 + (len(documents) - frequencies[term] + 0.5) / (frequencies[term] + 0.5)
-                )
-                score += idf * tf * 2.2 / (tf + 1.2 * (0.25 + 0.75 * length / average))
-        if score > 0:
-            scores[item.memory_id] = score
-    return scores
+    scores, _ = bm25(_tokens(query), documents)
+    return {
+        item.memory_id: score for item, score in zip(candidates, scores, strict=True) if score > 0
+    }
 
 
 def _unit(vector) -> list[float]:

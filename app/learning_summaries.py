@@ -9,23 +9,26 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import threading
 import time
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from contextlib import nullcontext
 from dataclasses import dataclass
 
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from . import semantic_models
 from .context_budget import ContextPolicy, text_tokens
-from .context_compaction import _terms, summarize_sources
+from .context_compaction import summarize_sources
 from .models import ContextSummary, KnowledgeTree, Message, Node
 from .summary_generation import (
     SUMMARY_PROMPT_VERSION,
     fits_input_budget,
     summarize_learning_context,
 )
+from .text_relevance import relevance, tokens
 
 BLOCK_TARGET = 8000
 BLOCK_MAX = 24000
@@ -36,6 +39,12 @@ _LOCK = threading.RLock()
 _INFLIGHT: set[tuple[int, str]] = set()
 _FAILURES: OrderedDict[tuple[int, str], float] = OrderedDict()
 _EPOCHS: dict[tuple[int, int, int | None], int] = {}
+# Block vectors from the local embedding model, keyed by model and content hash.
+_SEMANTIC_CACHE: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
+_SEMANTIC_CACHE_SIZE = 256
+_SEMANTIC_LOCK = threading.Lock()
+# Reciprocal-rank fusion constant, as in memory recall.
+_RRF_K = 60
 
 
 def _json(value) -> str:
@@ -220,14 +229,17 @@ def invalidate_summaries(session: Session, *, tree_id: int | None = None, node_i
                 session.delete(row)
 
 
-def _render(sources, blocks, summaries, query: str, budget: int) -> str | None:
+def _render(
+    sources, blocks, summaries, query: str, budget: int, relevance_by_key=None
+) -> str | None:
     chosen = []
     covered = set()
     used = 0
-    query_terms = _terms(query)
+    if relevance_by_key is None:
+        relevance_by_key = _block_relevance(blocks, query, semantic=False)
     ranked = sorted(
         enumerate(blocks),
-        key=lambda item: (_relevance(item[1], query_terms), item[0]),
+        key=lambda item: (relevance_by_key[item[1].key], item[0]),
         reverse=True,
     )
     # Leave room for original sentences from blocks that have no valid summary.
@@ -268,14 +280,78 @@ def _render(sources, blocks, summaries, query: str, budget: int) -> str | None:
     return result if text_tokens(result) <= budget else None
 
 
-def _relevance(block: _Block, query_terms: set[str]) -> int:
-    """Rank immutable source blocks locally; the cached summary stays query-independent."""
-    if not query_terms:
-        return 0
-    return max(
-        (len(query_terms & _terms(record["text"])) for record in block.records),
-        default=0,
-    )
+def _block_text(block: _Block) -> str:
+    return "\n".join(record["text"] for record in block.records)
+
+
+def _unit(vector) -> list[float]:
+    values = [float(value) for value in vector]
+    length = math.sqrt(sum(value * value for value in values))
+    if not values or not math.isfinite(length) or length <= 0:
+        raise ValueError("invalid embedding")
+    return [value / length for value in values]
+
+
+def _semantic_scores(query: str, texts: list[str]) -> list[float] | None:
+    """Cosine similarity of each block to the question with the local E5 model, or None.
+
+    Used only when the locally cached model is already loaded: inference never
+    downloads, and any failure leaves block ranking lexical. Block vectors are cached
+    by model and content hash, so a later question only embeds the question itself.
+    Sentence scoring never calls this.
+    """
+    if len(texts) < 2 or not query.strip():
+        return None
+    try:
+        backend = semantic_models.get_backend()
+        question = _unit(backend.embed_query(query[:2000]))
+        model = str(backend.model_key)
+        keys = [(model, hashlib.sha256(text.encode("utf-8")).hexdigest()) for text in texts]
+        vectors: dict[tuple[str, str], list[float]] = {}
+        with _SEMANTIC_LOCK:
+            for key in keys:
+                if key in _SEMANTIC_CACHE:
+                    _SEMANTIC_CACHE.move_to_end(key)
+                    vectors[key] = _SEMANTIC_CACHE[key]
+        missing = list(dict.fromkeys(key for key in keys if key not in vectors))
+        if missing:
+            by_key = dict(zip(keys, texts, strict=True))
+            computed = list(backend.embed_documents([by_key[key] for key in missing]))
+            if len(computed) != len(missing):
+                return None
+            with _SEMANTIC_LOCK:
+                for key, vector in zip(missing, computed, strict=True):
+                    vectors[key] = _SEMANTIC_CACHE[key] = _unit(vector)
+                    _SEMANTIC_CACHE.move_to_end(key)
+                while len(_SEMANTIC_CACHE) > _SEMANTIC_CACHE_SIZE:
+                    _SEMANTIC_CACHE.popitem(last=False)
+        if any(len(vectors[key]) != len(question) for key in keys):
+            return None
+        return [sum(a * b for a, b in zip(question, vectors[key], strict=True)) for key in keys]
+    except Exception:
+        return None  # The optional model is never required for ranking.
+
+
+def _dense_ranks(values: list[float]) -> list[int]:
+    """1 for the highest value; equal values share a rank."""
+    order = {value: rank for rank, value in enumerate(sorted(set(values), reverse=True), 1)}
+    return [order[value] for value in values]
+
+
+def _block_relevance(blocks: list[_Block], query: str, *, semantic: bool = True) -> dict:
+    """Relevance of each immutable source block to the question; cached summaries stay
+    query-independent. Lexical BM25 within the blocks, fused by rank with semantic
+    similarity when the local embedding model is available."""
+    texts = [_block_text(block) for block in blocks]
+    lexical = relevance(tokens(query), [Counter(tokens(text)) for text in texts])
+    similarity = _semantic_scores(query, texts) if semantic else None
+    if similarity is None:
+        return {block.key: score for block, score in zip(blocks, lexical, strict=True)}
+    lexical_rank, semantic_rank = _dense_ranks(lexical), _dense_ranks(similarity)
+    return {
+        block.key: 1 / (_RRF_K + lexical_rank[index]) + 1 / (_RRF_K + semantic_rank[index])
+        for index, block in enumerate(blocks)
+    }
 
 
 def summarize_history(
@@ -325,7 +401,8 @@ def summarize_history(
             if row:
                 summaries[block.key] = row.content
     candidate = None
-    query_terms = _terms(query)
+    # Lexical (and, when loaded, semantic) block relevance; computed outside every lock.
+    relevance_by_key = _block_relevance(blocks, query)
     # Score and size-check outside the shared claim lock; only the claim is atomic.
     # A block whose request the calibrated budget would refuse never takes this
     # question's one model call, nor starts a failure cooldown.
@@ -338,7 +415,7 @@ def summarize_history(
             and budget >= block.output_limit + text_tokens(block.heading)
             and fits_input_budget(spec, block.records, block.output_limit)
         ),
-        key=lambda item: (-_relevance(item[1], query_terms), item[0]),
+        key=lambda item: (-relevance_by_key[item[1].key], item[0]),
     )
     with _LOCK:
         # Spend the one optional model call on the old block most relevant to
@@ -413,4 +490,4 @@ def summarize_history(
     with guard, Session(engine) as session:
         if _stopped(stop) or not _valid_sources(session, sources):
             return None
-    return _render(sources, blocks, summaries, query, budget)
+    return _render(sources, blocks, summaries, query, budget, relevance_by_key)
