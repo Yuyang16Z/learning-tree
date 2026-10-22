@@ -382,3 +382,12 @@ def test_a_new_doubt_is_answered_first_in_styles_that_withhold_answers():
     for preset in catalog.values():
         heading = presets.preset_section(preset).split("\n", 1)[0]
         assert "这个主题" in heading and "这个问题" not in heading, heading
+
+
+def test_socratic_questions_ask_one_at_a_time_and_let_the_dialogue_end():
+    """The rules agree on one question per reply (not 1-3 in one rule and exactly one in
+    another), and a learner who can state the answer gets a summary rather than being
+    questioned forever."""
+    socratic = presets.preset_catalog()["socratic"].instruction
+    assert "一次只问一个" in socratic and "1–3" not in socratic
+    assert "完整说出答案" in socratic and "总结" in socratic
