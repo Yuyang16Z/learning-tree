@@ -391,3 +391,12 @@ def test_socratic_questions_ask_one_at_a_time_and_let_the_dialogue_end():
     socratic = presets.preset_catalog()["socratic"].instruction
     assert "一次只问一个" in socratic and "1–3" not in socratic
     assert "完整说出答案" in socratic and "总结" in socratic
+
+
+def test_compare_answers_first_and_names_a_few_real_neighbours_only():
+    """The learner's doubt is answered before the comparison, the neighbours are few, and
+    when nothing is genuinely confused with the concept the tutor says so instead of
+    inventing confusions."""
+    compare = presets.preset_catalog()["compare"].instruction
+    assert compare.index("回答") < compare.index("对比表")
+    assert "1–3" in compare and "不要硬凑" in compare
