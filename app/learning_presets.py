@@ -308,7 +308,7 @@ def preset_section(preset: LearningPreset) -> str:
     """The final section of an answer's system prompt for the style it was asked with: a
     heading naming it, its instruction, and the rules every style shares."""
     return (
-        f"学习方式：{preset.title_zh}（用户为这个问题选择的教学方式）\n"
+        f"学习方式：{preset.title_zh}（用户为这个主题选择的教学方式）\n"
         f"{preset.instruction}\n"
         f"{STYLE_RULES}"
     )

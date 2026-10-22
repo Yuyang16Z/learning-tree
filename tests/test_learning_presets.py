@@ -366,3 +366,19 @@ def test_worked_examples_grade_the_learners_practice_attempt():
     worked = presets.preset_catalog()["worked-examples"].instruction
     assert "批改" in worked and "第一个出错的步骤" in worked
     assert "不要另起" in worked
+
+
+def test_a_new_doubt_is_answered_first_in_styles_that_withhold_answers():
+    """A topic's style applies to every question in it, a new doubt such as 什么是交叉熵？
+    included. Self-test answers it before quizzing and quizzes only on what the learning
+    path has covered; Mistake review explains a question that is not about the learner's
+    own solution. The heading names the topic's choice, not a choice made for this
+    question, so a contrary signal in the question can win."""
+    catalog = presets.preset_catalog()
+    self_test = catalog["self-test"].instruction
+    assert "新的疑问" in self_test and "已经讲过" in self_test
+    review = catalog["mistake-review"].instruction
+    assert "概念疑问" in review and "先正常讲解" in review
+    for preset in catalog.values():
+        heading = presets.preset_section(preset).split("\n", 1)[0]
+        assert "这个主题" in heading and "这个问题" not in heading, heading
