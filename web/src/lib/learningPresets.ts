@@ -76,6 +76,15 @@ export function questionTag(id: string | null | undefined, list: LearningPresetL
   return null;
 }
 
+/**
+ * The style a node's question was asked with: that of its last thread row. Earlier rows of a legacy node, and
+ * the questions a revision copied, carry none.
+ */
+export function nodeQuestionPreset(rows: readonly { node_id: number; learning_preset?: string | null }[], nodeId: number): string | null {
+  for (let index = rows.length - 1; index >= 0; index--) if (rows[index].node_id === nodeId) return rows[index].learning_preset ?? null;
+  return null;
+}
+
 type Styled = { id: number; learning_preset?: string | null };
 
 /** Optimistic update of one topic's style; the same array comes back when nothing changes. */

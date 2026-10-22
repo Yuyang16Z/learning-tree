@@ -28,7 +28,7 @@ import { mergePendingTitles, pollPendingTitles } from "./lib/titlePolling";
 import { resumeAnswer } from "./lib/answerStream";
 import { keepIfSame, planRefresh, watchChanges } from "./lib/changeFeed";
 import { restoreUnderstanding, withUnderstanding } from "./lib/understanding";
-import { requestedPreset, restoreTopicPreset, withTopicPreset } from "./lib/learningPresets";
+import { nodeQuestionPreset, requestedPreset, restoreTopicPreset, withTopicPreset } from "./lib/learningPresets";
 import { finishToolStep, startToolStep } from "./lib/toolSteps";
 import { locateSource } from "./lib/sourceLinks";
 import { onPairingRequired } from "./lib/phonePairing";
@@ -465,7 +465,7 @@ export default function App() {
     streamTargetRef.current = null;
     // The composer's style goes with every question; a retry is answered in its node's own.
     const learningPreset = requestedPreset(trees.find(tree => tree.id === treeId)?.learning_preset, learningPresets);
-    setSendingPreset(payload.mode === 'retry' ? threadRef.current.find(row => row.node_id === fromId)?.learning_preset ?? null : learningPreset);
+    setSendingPreset(payload.mode === 'retry' ? nodeQuestionPreset(threadRef.current, fromId) : learningPreset);
     setPendingQuestion(payload.question); setSendingImages(payload.images ?? []); setSendingDocuments(payload.documents ?? []);
     setLive(''); setLiveReasoning(''); setLiveSteps([]); setLiveDiagnostics(null); setLiveSources([]); setContextStatus(null);
     setStreaming(true); setStreamFromId(origin); setErr(null);

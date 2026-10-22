@@ -368,7 +368,11 @@ def _qa_rows(
         answer = attempts[-1] if attempts else None
         meta = node_metadata(node, messages)
         if i < len(pairs) - 1:
-            meta.update(status=answer.status if answer else "complete", error=None)
+            # Only a node's last question was asked with its stored style; earlier pairs
+            # of a legacy node, or those a revision copied, used none.
+            meta.update(
+                status=answer.status if answer else "complete", error=None, learning_preset=None
+            )
         rows.append(
             {
                 "node_id": node.id,

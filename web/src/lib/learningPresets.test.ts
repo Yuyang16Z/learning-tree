@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { LearningPreset, LearningPresetList, Tree } from "../types";
-import { presetChoice, presetDescription, presetTitle, questionTag, requestedPreset, restoreTopicPreset, STYLE_TEXT, styleLabel, styleOptions, withTopicPreset } from "./learningPresets";
+import { nodeQuestionPreset, presetChoice, presetDescription, presetTitle, questionTag, requestedPreset, restoreTopicPreset, STYLE_TEXT, styleLabel, styleOptions, withTopicPreset } from "./learningPresets";
 
 function preset(id: string, extra: Partial<LearningPreset> = {}): LearningPreset {
   return { id, source: id.startsWith("custom:") ? "custom" : "builtin", title_zh: `中文 ${id}`, title_en: `English ${id}`, description_zh: `说明 ${id}`, description_en: `About ${id}`, instruction: "合成说明", ...extra };
@@ -52,6 +52,18 @@ describe("learning style choices", () => {
     for (const value of [null, undefined, ""]) expect(requestedPreset(value, list)).toBeNull();
     // The server checks an id the page could not look up yet.
     expect(requestedPreset("feynman", null)).toBe("feynman");
+  });
+
+  it("reads a node's style from its last row, since earlier rows of a legacy node used none", () => {
+    const rows = [
+      { node_id: 1, learning_preset: "feynman" },
+      { node_id: 3, learning_preset: null },
+      { node_id: 3, learning_preset: "socratic" },
+    ];
+    expect(nodeQuestionPreset(rows, 3)).toBe("socratic");
+    expect(nodeQuestionPreset(rows, 1)).toBe("feynman");
+    expect(nodeQuestionPreset([{ node_id: 3 }], 3)).toBeNull();
+    expect(nodeQuestionPreset(rows, 9)).toBeNull();
   });
 
   it("tags questions asked with a style by its title, and vanished styles as unavailable", () => {

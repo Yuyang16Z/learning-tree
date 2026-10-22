@@ -233,6 +233,47 @@ def test_revise_copies_the_original_style_or_takes_the_chosen_one(api):
     assert stored(engine, 1) == "compare", "the original question keeps its style"
 
 
+def test_only_the_last_question_of_a_node_carries_its_style(api):
+    """A legacy node holds several questions; revising its second one copies the first
+    into the revision, which was never asked with the revision's style."""
+    client, engine, _ = api
+    with Session(engine) as session:
+        for role, content in (
+            ("user", "旧问一"),
+            ("assistant", "旧答一"),
+            ("user", "旧问二"),
+            ("assistant", "旧答二"),
+        ):
+            session.add(Message(node_id=1, role=role, content=content, status="complete"))
+        root = session.get(Node, 1)
+        root.status = "complete"
+        session.add(root)
+        session.commit()
+        second = session.exec(
+            select(Message).where(Message.node_id == 1, Message.content == "旧问二")
+        ).one()
+    rows = client.get("/nodes/1/thread").json()["nodes"]
+    assert [(row["question"], row["learning_preset"]) for row in rows] == [
+        ("旧问一", None),
+        ("旧问二", None),
+    ]
+    revision = ask(
+        client,
+        1,
+        "新问二",
+        mode="revise",
+        question_message_id=second.id,
+        learning_preset="socratic",
+    )["node_id"]
+    assert stored(engine, revision) == "socratic"
+    rows = client.get(f"/nodes/{revision}/thread").json()["nodes"]
+    assert [(row["question"], row["learning_preset"]) for row in rows] == [
+        ("旧问一", None),
+        ("新问二", "socratic"),
+    ]
+    assert client.get(f"/nodes/{revision}").json()["learning_preset"] == "socratic"
+
+
 def test_inline_explanations_and_memory_extraction_never_use_styles(api):
     client, engine, calls = api
     set_topic_default(engine, "socratic")
