@@ -1,5 +1,6 @@
-.chat-style-menu { position: relative; min-width: 0; }
-.chat-pane .chat-style-button { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 156px; height: 32px; padding: 0 9px 0 7px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 11px; }
+/* The composer's left group gives way first: this control narrows and its label truncates, so the send button stays in place. */
+.chat-style-menu { position: relative; min-width: 0; max-width: 156px; }
+.chat-pane .chat-style-button { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%; height: 32px; padding: 0 9px 0 7px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 11px; }
 .chat-pane .chat-style-button:hover, .chat-pane .chat-style-button[aria-expanded="true"], .chat-pane .chat-style-button.is-active { color: var(--teal); background: var(--teal-bg); }
 .chat-pane .chat-style-button.is-unavailable { color: var(--danger); }
 .chat-style-button svg { flex: none; }
@@ -26,7 +27,11 @@
 @media (max-width: 650px) {
   /* Narrow composers anchor the list to the whole composer so it never runs off the screen. */
   .chat-compose-box { position: relative; }
-  .chat-style-menu { position: static; }
-  .chat-pane .chat-style-button { max-width: 96px; }
+  .chat-style-menu { position: static; max-width: 96px; }
   .chat-style-dropdown { left: 0; right: 0; bottom: calc(100% + 6px); width: auto; max-width: none; }
+}
+/* Phone composers this narrow leave the label one letter: show the icon, named by its label and tooltip. */
+@media (max-width: 349px) {
+  .chat-style-current { display: none; }
+  .chat-pane .chat-style-button { padding: 0 7px 0 8px; }
 }

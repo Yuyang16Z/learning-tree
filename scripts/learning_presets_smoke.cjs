@@ -205,14 +205,71 @@ async function poll(callback, label) {
     assert.equal(await tagOf('Synthetic question after the custom style was deleted').count(), 0);
     checks.push('A deleted custom style is shown as unavailable, its old questions keep a tag, and new questions use the default way');
 
+    // `.app` clips overflow, so the page never scrolls sideways: measure the composer itself.
+    async function composerFits(label) {
+      const geometry = await page.evaluate(() => {
+        const rect = selector => { const r = document.querySelector(selector).getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width }; };
+        const controls = document.querySelector('.chat-compose-controls');
+        return {
+          width: innerWidth, box: rect('.chat-compose-box'), overflow: controls.scrollWidth - controls.clientWidth,
+          parts: {
+            attach: rect('.chat-compose-left > .chat-icon-button'), tools: rect('.chat-tool-menu > .chat-icon-button'), style: rect('.chat-style-button'),
+            model: rect('.chat-compose-right select'), send: rect('.chat-send'),
+          },
+          styleIcon: rect('.chat-style-button svg'),
+        };
+      });
+      const detail = JSON.stringify(geometry);
+      const parts = Object.entries(geometry.parts);
+      for (const [name, part] of parts)
+        assert(part.left >= geometry.box.left && part.right <= geometry.box.right && part.right <= geometry.width, `${label}: ${name} stays inside the composer ${detail}`);
+      // Controls on the same row never cover each other.
+      const ordered = [...parts].sort((a, b) => a[1].left - b[1].left);
+      for (let i = 0; i < ordered.length; i++) for (let j = i + 1; j < ordered.length; j++) {
+        const [a, first] = ordered[i], [b, second] = ordered[j];
+        if (first.top < second.bottom && second.top < first.bottom) assert(first.right <= second.left + 0.5, `${label}: ${a} and ${b} do not overlap ${detail}`);
+      }
+      assert(geometry.styleIcon.left >= geometry.parts.style.left && geometry.styleIcon.right <= geometry.parts.style.right, `${label}: the style icon stays inside its button ${detail}`);
+      assert(geometry.overflow <= 0, `${label}: the composer controls do not overflow ${detail}`);
+      for (const name of ['attach', 'tools', 'send']) assert.equal(geometry.parts[name].width, 32, `${label}: ${name} keeps its size ${detail}`);
+      return geometry;
+    }
+    async function chooseStyle(current, name, shown = name) {
+      await openMenu(current);
+      const chosen = page.waitForResponse(response => response.request().method() === 'PATCH' && new URL(response.url()).pathname === `/api/trees/${styled.id}`);
+      await menu.getByRole('menuitemradio', { name, exact: true }).click();
+      assert.equal((await chosen).status(), 200);
+      await styleButton(shown).waitFor();
+    }
+    await chooseStyle('Unavailable', 'Compare and contrast');
+    for (const width of [1280, 900, 800, 761]) {
+      await page.setViewportSize({ width, height: 900 });
+      assert(await page.locator('aside.learning-map').isVisible(), 'the learning map stays open');
+      await composerFits(`${width} px with the map open`);
+    }
+    fs.writeFileSync(path.join(presetsDirectory, 'smoke-long-title.md'), `---\ntitle_zh: 合成的很长很长的学习方式名称用来检查窄屏\ntitle_en: Synthetic style with a deliberately long title for narrow screens\n---\nSynthetic instruction.\n`);
     await page.setViewportSize({ width: 390, height: 844 });
-    await openMenu('Unavailable');
+    await chooseStyle('Compare and contrast', 'Synthetic style with a deliberately long title for narrow screens');
+    for (const width of [414, 390, 375, 360, 340, 320]) {
+      await page.setViewportSize({ width, height: 800 });
+      await composerFits(`${width} px with a long style title`);
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
+    await chooseStyle('Synthetic style with a deliberately long title for narrow screens', 'Default (direct explanation)', 'Default');
+    for (const width of [340, 320]) {
+      await page.setViewportSize({ width, height: 800 });
+      await composerFits(`${width} px with the default way`);
+    }
+    checks.push('The send button and the composer controls stay inside the composer from 320 px phones to desktop windows with the map open');
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openMenu('Default');
     const bounds = await page.locator('.chat-style-dropdown').boundingBox();
     assert(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 391, 'The style menu fits a narrow screen');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     await page.keyboard.press('Escape');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
-    checks.push('The control and its menu fit a 390 px screen without horizontal scrolling');
+    checks.push('The style menu fits a 390 px screen without horizontal scrolling');
     assert.deepEqual(errors, []);
     const output = path.resolve(__dirname, '../artifacts');
     fs.mkdirSync(output, { recursive: true });
