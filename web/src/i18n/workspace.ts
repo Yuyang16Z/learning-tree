@@ -48,6 +48,7 @@ const diagnostics: [string, string][] = [
   ["自定义学习方式超过 50 个，这个文件没有载入。", "There are more than 50 custom learning styles; this file was not loaded."],
   ["文件需要使用 UTF-8 编码。", "The file must use UTF-8 encoding."],
   ["无法读取这个文件。", "This file could not be read."],
+  ["文件名需要写成 my-style.md 这样：只用小写字母、数字和连字符，以字母或数字开头，.md 之前最多 48 个字符。", "Name the file like my-style.md: lowercase letters, digits and hyphens only, starting with a letter or digit, with at most 48 characters before .md."],
   ["文件开头需要一个由两行 --- 包住的设置区。", "The file must start with a settings block between two --- lines."],
   ["设置区的每一行需要写成「键: 值」。", "Each line of the settings block must read “key: value”."],
   ["设置区只能使用 title_zh、title_en、description_zh、description_en 和 order。", "The settings block may only use title_zh, title_en, description_zh, description_en and order."],

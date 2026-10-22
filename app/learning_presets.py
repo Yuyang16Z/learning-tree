@@ -32,7 +32,8 @@ MAX_INSTRUCTION_CHARS = 4000
 MAX_CUSTOM_FILES = 50
 MAX_FILE_BYTES = 16 * 1024
 SETTING_KEYS = ("title_zh", "title_en", "description_zh", "description_en", "order")
-# The only file names the loader reads; other entries in the directory are ignored.
+# The only file names the loader reads. Other Markdown files are reported by name;
+# README.md, hidden files and every other entry in the directory are ignored.
 FILE_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,47}\.md")
 # A well-formed stored id: a built-in name, or custom: and a custom file's name.
 PRESET_ID = re.compile(r"(?:custom:)?[a-z0-9][a-z0-9-]{0,47}")
@@ -51,6 +52,10 @@ TOO_LARGE = "文件超过 16 KB。"
 TOO_MANY = "自定义学习方式超过 50 个，这个文件没有载入。"
 NOT_UTF8 = "文件需要使用 UTF-8 编码。"
 UNREADABLE = "无法读取这个文件。"
+BAD_NAME = (
+    "文件名需要写成 my-style.md 这样：只用小写字母、数字和连字符，以字母或数字开头，"
+    ".md 之前最多 48 个字符。"
+)
 NO_SETTINGS = "文件开头需要一个由两行 --- 包住的设置区。"
 BAD_LINE = "设置区的每一行需要写成「键: 值」。"
 UNKNOWN_KEY = "设置区只能使用 title_zh、title_en、description_zh、description_en 和 order。"
@@ -205,25 +210,39 @@ def _read_custom(path: Path, name: str) -> LearningPreset | str | None:
     return LearningPreset(id=CUSTOM_PREFIX + stem, source="custom", name=stem, **fields)
 
 
+def _misnamed(name: str) -> bool:
+    """A Markdown file meant as a style whose name breaks the naming rule (my_style.md,
+    MyStyle.md, analogy.MD): reported, unlike README.md and hidden files such as the
+    ._name.md copies macOS leaves on some drives, which are not styles at all."""
+    lowered = name.lower()
+    return lowered.endswith(".md") and lowered != "readme.md" and not name.startswith(".")
+
+
 def custom_presets(directory: Path) -> tuple[list[LearningPreset], list[dict]]:
     """The usable custom styles in `directory` by order and name, and {file, reason}
-    for each file that cannot be used. Only regular files named like `my-style.md`
-    count, at most 50 of them in name order; symbolic links (the directory included)
-    and other entries are ignored. Parsed files are reused while their modification
-    time and size are unchanged."""
+    for each file that cannot be used, in name order. Only regular files named like
+    `my-style.md` are read, at most 50 of them in name order; other Markdown files are
+    reported by name, and symbolic links (the directory included) and other entries are
+    ignored. Parsed files are reused while their modification time and size are
+    unchanged."""
     try:
         if directory.is_symlink() or not directory.is_dir():
             return [], []
+        files: list[tuple[str, os.DirEntry]] = []
+        misnamed: list[str] = []
         with os.scandir(directory) as entries:
-            files = sorted(
-                (entry.name, entry)
-                for entry in entries
-                if FILE_NAME.fullmatch(entry.name) and entry.is_file(follow_symlinks=False)
-            )
+            for entry in entries:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                if FILE_NAME.fullmatch(entry.name):
+                    files.append((entry.name, entry))
+                elif _misnamed(entry.name):
+                    misnamed.append(entry.name)
+        files.sort(key=lambda item: item[0])
     except OSError:
         return [], []
     presets: list[LearningPreset] = []
-    errors: list[dict] = []
+    errors: list[dict] = [{"file": name, "reason": BAD_NAME} for name in misnamed]
     with _lock:
         previous = _cache.get(str(directory), {})
         fresh: dict[str, tuple[tuple[int, int], LearningPreset | str]] = {}
@@ -251,6 +270,7 @@ def custom_presets(directory: Path) -> tuple[list[LearningPreset], list[dict]]:
         # Only the directory in use is kept, so the cache never outgrows it.
         _cache.clear()
         _cache[str(directory)] = fresh
+    errors.sort(key=lambda error: error["file"])
     return sorted(presets, key=_display_order), errors
 
 

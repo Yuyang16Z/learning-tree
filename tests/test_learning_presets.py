@@ -162,21 +162,39 @@ def test_invalid_custom_files_are_reported_by_name_without_contents(directory):
     assert response.json()["errors"] == errors
 
 
-def test_bad_names_symlinks_and_other_entries_are_ignored(directory, tmp_path):
-    for name in (
+def test_markdown_files_with_bad_names_are_reported_not_loaded(directory):
+    secret = "SYNTHETIC-PRIVATE-TEACHING-NOTE"
+    bad_names = [
         "My Style.md",
         "UPPER.md",
-        "README.md",
         "-leading-dash.md",
         "a" * 49 + ".md",
-        ".hidden.md",
-        "notes.txt",
-        "style.md.bak",
-    ):
+        "analogy.MD",
+        "my_style.md",
+        "类比.md",
+    ]
+    for name in bad_names:
+        write(directory, name, preset_file("不该出现", body=secret))
+    write(directory, "a" * 48 + ".md", preset_file("最长的名字"))
+    listed, errors = presets.list_presets()
+    assert [p.id for p in listed if p.source == "custom"] == ["custom:" + "a" * 48]
+    assert errors == [{"file": name, "reason": presets.BAD_NAME} for name in sorted(bad_names)]
+    response = TestClient(main.app).get("/learning-presets")
+    assert response.json()["errors"] == errors
+    assert secret not in response.text and str(directory) not in response.text
+
+
+def test_readme_hidden_files_symlinks_and_other_entries_are_ignored(directory, tmp_path):
+    # Names differ by more than case: the test may run on a case-insensitive file system.
+    for name in ("README.md", ".hidden.md", "._kept.md", "notes.txt", "style.md.bak"):
         write(directory, name, preset_file("不该出现"))
     (directory / "folder.md").mkdir()
+    (directory / "Other Folder.MD").mkdir()
     outside = write(tmp_path, "outside.md", preset_file("链接目标"))
     (directory / "linked.md").symlink_to(outside)
+    (directory / "Linked Style.md").symlink_to(outside)
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(directory / "Pipe.md")
     write(directory, "kept.md", preset_file("保留"))
     listed, errors = presets.list_presets()
     assert [p.id for p in listed if p.source == "custom"] == ["custom:kept"]
@@ -287,6 +305,7 @@ def test_every_fixed_preset_message_has_an_exact_interface_translation():
         presets.TOO_MANY,
         presets.NOT_UTF8,
         presets.UNREADABLE,
+        presets.BAD_NAME,
         presets.NO_SETTINGS,
         presets.BAD_LINE,
         presets.UNKNOWN_KEY,
