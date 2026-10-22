@@ -104,6 +104,22 @@ async function poll(callback, label) {
     await menu.waitFor({ state: 'hidden' });
     checks.push('The style menu lists Default first, the built-ins in order and custom styles after them, names unusable files without their contents and links the docs');
 
+    // Escape closes the menu wherever focus is: back on its button, or nowhere after a click on its text.
+    const focused = () => page.evaluate(() => document.activeElement?.getAttribute('aria-label') ?? document.activeElement?.tagName);
+    await openMenu('Default');
+    await page.keyboard.press('Shift+Tab');
+    assert.equal(await focused(), 'Learning style: Default');
+    assert(await menu.isVisible(), 'moving back to the button keeps the menu open');
+    await page.keyboard.press('Escape');
+    await menu.waitFor({ state: 'hidden' });
+    await openMenu('Default');
+    await page.locator('.chat-style-dropdown .chat-menu-label').click();
+    await page.keyboard.press('Escape');
+    await menu.waitFor({ state: 'hidden' });
+    assert.equal(await focused(), 'Learning style: Default', 'focus returns to the button');
+    assert.deepEqual(patches, []);
+    checks.push('Escape closes the style menu with focus on its button or after a click on its text, and focus returns to the button');
+
     await openMenu('Default');
     const saved = page.waitForResponse(response => response.request().method() === 'PATCH' && new URL(response.url()).pathname === `/api/trees/${styled.id}`);
     await menu.getByRole('menuitemradio', { name: 'Socratic questions', exact: true }).click();

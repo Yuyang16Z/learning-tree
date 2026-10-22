@@ -39,8 +39,20 @@ export function LearningStyleMenu({ value, presets, failed, disabled = false, on
   useEffect(() => {
     if (!open) return;
     const outside = (event: PointerEvent) => { if (!wrapper.current?.contains(event.target as Node)) setOpen(false); };
+    // Escape closes the menu wherever focus is (its button, or nowhere after a click on its text),
+    // and only the menu: the handlers behind it never see this key press.
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      close(true);
+    };
     document.addEventListener("pointerdown", outside);
-    return () => document.removeEventListener("pointerdown", outside);
+    document.addEventListener("keydown", escape, true);
+    return () => {
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("keydown", escape, true);
+    };
   }, [open]);
   useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
   // Opening focuses the current choice, so arrow keys start from it.
@@ -91,7 +103,7 @@ export function LearningStyleMenu({ value, presets, failed, disabled = false, on
       <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 5.5c2.7-1.4 5.7-1.4 9 .7 3.3-2.1 6.3-2.1 9-.7V19c-2.7-1.4-5.7-1.4-9 .7-3.3-2.1-6.3-2.1-9-.7z" /><path d="M12 6.2v13.5" /></svg>
       <span className="chat-style-current">{label}</span>
     </button>
-    {open && <div className="chat-style-dropdown" onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(true); } }}>
+    {open && <div className="chat-style-dropdown">
       <span className="chat-menu-label" id={`${id}-label`}>{t("学习方式 · 用于这个主题之后的问题", "Learning style · for the next questions in this topic")}</span>
       <div id={`${id}-menu`} ref={menu} role="menu" aria-labelledby={`${id}-label`} onKeyDown={move}>
         {options.map((option, index) => {
