@@ -759,8 +759,11 @@ export function ChatPane(props: Props) {
   async function chooseLearningStyle(id: string | null) {
     if (!onLearningPresetChange) return;
     const key = draftKey;
+    const notSaved = t("学习方式没有保存，已恢复原来的选择。", "The learning style was not saved; the previous choice is back.");
+    // A new choice replaces the report about an earlier one that failed, and no other message.
+    setLocalError(current => current === notSaved ? null : current);
     try { await onLearningPresetChange(id); }
-    catch { if (activeKeyRef.current === key) setLocalError(t("学习方式没有保存，已恢复原来的选择。", "The learning style was not saved; the previous choice is back.")); }
+    catch { if (activeKeyRef.current === key) setLocalError(notSaved); }
   }
   async function returnToSource(withNote = false) {
     if (!nearestBranch || branchSource == null) return;

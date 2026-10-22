@@ -70,6 +70,42 @@ async function poll(callback, label) {
     await styleButton(current).click();
     await menu.waitFor();
   }
+  // `.app` clips overflow, so the page never scrolls sideways: measure the composer itself.
+  async function composerFits(label) {
+    const geometry = await page.evaluate(() => {
+      const rect = selector => { const r = document.querySelector(selector).getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width }; };
+      const controls = document.querySelector('.chat-compose-controls');
+      return {
+        width: innerWidth, box: rect('.chat-compose-box'), overflow: controls.scrollWidth - controls.clientWidth,
+        parts: {
+          attach: rect('.chat-compose-left > .chat-icon-button'), tools: rect('.chat-tool-menu > .chat-icon-button'), style: rect('.chat-style-button'),
+          model: rect('.chat-compose-right select'), send: rect('.chat-send'),
+        },
+        styleIcon: rect('.chat-style-button svg'),
+      };
+    });
+    const detail = JSON.stringify(geometry);
+    const parts = Object.entries(geometry.parts);
+    for (const [name, part] of parts)
+      assert(part.left >= geometry.box.left && part.right <= geometry.box.right && part.right <= geometry.width, `${label}: ${name} stays inside the composer ${detail}`);
+    // Controls on the same row never cover each other.
+    const ordered = [...parts].sort((a, b) => a[1].left - b[1].left);
+    for (let i = 0; i < ordered.length; i++) for (let j = i + 1; j < ordered.length; j++) {
+      const [a, first] = ordered[i], [b, second] = ordered[j];
+      if (first.top < second.bottom && second.top < first.bottom) assert(first.right <= second.left + 0.5, `${label}: ${a} and ${b} do not overlap ${detail}`);
+    }
+    assert(geometry.styleIcon.left >= geometry.parts.style.left && geometry.styleIcon.right <= geometry.parts.style.right, `${label}: the style icon stays inside its button ${detail}`);
+    assert(geometry.overflow <= 0, `${label}: the composer controls do not overflow ${detail}`);
+    for (const name of ['attach', 'tools', 'send']) assert.equal(geometry.parts[name].width, 32, `${label}: ${name} keeps its size ${detail}`);
+    return geometry;
+  }
+  async function chooseStyle(current, name, shown = name) {
+    await openMenu(current);
+    const chosen = page.waitForResponse(response => response.request().method() === 'PATCH' && new URL(response.url()).pathname === `/api/trees/${styled.id}`);
+    await menu.getByRole('menuitemradio', { name, exact: true }).click();
+    assert.equal((await chosen).status(), 200);
+    await styleButton(shown).waitFor();
+  }
   async function ask(question) {
     const before = asks.length;
     await input.fill(question);
@@ -168,13 +204,15 @@ async function poll(callback, label) {
     await styleButton('Socratic questions').waitFor();
     assert.equal((await api('/trees')).find(tree => tree.id === styled.id).learning_preset, 'socratic');
     await page.unroute(`**/api/trees/${styled.id}`);
-    checks.push('A failed save restores the previous style and says so');
+    await chooseStyle('Socratic questions', 'Explain it back');
+    assert.equal(await page.locator('.chat-error').count(), 0, 'a later successful save clears the message about the failed one');
+    checks.push('A failed save restores the previous style and says so; a later successful save clears the message');
 
     // Another device adds a custom style and chooses it after this page read the list.
     const peerFile = path.join(presetsDirectory, 'smoke-peer.md');
     fs.writeFileSync(peerFile, '---\ntitle_zh: 合成同步方式\ntitle_en: Synthetic peer style\n---\nSynthetic instruction chosen on another device.\n');
     await api(`/trees/${styled.id}`, { learning_preset: 'custom:smoke-peer' }, 'PATCH');
-    await poll(async () => (await page.locator('.chat-style-button').getAttribute('aria-label')) !== 'Learning style: Socratic questions', 'the change feed');
+    await poll(async () => (await page.locator('.chat-style-button').getAttribute('aria-label')) !== 'Learning style: Explain it back', 'the change feed');
     assert.equal(await page.locator('.chat-style-button').getAttribute('aria-label'), 'Learning style: Synthetic peer style', 'a style chosen elsewhere is shown by name, not as unavailable');
     const peerAsk = await ask('Synthetic question in a style chosen elsewhere');
     assert.equal(peerAsk.learning_preset, 'custom:smoke-peer', 'the request carries the style chosen elsewhere');
@@ -191,11 +229,7 @@ async function poll(callback, label) {
     await poll(async () => (await api(`/trees/${styled.id}`)).every(node => node.status !== 'pending'), 'the default-way answer');
     assert.equal(await tagOf('Synthetic question after the listed style vanished').count(), 0);
     checks.push('A listed custom style deleted while the page is open answers the next question the default way and shows Unavailable');
-    await openMenu('Unavailable');
-    const restored = page.waitForResponse(response => response.request().method() === 'PATCH' && new URL(response.url()).pathname === `/api/trees/${styled.id}`);
-    await menu.getByRole('menuitemradio', { name: 'Socratic questions', exact: true }).click();
-    assert.equal((await restored).status(), 200);
-    await styleButton('Socratic questions').waitFor();
+    await chooseStyle('Unavailable', 'Socratic questions');
 
     await openMenu('Socratic questions');
     const savedCustom = page.waitForResponse(response => response.request().method() === 'PATCH' && new URL(response.url()).pathname === `/api/trees/${styled.id}`);
@@ -221,42 +255,6 @@ async function poll(callback, label) {
     assert.equal(await tagOf('Synthetic question after the custom style was deleted').count(), 0);
     checks.push('A deleted custom style is shown as unavailable, its old questions keep a tag, and new questions use the default way');
 
-    // `.app` clips overflow, so the page never scrolls sideways: measure the composer itself.
-    async function composerFits(label) {
-      const geometry = await page.evaluate(() => {
-        const rect = selector => { const r = document.querySelector(selector).getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width }; };
-        const controls = document.querySelector('.chat-compose-controls');
-        return {
-          width: innerWidth, box: rect('.chat-compose-box'), overflow: controls.scrollWidth - controls.clientWidth,
-          parts: {
-            attach: rect('.chat-compose-left > .chat-icon-button'), tools: rect('.chat-tool-menu > .chat-icon-button'), style: rect('.chat-style-button'),
-            model: rect('.chat-compose-right select'), send: rect('.chat-send'),
-          },
-          styleIcon: rect('.chat-style-button svg'),
-        };
-      });
-      const detail = JSON.stringify(geometry);
-      const parts = Object.entries(geometry.parts);
-      for (const [name, part] of parts)
-        assert(part.left >= geometry.box.left && part.right <= geometry.box.right && part.right <= geometry.width, `${label}: ${name} stays inside the composer ${detail}`);
-      // Controls on the same row never cover each other.
-      const ordered = [...parts].sort((a, b) => a[1].left - b[1].left);
-      for (let i = 0; i < ordered.length; i++) for (let j = i + 1; j < ordered.length; j++) {
-        const [a, first] = ordered[i], [b, second] = ordered[j];
-        if (first.top < second.bottom && second.top < first.bottom) assert(first.right <= second.left + 0.5, `${label}: ${a} and ${b} do not overlap ${detail}`);
-      }
-      assert(geometry.styleIcon.left >= geometry.parts.style.left && geometry.styleIcon.right <= geometry.parts.style.right, `${label}: the style icon stays inside its button ${detail}`);
-      assert(geometry.overflow <= 0, `${label}: the composer controls do not overflow ${detail}`);
-      for (const name of ['attach', 'tools', 'send']) assert.equal(geometry.parts[name].width, 32, `${label}: ${name} keeps its size ${detail}`);
-      return geometry;
-    }
-    async function chooseStyle(current, name, shown = name) {
-      await openMenu(current);
-      const chosen = page.waitForResponse(response => response.request().method() === 'PATCH' && new URL(response.url()).pathname === `/api/trees/${styled.id}`);
-      await menu.getByRole('menuitemradio', { name, exact: true }).click();
-      assert.equal((await chosen).status(), 200);
-      await styleButton(shown).waitFor();
-    }
     await chooseStyle('Unavailable', 'Compare and contrast');
     for (const width of [1280, 900, 800, 761]) {
       await page.setViewportSize({ width, height: 900 });
