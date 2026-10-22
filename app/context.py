@@ -226,10 +226,17 @@ def build_context(
     style = "\n" + preset_section(preset) if preset is not None else ""
 
     def too_large(without_style: str, ms) -> ContextBudgetExceeded:
-        # Name the style when the input would fit without it: shortening the question
-        # would not help, and a retry keeps the style.
-        if style and count(without_style, ms) <= hard_budget:
-            return ContextBudgetExceeded(STYLE_TOO_LONG)
+        # Name the style only when it is a material part of the input (at least a quarter
+        # of the budget) and the input would fit without it: then a shorter question would
+        # not help, and a retry keeps the style. A short style that merely tips a
+        # near-limit question over keeps the general message, which asks for shorter input.
+        if style:
+            without = count(without_style, ms)
+            if (
+                without <= hard_budget
+                and (count(without_style + style, ms) - without) * 4 >= hard_budget
+            ):
+                return ContextBudgetExceeded(STYLE_TOO_LONG)
         return ContextBudgetExceeded()
 
     base = _full_system([], current, "", document_note) + "\n" + COMPACTION_NOTICE

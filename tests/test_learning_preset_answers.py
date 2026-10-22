@@ -488,3 +488,35 @@ def test_legacy_schema_gains_nullable_style_columns(tmp_path, monkeypatch):
         assert session.get(Node, 1).learning_preset is None
     database.init_db()
     engine.dispose()
+
+
+def test_a_short_style_beside_a_near_limit_question_keeps_the_general_message():
+    """A small style that only tips a near-limit question over the budget is not the
+    cause: shortening the question is the way out, so the general message stays."""
+    short_style = presets.LearningPreset(
+        id="custom:short",
+        source="custom",
+        title_zh="短",
+        title_en="Short",
+        description_zh="",
+        description_en="",
+        instruction="先直接回答，再举一个例子。",
+    )
+    current = Node(id=1, tree_id=1, title="当前")
+    policy = ContextPolicy(8192, 4096)
+
+    def fits(length, preset=None):
+        try:
+            build_context([], current, [], "问" * length, policy=policy, preset=preset)
+        except ContextBudgetExceeded:
+            return False
+        return True
+
+    low, high = 1, 20000
+    while low < high:  # The longest question that fits without a style.
+        middle = (low + high + 1) // 2
+        low, high = (middle, high) if fits(middle) else (low, middle - 1)
+    assert not fits(low, short_style), "the short style tips this question over the budget"
+    with pytest.raises(ContextBudgetExceeded) as raised:
+        build_context([], current, [], "问" * low, policy=policy, preset=short_style)
+    assert str(raised.value) == ContextBudgetExceeded().args[0]
