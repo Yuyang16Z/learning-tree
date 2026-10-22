@@ -336,7 +336,14 @@ def export_tree(tree_id: int, session: Session = Depends(get_session)) -> dict:
         "nodes": [
             {
                 **node.model_dump(
-                    exclude={"tree_id", "created_at", "request_id", "title_state", "understanding"}
+                    exclude={
+                        "tree_id",
+                        "created_at",
+                        "request_id",
+                        "title_state",
+                        "understanding",
+                        "learning_preset",
+                    }
                 ),
                 "kind": node_metadata(node)["kind"],
                 # Only marked nodes carry the field, so a topic without marks stays

@@ -107,6 +107,7 @@ class NodeOut(BaseModel):
     source_end: int | None = None
     learning_note: str | None = None
     understanding: Understanding | None = None
+    learning_preset: str | None = None
     revision_of: int | None = None
     request_id: str | None = None
 
@@ -138,6 +139,9 @@ class AskIn(BaseModel):
     document_ids: list[str] = Field(default_factory=list, max_length=4)
     tools: list[str] | None = None  # Tools enabled for this request, e.g. ["fetch", "web_search"].
     deep_think: bool = False  # Request reasoning and stream it separately from the answer.
+    # Learning-style preset id. Absent: the topic's default (revise: the original
+    # question's); null: the default way of answering. Retry ignores it.
+    learning_preset: str | None = Field(default=None, max_length=80)
 
 
 class TestOut(BaseModel):
