@@ -780,6 +780,8 @@ input[type="checkbox"] {
 .model-advanced summary { cursor: pointer; }
 .model-advanced .field { margin-top: 12px; }
 .model-detect-row { display: flex; gap: 6px; align-items: center; }
+.model-summary-flag { display: flex; align-items: center; gap: 6px; margin: 12px 0 4px; }
+.model-summary-flag input { margin: 0; }
 .model-detect-row input { flex: 1; min-width: 0; }
 .form-grid {
   display: grid;

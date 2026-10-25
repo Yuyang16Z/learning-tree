@@ -35,6 +35,8 @@ BLOCK_MAX = 24000
 MIN_INPUT_BYTES = 1200
 MAX_OUTPUT_BYTES = 1600
 FAILURE_COOLDOWN = 60.0
+# Opens every model summary in a prompt; answer diagnostics count summaries by it.
+SUMMARY_HEADING = "模型摘要（node="
 _LOCK = threading.RLock()
 _INFLIGHT: set[tuple[int, str]] = set()
 _FAILURES: OrderedDict[tuple[int, str], float] = OrderedDict()
@@ -96,7 +98,7 @@ class _Block:
 
     @property
     def heading(self) -> str:
-        return f"模型摘要（node={self.node.id}；未经核实，请按引用回查原文）：\n"
+        return f"{SUMMARY_HEADING}{self.node.id}；未经核实，请按引用回查原文）：\n"
 
 
 def _blocks(sources, model_fingerprint: str, hard_limit: int) -> list[_Block]:
@@ -354,15 +356,22 @@ def _block_relevance(blocks: list[_Block], query: str, *, semantic: bool = True)
     }
 
 
-def summarize_history(
-    engine, spec, sources, query, budget, *, stop=None, mutation_lock=None
-) -> str | None:
-    """Reuse exact current-path blocks; generate at most one new model summary.
+@dataclass
+class _Plan:
+    """One path's normalized sources, its blocks and the summaries already cached."""
 
-    None asks the context builder to use its ordinary local-only compaction.
-    Keys contain hashes of provider identity and exact source versions, never keys.
-    """
-    if budget < 512 or not sources or _stopped(stop):
+    sources: list
+    blocks: list[_Block]
+    summaries: dict[str, str]
+    tree_id: int
+    namespace: int
+    model_fingerprint: str
+    hard_limit: int
+    guard: object
+
+
+def _plan(engine, spec, sources, stop, mutation_lock) -> _Plan | None:
+    if not sources or _stopped(stop):
         return None
     if spec.api_key == "mock" or spec.base_url.startswith("mock"):
         return None
@@ -390,7 +399,6 @@ def summarize_history(
     # calibrated budget gates each summary request itself (fits_input_budget).
     hard_limit = min(BLOCK_MAX, max(0, ContextPolicy.from_spec(spec).raw_input_budget - 4000))
     blocks = _blocks(sources, model_fingerprint, hard_limit)
-    namespace = _namespace(engine)
     summaries = {}
     guard = mutation_lock if mutation_lock is not None else nullcontext()
     with guard, Session(engine) as session:
@@ -400,94 +408,182 @@ def summarize_history(
             row = session.get(ContextSummary, block.key)
             if row:
                 summaries[block.key] = row.content
-    candidate = None
-    # Lexical (and, when loaded, semantic) block relevance; computed outside every lock.
-    relevance_by_key = _block_relevance(blocks, query)
+    return _Plan(
+        sources,
+        blocks,
+        summaries,
+        tree_id,
+        _namespace(engine),
+        model_fingerprint,
+        hard_limit,
+        guard,
+    )
+
+
+def _summarize_block(engine, spec, plan: _Plan, candidate: _Block, epoch, stop) -> str | None:
+    """One claimed block: "stored", "cached" (no call made), "failed", "dropped" (a call was
+    made but its result not written), or None when the request stopped or its sources
+    changed, so the caller must not render."""
+    state_key = (plan.namespace, candidate.key)
+    failed = False
+    try:
+        # A previous caller can commit after our initial cache read and
+        # release its claim before ours. Re-read after claiming, before
+        # spending another provider call on that already completed block.
+        with plan.guard, Session(engine) as session:
+            with _LOCK:
+                unchanged = _epoch(plan.namespace, plan.tree_id, candidate.node.id) == epoch
+            if not unchanged or _stopped(stop) or not _valid_sources(session, plan.sources):
+                return None
+            cached = session.get(ContextSummary, candidate.key)
+            if cached is not None:
+                plan.summaries[candidate.key] = cached.content
+                return "cached"
+        if _stopped(stop):
+            return None
+        content = summarize_learning_context(spec, candidate.records, candidate.output_limit)
+        if (
+            not isinstance(content, str)
+            or not content.strip()
+            or text_tokens(content) > candidate.output_limit
+        ):
+            failed = True
+            return "failed"
+        if _stopped(stop):
+            return None
+        with plan.guard, Session(engine) as session:
+            with _LOCK:
+                unchanged = _epoch(plan.namespace, plan.tree_id, candidate.node.id) == epoch
+            if not unchanged or _stopped(stop) or not _valid_sources(session, plan.sources):
+                return "dropped"
+            if session.get(ContextSummary, candidate.key) is None:
+                session.add(
+                    ContextSummary(
+                        key=candidate.key,
+                        tree_id=plan.tree_id,
+                        source_node_ids=[candidate.node.id],
+                        source_message_ids=[m.id for m in candidate.messages],
+                        fingerprint=candidate.fingerprint,
+                        model_fingerprint=plan.model_fingerprint,
+                        prompt_version=SUMMARY_PROMPT_VERSION,
+                        content=content,
+                    )
+                )
+                try:
+                    session.commit()
+                except IntegrityError:
+                    session.rollback()  # Another process may have cached the same version.
+            plan.summaries[candidate.key] = content
+            return "stored"
+    except Exception:
+        failed = True  # Optional compaction never prevents the original question.
+        return "failed"
+    finally:
+        with _LOCK:
+            _INFLIGHT.discard(state_key)
+            if failed:
+                _FAILURES[state_key] = time.monotonic() + FAILURE_COOLDOWN
+                _FAILURES.move_to_end(state_key)
+                while len(_FAILURES) > 256:
+                    _FAILURES.popitem(last=False)
+
+
+def _generate(engine, spec, plan: _Plan, relevance_by_key, budget, *, limit, stop) -> int | None:
+    """Ask the model for up to `limit` missing blocks, most relevant first, storing each.
+
+    Every provider call counts against `limit`, whether or not its summary is stored,
+    so the limit bounds the cost. Returns how many were stored, or None when the
+    request stopped or its sources changed meanwhile.
+    """
     # Score and size-check outside the shared claim lock; only the claim is atomic.
-    # A block whose request the calibrated budget would refuse never takes this
-    # question's one model call, nor starts a failure cooldown.
+    # A block whose request the calibrated budget would refuse never takes one of
+    # the model calls, nor starts a failure cooldown.
     ranked_missing = sorted(
         (
             (index, block)
-            for index, block in enumerate(blocks)
-            if block.key not in summaries
-            and MIN_INPUT_BYTES <= block.input_bytes <= hard_limit
+            for index, block in enumerate(plan.blocks)
+            if block.key not in plan.summaries
+            and MIN_INPUT_BYTES <= block.input_bytes <= plan.hard_limit
             and budget >= block.output_limit + text_tokens(block.heading)
             and fits_input_budget(spec, block.records, block.output_limit)
         ),
         key=lambda item: (-relevance_by_key[item[1].key], item[0]),
     )
-    with _LOCK:
-        # Spend the one optional model call on the old block most relevant to
-        # this question. Equal-scoring blocks keep chronological cache fill.
-        for _, block in ranked_missing:
-            state_key = (namespace, block.key)
-            if state_key in _INFLIGHT or time.monotonic() < _FAILURES.get(state_key, 0):
-                continue
-            _INFLIGHT.add(state_key)
-            _EPOCHS.setdefault((namespace, tree_id, block.node.id), 0)
-            epoch = _epoch(namespace, tree_id, block.node.id)
-            candidate = block
-            break
-    if candidate is not None:
-        state_key = (namespace, candidate.key)
-        failed = False
-        try:
-            # A previous caller can commit after our initial cache read and
-            # release its claim before ours. Re-read after claiming, before
-            # spending another provider call on that already completed block.
-            with guard, Session(engine) as session:
-                with _LOCK:
-                    unchanged = _epoch(namespace, tree_id, candidate.node.id) == epoch
-                if not unchanged or _stopped(stop) or not _valid_sources(session, sources):
-                    return None
-                cached = session.get(ContextSummary, candidate.key)
-                if cached is not None:
-                    summaries[candidate.key] = cached.content
-            if candidate.key not in summaries and not _stopped(stop):
-                content = summarize_learning_context(
-                    spec, candidate.records, candidate.output_limit
-                )
+    calls = stored = 0
+    tried: set[str] = set()
+    while calls < limit:
+        candidate = epoch = None
+        with _LOCK:
+            # Spend the model call on the old block most relevant to this question.
+            # Equal-scoring blocks keep chronological cache fill.
+            for _, block in ranked_missing:
+                state_key = (plan.namespace, block.key)
                 if (
-                    not isinstance(content, str)
-                    or not content.strip()
-                    or text_tokens(content) > candidate.output_limit
+                    block.key in tried
+                    or state_key in _INFLIGHT
+                    or time.monotonic() < _FAILURES.get(state_key, 0)
                 ):
-                    failed = True
-                elif not _stopped(stop):
-                    with guard, Session(engine) as session:
-                        with _LOCK:
-                            unchanged = _epoch(namespace, tree_id, candidate.node.id) == epoch
-                        if unchanged and not _stopped(stop) and _valid_sources(session, sources):
-                            if session.get(ContextSummary, candidate.key) is None:
-                                session.add(
-                                    ContextSummary(
-                                        key=candidate.key,
-                                        tree_id=tree_id,
-                                        source_node_ids=[candidate.node.id],
-                                        source_message_ids=[m.id for m in candidate.messages],
-                                        fingerprint=candidate.fingerprint,
-                                        model_fingerprint=model_fingerprint,
-                                        prompt_version=SUMMARY_PROMPT_VERSION,
-                                        content=content,
-                                    )
-                                )
-                                try:
-                                    session.commit()
-                                except IntegrityError:
-                                    session.rollback()  # Another process may have cached the same version.
-                            summaries[candidate.key] = content
-        except Exception:
-            failed = True  # Optional compaction never prevents the original question.
-        finally:
-            with _LOCK:
-                _INFLIGHT.discard(state_key)
-                if failed:
-                    _FAILURES[state_key] = time.monotonic() + FAILURE_COOLDOWN
-                    _FAILURES.move_to_end(state_key)
-                    while len(_FAILURES) > 256:
-                        _FAILURES.popitem(last=False)
-    with guard, Session(engine) as session:
-        if _stopped(stop) or not _valid_sources(session, sources):
+                    continue
+                _INFLIGHT.add(state_key)
+                _EPOCHS.setdefault((plan.namespace, plan.tree_id, block.node.id), 0)
+                epoch = _epoch(plan.namespace, plan.tree_id, block.node.id)
+                candidate = block
+                break
+        if candidate is None:
+            break
+        tried.add(candidate.key)
+        outcome = _summarize_block(engine, spec, plan, candidate, epoch, stop)
+        if outcome is None:
             return None
-    return _render(sources, blocks, summaries, query, budget, relevance_by_key)
+        if outcome != "cached":
+            calls += 1
+        if outcome == "stored":
+            stored += 1
+    return stored
+
+
+def summarize_history(
+    engine, spec, sources, query, budget, *, stop=None, mutation_lock=None, generate=True
+) -> str | None:
+    """Reuse exact current-path blocks; with generate, first ask for at most one new one.
+
+    Without generate it reads cached summaries only and calls no model: answers use that
+    and leave the missing blocks to prepare_summaries once they are complete.
+    None asks the context builder to use its ordinary local-only compaction.
+    Keys contain hashes of provider identity and exact source versions, never keys.
+    """
+    if budget < 512:
+        return None
+    plan = _plan(engine, spec, sources, stop, mutation_lock)
+    if plan is None:
+        return None
+    # Lexical (and, when loaded, semantic) block relevance; computed outside every lock.
+    relevance_by_key = _block_relevance(plan.blocks, query)
+    if (
+        generate
+        and _generate(engine, spec, plan, relevance_by_key, budget, limit=1, stop=stop) is None
+    ):
+        return None
+    with plan.guard, Session(engine) as session:
+        if _stopped(stop) or not _valid_sources(session, plan.sources):
+            return None
+    return _render(plan.sources, plan.blocks, plan.summaries, query, budget, relevance_by_key)
+
+
+def prepare_summaries(
+    engine, spec, sources, query, budget, *, limit=1, stop=None, mutation_lock=None
+) -> int:
+    """Summarize up to `limit` missing blocks of a path for later questions.
+
+    Runs once an answer is complete, so no answer waits for it; returns how many
+    summaries were stored. `budget` is the summary room of the question that queued
+    it: a summary larger than that room is not requested. Claims, cooldowns and source
+    checks are those of summarize_history, so a changed source stops it unwritten.
+    """
+    if budget < 512 or limit < 1:
+        return 0
+    plan = _plan(engine, spec, sources, stop, mutation_lock)
+    if plan is None:
+        return 0
+    relevance_by_key = _block_relevance(plan.blocks, query)
+    return _generate(engine, spec, plan, relevance_by_key, budget, limit=limit, stop=stop) or 0

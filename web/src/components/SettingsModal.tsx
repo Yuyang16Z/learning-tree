@@ -251,7 +251,7 @@ export function SettingsModal(props: Props) {
                   <div className="model-row model-config-row" key={m.id}>
                     <div className="grow">
                       <div>
-                        {m.label} {m.is_default && <span className="tag">{t("默认", "Default")}</span>}
+                        {m.label} {m.is_default && <span className="tag">{t("默认", "Default")}</span>} {m.use_for_summaries && <span className="tag" title={t("负责整理长对话的历史摘要", "Writes the history summaries of long chats")}>{t("摘要", "Summaries")}</span>}
                       </div>
                       <div className="k">
                         {m.protocol === 'anthropic' ? 'Anthropic' : t('OpenAI 兼容', 'OpenAI compatible')} · {m.llm_model}

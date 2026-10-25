@@ -76,6 +76,7 @@ _ADDED_COLUMNS = {
         "max_tokens": "INTEGER NOT NULL DEFAULT 4096",
         "context_window": "INTEGER NOT NULL DEFAULT 32768",
         "target_input_tokens": "INTEGER",  # Nullable: existing models use the automatic target.
+        "use_for_summaries": "BOOLEAN NOT NULL DEFAULT 0",  # Answers summarize with their own.
     },
     "node": {
         "kind": "TEXT NOT NULL DEFAULT 'followup'",

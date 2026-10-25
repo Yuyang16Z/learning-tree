@@ -17,6 +17,8 @@ class ModelConfigIn(BaseModel):
     # Soft target for one request's input; None = automatic. Compaction starts at it.
     target_input_tokens: int | None = Field(default=None, ge=16384, le=2097152)
     is_default: bool = False
+    # Write every answer's context summaries with this model (at most one model).
+    use_for_summaries: bool = False
 
     @model_validator(mode="after")
     def validate_context_budget(self):
@@ -56,6 +58,7 @@ class ModelConfigOut(BaseModel):
     context_window: int = 32768
     target_input_tokens: int | None = None
     is_default: bool
+    use_for_summaries: bool = False
 
 
 class TreeIn(BaseModel):
