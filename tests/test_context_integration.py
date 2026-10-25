@@ -1204,7 +1204,8 @@ def test_memory_sources_are_announced_once_persisted_and_kept_out_of_exports(api
     assert announced == [note.sources[0]], "only records that reached the prompt are reported"
     assert "只有收到明确授权才执行" in calls["stream"][0][1]
     rows = client.get("/nodes/2/thread").json()["nodes"]
-    assert rows[-1]["sources"] == [note.sources[0]]
+    # Shown later, an entry also says whether the learner has since muted that memory.
+    assert rows[-1]["sources"] == [{**note.sources[0], "muted": False}]
     assert "sources" not in json.dumps(client.get("/trees/1/export").json())
     with Session(engine) as session:
         answer = session.exec(select(Message).where(Message.node_id == 2)).all()[-1]

@@ -168,6 +168,7 @@ def _candidates(
                 Memory.tree_id == tree_id,
                 Memory.source_node_id.in_(source_ids),
                 Memory.superseded_by.is_(None),
+                Memory.muted.is_(False),
                 Node.tree_id == tree_id,
                 Node.status.not_in(_INVALID_SOURCE_STATES),
             )
@@ -185,6 +186,7 @@ def _candidates(
                     Memory.tree_id == tree_id,
                     Memory.source_node_id.not_in(source_ids),
                     Memory.superseded_by.is_(None),
+                    Memory.muted.is_(False),
                     Node.tree_id == tree_id,
                     Node.status.not_in(_INVALID_SOURCE_STATES),
                 )
@@ -210,6 +212,7 @@ def _candidates(
                     Memory.kind == "fact",
                     Memory.tree_id != tree_id,
                     Memory.superseded_by.is_(None),
+                    Memory.muted.is_(False),
                     Node.tree_id == Memory.tree_id,
                     Node.status.not_in(_INVALID_SOURCE_STATES),
                     KnowledgeTree.archived.is_(False),
@@ -374,7 +377,7 @@ def _recall_supplements(session, tree_id, profile, legacy, config) -> list[Prefe
 
 def _still_in_scope(fresh: Session, row: Memory, item: MemoryHit, tree_id, source_ids) -> bool:
     """Recheck a fact against current records according to the scope it was found in."""
-    if row.superseded_by is not None:
+    if row.superseded_by is not None or row.muted:
         return False
     if item.scope == "path":
         return (

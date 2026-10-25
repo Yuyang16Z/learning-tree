@@ -234,6 +234,9 @@ export const api = {
   updateMemory: (id: number, body: { content: string; expected_content: string }) =>
     fetch(`${API}/memories/${id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(j<MemoryFact>),
   deleteMemories: (ids: number[]) => jsonPost(`${API}/memories/delete`, { ids }).then(j<{ deleted: number }>),
+  /** Stop a fact from being used in answers (muted), or use it again. */
+  setMemoryMuted: (id: number, muted: boolean) =>
+    fetch(`${API}/memories/${id}/use`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ muted }) }).then(j<MemoryFact>),
   memoryRetrievalStatus: (signal?: AbortSignal) =>
     fetch(`${API}/memories/retrieval/status`, { signal }).then(j<MemoryRetrievalStatus>),
   prepareMemoryRetrieval: (signal?: AbortSignal) =>

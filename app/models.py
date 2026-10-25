@@ -74,6 +74,9 @@ class Memory(SQLModel, table=True):
     origin: str = Field(
         default="legacy", sa_column=Column(String, nullable=False, default="legacy")
     )
+    # The learner stopped this fact from being used in answers. It stays listed and
+    # searchable in Settings and the map, and can be used again.
+    muted: bool = False
 
 
 class MemoryEmbedding(SQLModel, table=True):

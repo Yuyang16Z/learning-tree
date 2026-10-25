@@ -208,6 +208,16 @@ with Session(engine) as session:
     await poll(async () => (await api(`/memories/facts?tree_id=${trees[1].id}`)).total === 4, 'only selected facts deleted');
     checks.push('Inline fact editing and selected-only bulk deletion update the actual backend');
 
+    // A fact can be kept out of answers without deleting it, and used again.
+    const factsOf = async () => (await api(`/memories/facts?tree_id=${trees[1].id}`)).items;
+    await rows.first().getByRole('button', { name: 'Stop using memory', exact: true }).click();
+    await poll(async () => (await factsOf()).filter(item => item.muted).length === 1, 'fact muted');
+    await rows.first().locator('.memory-pending', { hasText: 'Not used' }).waitFor();
+    assert.equal((await factsOf()).length, 4, 'A muted fact stays listed');
+    await rows.first().getByRole('button', { name: 'Use memory again', exact: true }).click();
+    await poll(async () => !(await factsOf()).some(item => item.muted), 'fact used again');
+    checks.push('A fact can be stopped from reaching answers and used again from memory settings, and stays listed');
+
     const supplements = page.getByTestId('preference-supplements');
     const supplementRows = page.getByTestId('preference-supplement');
     const additionsButton = supplements.getByRole('button', { name: /^AI additions ·/ });
@@ -366,6 +376,29 @@ with Session(engine) as session:
     await page.getByRole('heading', { name: trees[1].title, exact: true, level: 1 }).waitFor();
     await page.unroute(`**/api/nodes/${ownRoot}/thread`);
     checks.push('Referenced chips whose topic or node was deleted are disabled or report the deletion and keep the current topic; live sources still open');
+
+    // A Referenced chip of a real memory can keep that memory out of later answers.
+    // Every page load opens the first topic (see the init script), so its root shows the answer.
+    const realFact = (await api(`/memories/facts?tree_id=${trees[0].id}`)).items[0];
+    const factOf = async () => (await api(`/memories/facts?tree_id=${trees[0].id}&page_size=100`)).items.find(item => item.id === realFact.id);
+    const chipThread = `**/api/nodes/${ownRoot}/thread`;
+    await page.route(chipThread, async route => {
+      const response = await route.fetch();
+      const body = await response.json();
+      body.nodes = body.nodes.map(row => row.node_id === ownRoot
+        ? { ...row, question: 'Which memory shaped this answer?', answer: 'A synthetic answer.', status: 'complete', sources: [{ memory_id: realFact.id, source_node_id: realFact.source_node_id, tree_id: trees[0].id, tree_title: trees[0].title, scope: 'path', muted: false }] }
+        : row);
+      await route.fulfill({ response, json: body });
+    });
+    await page.reload();
+    await page.getByRole('heading', { name: trees[0].title, exact: true, level: 1 }).waitFor();
+    await page.getByRole('button', { name: `Stop using memory ${realFact.id}`, exact: true }).click();
+    await poll(async () => (await factOf()).muted === true, 'chip muted the fact');
+    await page.locator('.chat-sources .chat-source-link', { hasText: 'not used' }).waitFor();
+    await page.getByRole('button', { name: `Use memory ${realFact.id} again`, exact: true }).click();
+    await poll(async () => (await factOf()).muted === false, 'chip used the fact again');
+    await page.unroute(chipThread);
+    checks.push('A Referenced chip keeps its memory out of later answers and can use it again');
 
     // Malformed stored data must not blank the app: bad source entries are dropped, and a value
     // that still breaks the conversation shows a fallback while the rest of the workspace works.

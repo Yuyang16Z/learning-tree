@@ -100,6 +100,8 @@ export interface AnswerSource {
   tree_id: number | null;
   tree_title: string;
   scope: 'path' | 'tree' | 'other';
+  /** The learner has since stopped this memory from being used in answers (read live). */
+  muted?: boolean;
 }
 /**
  * One topic search result. Question (user message) and message (answer) hits carry the message id,
@@ -226,6 +228,8 @@ export interface MemoryFact extends Memory {
   fact_type?: FactType | string;
   /** Id of the later fact that corrected this one; such facts no longer reach answers. */
   superseded_by?: number | null;
+  /** The learner stopped this fact from being used in answers; it stays listed. */
+  muted?: boolean;
 }
 export interface MemoryFactsPage {
   items: MemoryFact[];

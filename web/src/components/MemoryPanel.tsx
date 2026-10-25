@@ -146,6 +146,18 @@ export function MemoryPanel({ onDirtyChange, onBusyChange, onOpenSource }: Props
     } finally { setMutation(false); }
   }
 
+  async function setFactMuted(fact: MemoryFact, muted: boolean) {
+    if (mutation) return;
+    setMutation(true);
+    setActionError("");
+    try {
+      await api.setMemoryMuted(fact.id, muted);
+      setFactsReload(value => value + 1);
+      setActionNotice(muted ? t("已停用：以后的回答不再使用这条记忆", "Stopped: later answers will not use this memory") : t("已恢复使用这条记忆", "This memory is used again"));
+    } catch (error) { setActionError(errorMessage(error)); }
+    finally { setMutation(false); }
+  }
+
   async function deleteFacts(ids: number[]) {
     if (!ids.length || mutation) return;
     if (!window.confirm(t("删除选中的 {count} 条话题记忆？此操作不可撤销，原始对话会保留。", "Delete {count} selected topic memories? This cannot be undone. Original conversations will remain.", { count: ids.length }))) return;
@@ -237,10 +249,11 @@ export function MemoryPanel({ onDirtyChange, onBusyChange, onOpenSource }: Props
                       <button className={`memory-fact-preview${isExpanded ? " expanded" : ""}`} aria-expanded={isExpanded} title={t("展开 / 收起记忆", "Expand / collapse memory")}
                         onClick={() => setExpanded(values => isExpanded ? values.filter(id => id !== fact.id) : [...values, fact.id])}>{fact.content}</button>
                       <div className="memory-fact-footer">
-                        <span className="memory-fact-meta"><span className="memory-scope" data-fact-type={fact.fact_type ?? "conclusion"}>{t(...factTypeLabel(fact.fact_type))}</span>{fact.superseded_by != null && <span className="memory-pending" title={t("这条记忆已被后来的事实更新，不再进入回答。", "A later fact replaced this one; it no longer reaches answers.")}>{t("已更新", "Superseded")}</span>}<span className="memory-topic" title={fact.tree_title ?? undefined}>{fact.tree_title || t("未归属话题", "Unassigned topic")}</span></span>
+                        <span className="memory-fact-meta"><span className="memory-scope" data-fact-type={fact.fact_type ?? "conclusion"}>{t(...factTypeLabel(fact.fact_type))}</span>{fact.superseded_by != null && <span className="memory-pending" title={t("这条记忆已被后来的事实更新，不再进入回答。", "A later fact replaced this one; it no longer reaches answers.")}>{t("已更新", "Superseded")}</span>}{fact.muted && <span className="memory-pending" title={t("你已停用这条记忆，它不再进入回答。", "You stopped using this memory; it no longer reaches answers.")}>{t("已停用", "Not used")}</span>}<span className="memory-topic" title={fact.tree_title ?? undefined}>{fact.tree_title || t("未归属话题", "Unassigned topic")}</span></span>
                         <div className="memory-actions">
                           {fact.tree_id !== null && <button className="memory-text-btn" aria-label={t("查看来源", "View source")} disabled={mutation || !!editing} onClick={() => onOpenSource(fact.tree_id!, fact.source_node_id)}>{t("来源 ↗", "Source ↗")}</button>}
                           <button className="memory-text-btn" aria-label={t("编辑记忆", "Edit memory")} disabled={mutation || !!editing} onClick={() => { setEditing(fact); setFactDraft(fact.content); setActionError(""); setActionNotice(""); }}>{t("编辑", "Edit")}</button>
+                          <button className="memory-text-btn" aria-label={fact.muted ? t("恢复使用记忆", "Use memory again") : t("停用记忆", "Stop using memory")} disabled={mutation || !!editing} onClick={() => void setFactMuted(fact, !fact.muted)}>{fact.muted ? t("恢复使用", "Use again") : t("停用", "Stop using")}</button>
                           <button className="memory-text-btn memory-delete" disabled={mutation || !!editing} onClick={() => void deleteFacts([fact.id])}>{t("删除", "Delete")}</button>
                         </div>
                       </div>

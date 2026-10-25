@@ -113,7 +113,9 @@ def entry(ids, name, scope, *, title=True):
         "scope": scope,
     }
     if title:
+        # Read with the live records: the topic's title and whether the fact is muted.
         value["tree_title"] = SECRET if tree == "b" else "Topic A"
+        value["muted"] = False
     return value
 
 

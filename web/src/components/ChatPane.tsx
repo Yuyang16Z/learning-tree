@@ -218,9 +218,18 @@ function DiagnosticsBlock({ data }: { data?: AnswerDiagnostics | null }) {
     {[timing(t("检索", "Retrieval"), data.timings_ms.retrieval), timing(t("整理", "Summary"), data.timings_ms.summary), timing(t("模型", "Model"), data.timings_ms.model), timing(t("工具", "Tools"), data.timings_ms.tools), timing(t("总计", "Total"), data.timings_ms.total)].join(" · ")}
   </div></details>;
 }
-function SourcesLine({ sources, view, onNavigate, onOpenSource }: { sources: AnswerSource[]; view: SourceView; onNavigate: (id: number) => void; onOpenSource?: (treeId: number, nodeId: number | null) => void }) {
+/** Memories stopped or used again from Referenced lines, until the stored answers reload. */
+type MutedMemories = Readonly<Record<number, boolean>>;
+function SourcesLine({ sources, view, onNavigate, onOpenSource, muted = {}, onUse }: { sources: AnswerSource[]; view: SourceView; onNavigate: (id: number) => void; onOpenSource?: (treeId: number, nodeId: number | null) => void; muted?: MutedMemories; onUse?: (memoryId: number, muted: boolean) => Promise<void> }) {
   const { t } = useI18n();
+  const [busy, setBusy] = useState<number | null>(null);
+  const [failed, setFailed] = useState(false);
   if (!sources.length) return null;
+  async function toggle(memoryId: number, next: boolean) {
+    if (busy !== null || !onUse) return;
+    setBusy(memoryId); setFailed(false);
+    try { await onUse(memoryId, next); } catch { setFailed(true); } finally { setBusy(null); }
+  }
   return <div className="chat-sources"><span>{t("参考了：", "Referenced: ")}</span>{sources.map(source => {
     const label = source.scope === "other"
       ? t("「{title}」记忆 {id}", "“{title}” memory {id}", { title: source.tree_title, id: source.memory_id })
@@ -228,13 +237,17 @@ function SourcesLine({ sources, view, onNavigate, onOpenSource }: { sources: Ans
     const link = sourceLink(source, view);
     const title = link.kind === "open" ? t("打开来源节点 {node}", "Open source node {node}", { node: link.nodeId })
       : link.kind === "deleted" ? t("来源已删除", "Source deleted") : t("没有可打开的来源节点", "No source node to open");
+    const isMuted = muted[source.memory_id] ?? source.muted ?? false;
     // The opener checks the source again, since it may be deleted after this list was drawn.
-    return <button type="button" key={source.memory_id} className={`chat-source-link${link.kind === "deleted" ? " is-deleted" : ""}`} disabled={link.kind !== "open"} title={title} onClick={() => {
+    return <span className="chat-source" key={source.memory_id}><button type="button" className={`chat-source-link${link.kind === "deleted" ? " is-deleted" : ""}${isMuted ? " is-muted" : ""}`} disabled={link.kind !== "open"} title={title} onClick={() => {
       if (link.kind !== "open") return;
       if (onOpenSource) onOpenSource(link.treeId, link.nodeId);
       else onNavigate(link.nodeId);
-    }}>{label}</button>;
-  })}</div>;
+    }}>{label}{isMuted ? t(" · 已停用", " · not used") : ""}</button>{onUse && link.kind !== "deleted" && <button type="button" className="chat-source-mute" disabled={busy !== null}
+      aria-label={isMuted ? t("恢复使用记忆 {id}", "Use memory {id} again", { id: source.memory_id }) : t("不再使用记忆 {id}", "Stop using memory {id}", { id: source.memory_id })}
+      title={isMuted ? t("以后的回答可以再次使用这条记忆", "Let later answers use this memory again") : t("以后的回答不再使用这条记忆；它仍保留在设置的记忆页里，可以恢复", "Keep this memory out of later answers; it stays in Settings → Memory, where you can use it again")}
+      onClick={() => void toggle(source.memory_id, !isMuted)}>{isMuted ? t("恢复", "Use again") : "×"}</button>}</span>;
+  })}{failed && <span className="test-bad" role="alert">{t("没有保存，请重试。", "Not saved. Please try again.")}</span>}</div>;
 }
 /** The learner's own mark for a node. Arrow keys move focus only; a click or Space saves. */
 function UnderstandingControl({ value, disabled, saving, onChange }: { value: Understanding | null; disabled: boolean; saving: boolean; onChange: (value: Understanding | null) => void }) {
@@ -554,6 +567,11 @@ export function ChatPane(props: Props) {
 
   // An answer from another window or device grows through background reloads.
   const answeringElsewhere = thread.some(node => node.status === "pending");
+  const [mutedMemories, setMutedMemories] = useState<MutedMemories>({});
+  async function setMemoryMuted(memoryId: number, muted: boolean) {
+    await api.setMemoryMuted(memoryId, muted);
+    setMutedMemories(current => ({ ...current, [memoryId]: muted }));
+  }
   useLayoutEffect(() => {
     if (answeringElsewhere && !showStream && stickToBottom.current && scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [thread, answeringElsewhere, showStream]);
@@ -852,7 +870,7 @@ export function ChatPane(props: Props) {
             {!loading && !visibleThread.length && !showStream && <div className="chat-welcome"><span className="chat-eyebrow">{focusedSeed ? t("从这里展开", "Explore from here") : t("新的起点", "A fresh start")}</span><h2>{focusedSeed ? `「${focusedSeed}」` : treeTitle}</h2><p>{t("想先弄懂什么？", "What would you like to understand first?")}</p></div>}
             {visibleThread.map((node, index) => <section className="chat-turn" data-turn-node={node.node_id} data-turn-key={turnKey(node, index)} key={turnKey(node, index)}>
               <div className="chat-question"><LearningStyleTag id={node.learning_preset} presets={learningPresets} /><ImageStrip images={node.images ?? []} /><DocumentCards documents={node.documents ?? []} /><div data-message-id={node.question_message_id ?? undefined}>{node.question}</div><div className="chat-question-actions"><CopyButton text={node.question ?? ""} label={t("复制问题", "Copy question")} /><button onClick={() => editNode(node)} disabled={streaming || attachmentsBusy || node.status === "pending"} title={t("编辑后生成新版本，保留原有问答与分支", "Create a new version while keeping the original conversation and branches")}>{t("编辑", "Edit")}</button></div></div>
-              {node.answer != null && <div className="chat-answer"><div className="chat-answer-label"><span className="chat-answer-dot" />{node.answered_by ?? "AI"}{node.status === "error" || node.status === "interrupted" ? <span>{t("· 未完成", "· Incomplete")}</span> : null}</div><ReasoningBlock text={node.reasoning ?? ""} /><ToolSteps steps={node.steps ?? []} mcpServers={mcpServers} nodeId={node.node_id} /><div className="chat-markdown" data-answer-node={node.node_id} data-message-id={node.answer_message_id ?? undefined} tabIndex={0}><Markdown text={node.answer} /></div><SourcesLine sources={node.sources ?? []} view={sourceView} onNavigate={openSource} onOpenSource={onOpenSource} />{node.answer.trim() && <div className="chat-answer-actions"><CopyButton text={node.answer} label={t("复制回答", "Copy answer")} /><button onClick={() => void branchAnswer(node)} disabled={branching || streaming || loading} title={t("从这条回答展开一个新的问题", "Explore a new question from this answer")}><Icon name="tree" />{t("新分支", "New branch")}</button></div>}<DiagnosticsBlock data={node.diagnostics} /></div>}
+              {node.answer != null && <div className="chat-answer"><div className="chat-answer-label"><span className="chat-answer-dot" />{node.answered_by ?? "AI"}{node.status === "error" || node.status === "interrupted" ? <span>{t("· 未完成", "· Incomplete")}</span> : null}</div><ReasoningBlock text={node.reasoning ?? ""} /><ToolSteps steps={node.steps ?? []} mcpServers={mcpServers} nodeId={node.node_id} /><div className="chat-markdown" data-answer-node={node.node_id} data-message-id={node.answer_message_id ?? undefined} tabIndex={0}><Markdown text={node.answer} /></div><SourcesLine sources={node.sources ?? []} view={sourceView} onNavigate={openSource} onOpenSource={onOpenSource} muted={mutedMemories} onUse={setMemoryMuted} />{node.answer.trim() && <div className="chat-answer-actions"><CopyButton text={node.answer} label={t("复制回答", "Copy answer")} /><button onClick={() => void branchAnswer(node)} disabled={branching || streaming || loading} title={t("从这条回答展开一个新的问题", "Explore a new question from this answer")}><Icon name="tree" />{t("新分支", "New branch")}</button></div>}<DiagnosticsBlock data={node.diagnostics} /></div>}
               {node.status === "pending" && <div className="chat-retry chat-remote-answer" role="status"><span className="chat-answer-dot is-loading" /><span>{t("正在回答，完成前会自动更新", "Responding. This updates automatically until it finishes.")}</span>{onStopNode && <button onClick={() => onStopNode(node.node_id)}>{t("停止", "Stop")}</button>}</div>}
               {!!node.attempts?.length && <details className="chat-reasoning chat-prior-attempts"><summary>{t("之前的未完成回答（{count}）", "Previous incomplete responses ({count})", { count: node.attempts.length })}</summary>{node.attempts.map(attempt => <div className="chat-markdown" data-answer-node={node.node_id} data-message-id={attempt.message_id} key={attempt.message_id}><Markdown text={attempt.content || t("未收到内容", "No content received")} /></div>)}</details>}
               {(node.status === "error" || node.status === "interrupted") && <div className="chat-retry"><span>{node.status === "interrupted" ? t("回答已停止", "Response stopped") : t("这次回答未完成", "This response is incomplete")}</span><button onClick={() => void send(node)} disabled={streaming || noModel}>{t("重试", "Retry")}</button>{node.error && <details><summary>{t("详情", "Details")}</summary><p>{localizeError(node.error, locale)}</p></details>}</div>}
