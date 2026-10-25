@@ -76,8 +76,9 @@ follow-up itself. The report compares its UTF-8 byte count with
 `estimate_text_tokens`, gives summary statistics and the bytes per estimated
 unit, and counts the paths that would be compacted under each estimator with
 the default 32,768-token window and 4,096-token answer reserve and with a
-1,048,576-token window, using your `CONTEXT_COMPACTION_RATIO`. These are local
-estimates, not provider token counts.
+1,048,576-token window, using your `CONTEXT_COMPACTION_RATIO` and the automatic
+request size target (131,072 tokens, which decides compaction on the large
+window). These are local estimates, not provider token counts.
 
 **Memory retrieval.** Every completed question is replayed through
 `retrieve_memory` with its node's learning path, quoted passage and note, once
@@ -192,8 +193,8 @@ UTF-8 字节计数、回放真实问题的记忆检索、检查主题全文搜�
   指向副本，从不导入 `app.main`；旧版本数据库只在副本上做增量迁移，原文件字节不变。
 - **估算器**：每个有已完成回答的节点对应一条学习路径（系统提示加上从根到该节点的全部已完成问答，
   不含记忆、文档摘录、工具定义和新问题）。报告给出字节数与 `estimate_text_tokens` 的统计、
-  每单位字节数，以及在默认 32,768/4,096 窗口和 1,048,576 窗口下、按当前压缩比例各有多少路径会被
-  压缩。这些都是本地估算，不是服务商的 token 计数。
+  每单位字节数，以及在默认 32,768/4,096 窗口和 1,048,576 窗口下、按当前压缩比例和自动的单次请求目标
+  （131,072，大窗口下由它决定何时压缩）各有多少路径会被压缩。这些都是本地估算，不是服务商的 token 计数。
 - **记忆检索**：每个已完成问题按 path、tree、all 三种范围（写入副本的检索设置）用其学习路径、
   引用和笔记回放 `retrieve_memory`，且只看到提问时已存在、尚未被更正替代的事实。报告记录返回
   事实的来源和类型、模式、是否重排、耗时，并用两类代理标签计算 recall@k、hit rate@k 和 MRR@k：

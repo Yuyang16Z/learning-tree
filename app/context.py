@@ -173,11 +173,16 @@ def build_context(
     )
     schema_reserve = max(0, tool_schema_budget - tool_schema_cost)
     # Mandatory input is judged against the hard budget. Compaction starts, and
-    # compacted context is filled, at the policy's compaction share of the room
-    # left after reserves: this equals policy.compaction_budget when nothing is
-    # reserved and never collapses to zero on small windows with tool reserves.
+    # compacted context is filled, at the lower of two limits: the compaction share
+    # of the room left after reserves (which never collapses to zero on small
+    # windows with tool reserves) and the soft target minus the same reserves, so
+    # the first request leaves tool results room inside the target. Both equal
+    # policy.compaction_budget when nothing is reserved.
     hard_budget = policy.input_budget - tool_reserve - schema_reserve
-    assembly_budget = int(hard_budget * policy.compaction_ratio)
+    assembly_budget = min(
+        int(hard_budget * policy.compaction_ratio),
+        max(0, policy.target_budget - tool_reserve - schema_reserve),
+    )
     ancestors = [(n, ms) for n, ms in ancestors if n.tree_id == current.tree_id]
     sources = ancestors + [(current, current_messages)]
     units = _units(sources)

@@ -31,6 +31,7 @@ def to_spec(cfg: ModelConfig, session: Session | None = None) -> LLMSpec:
         max_tokens=cfg.max_tokens,
         context_window=cfg.context_window,
         calibration=load_calibration(session, cfg.id),
+        target_input_tokens=cfg.target_input_tokens,
     )
 
 

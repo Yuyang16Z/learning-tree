@@ -23,6 +23,8 @@ class ModelConfig(SQLModel, table=True):
     )
     max_tokens: int = 4096
     context_window: int = 32768
+    # Soft target for one request's input in tokens; None = automatic (ContextPolicy).
+    target_input_tokens: int | None = None
     is_default: bool = False
     created_at: datetime = Field(default_factory=_now)
 
@@ -31,8 +33,8 @@ class ModelCalibration(SQLModel, table=True):
     """Learned ratio between provider-reported and locally estimated input tokens.
 
     Side data outside the change feed: it is updated after answers, so it must not
-    make every open window reload the model list. Label, key, window and reserve edits
-    keep it; it is deleted with its model or when an edit switches the model's protocol,
+    make every open window reload the model list. Label, key, window, reserve and target
+    edits keep it; it is deleted with its model or when an edit switches the model's protocol,
     address or name, and writes require the model to exist (ids are reused)."""
 
     config_id: int = Field(primary_key=True)

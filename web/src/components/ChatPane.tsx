@@ -177,7 +177,7 @@ function DiagnosticsBlock({ data }: { data?: AnswerDiagnostics | null }) {
   const timing = (label: string, ms: number | undefined) => `${label} ${((ms ?? 0) / 1000).toFixed(2)} s`;
   return <details className="chat-reasoning chat-diagnostics"><summary>{summary}</summary><div>
     {total && <>{total}{"\n"}</>}
-    {t("输出 {tokens} tokens", "Output {tokens} tokens", { tokens: n(data.output_tokens) })} · {data.compacted ? t("历史已压缩", "History compacted") : t("历史完整", "Full history")} · {t("校准系数 {ratio}", "Calibration ratio {ratio}", { ratio: (data.calibration_ratio ?? 1).toFixed(2) })}{"\n"}
+    {t("输出 {tokens} tokens", "Output {tokens} tokens", { tokens: n(data.output_tokens) })} · {data.compacted ? t("历史已压缩", "History compacted") : t("历史完整", "Full history")} · {t("校准系数 {ratio}", "Calibration ratio {ratio}", { ratio: (data.calibration_ratio ?? 1).toFixed(2) })}{typeof data.target_input_tokens === "number" ? t(" · 单次目标 {tokens} tokens", " · Request target {tokens} tokens", { tokens: n(data.target_input_tokens) }) : ""}{"\n"}
     {[timing(t("检索", "Retrieval"), data.timings_ms.retrieval), timing(t("整理", "Summary"), data.timings_ms.summary), timing(t("模型", "Model"), data.timings_ms.model), timing(t("工具", "Tools"), data.timings_ms.tools), timing(t("总计", "Total"), data.timings_ms.total)].join(" · ")}
   </div></details>;
 }

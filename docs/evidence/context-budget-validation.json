@@ -6,7 +6,9 @@
     "output_tokens": 4096,
     "calibration": 1.0,
     "compaction_ratio": 0.6,
+    "target_tokens": null,
     "input_budget": 27034,
+    "target_budget": 27034,
     "compaction_budget": 16220
   },
   "long_path": {

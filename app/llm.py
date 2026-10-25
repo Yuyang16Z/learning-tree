@@ -48,6 +48,8 @@ class LLMSpec:
     context_window: int = 32768
     # Learned ratio of provider-reported to locally estimated input tokens (1.0 = unknown).
     calibration: float = 1.0
+    # Soft target for one request's input (None = automatic); see ContextPolicy.
+    target_input_tokens: int | None = None
     # Per-request stable head of the system prompt that native caching may mark;
     # prompt text, so it is kept out of reprs and set only on request copies.
     cache_prefix: str | None = field(default=None, repr=False, compare=False)

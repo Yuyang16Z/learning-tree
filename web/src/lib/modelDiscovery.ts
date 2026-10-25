@@ -4,6 +4,25 @@ import type { ModelDiscovery, ModelProtocol } from "../types";
 export const CONTEXT_WINDOW_MIN = 8192;
 export const CONTEXT_WINDOW_MAX = 2097152;
 
+/** Request size targets the model form accepts (blank = automatic); the API validates the same range. */
+export const TARGET_INPUT_MIN = 16384;
+/** The automatic target, mirroring AUTO_TARGET_TOKENS in app/context_budget.py. */
+export const AUTO_TARGET_INPUT = 131072;
+
+/** A blank field means the automatic target. */
+export function parseTargetInput(text: string): number | null {
+  return text.trim() === "" ? null : Number(text);
+}
+
+export function validTargetInput(target: number | null, window: number): boolean {
+  return target === null || (Number.isInteger(target) && target >= TARGET_INPUT_MIN && target <= window);
+}
+
+/** The target a request is held to: the configured one, or the automatic one capped at the window. */
+export function effectiveTarget(target: number | null, window: number): number {
+  return Math.min(target ?? AUTO_TARGET_INPUT, window);
+}
+
 /** The model a detection asked about. */
 export interface DetectionRequest { protocol: ModelProtocol; base_url: string; llm_model: string; api_key: string }
 

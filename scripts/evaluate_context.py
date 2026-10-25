@@ -182,6 +182,7 @@ def evaluate() -> dict:
         "policy": {
             **asdict(policy),
             "input_budget": policy.input_budget,
+            "target_budget": policy.target_budget,
             "compaction_budget": policy.compaction_budget,
         },
         "long_path": long_path,
