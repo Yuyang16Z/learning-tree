@@ -24,6 +24,7 @@ def _out(cfg: ModelConfig) -> ModelConfigOut:
         protocol=cfg.protocol,
         max_tokens=cfg.max_tokens,
         context_window=cfg.context_window,
+        target_input_tokens=cfg.target_input_tokens,
         is_default=cfg.is_default,
     )
 
@@ -54,7 +55,7 @@ def _endpoint(protocol: str, url: str) -> str | None:
 
 def _identity(cfg: ModelConfig) -> tuple:
     """What a calibration ratio is learned for: the protocol, address and model name.
-    Label, key, window and answer reserve edits keep the ratio."""
+    Label, key, window, answer reserve and target edits keep the ratio."""
     return (cfg.protocol, _endpoint(cfg.protocol, cfg.base_url), cfg.llm_model.strip())
 
 

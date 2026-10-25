@@ -661,7 +661,7 @@ export default function App() {
       llm_model: "mock",
       api_key: "mock",
       is_default: models.length === 0,
-      protocol: 'openai', max_tokens: 4096, context_window: 32768,
+      protocol: 'openai', max_tokens: 4096, context_window: 32768, target_input_tokens: null,
     });
     await loadModels();
   }

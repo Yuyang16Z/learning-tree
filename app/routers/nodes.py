@@ -1227,6 +1227,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 # "time" or "tokens" when an agent budget ended the tool rounds early.
                 "tool_budget_stop": usage.get("tool_budget_stop"),
                 "calibration_ratio": round(float(spec.calibration), 3),
+                # The soft request target in tokens (configured or automatic).
+                "target_input_tokens": ContextPolicy.from_spec(spec).effective_target_tokens,
                 "timings_ms": {
                     "retrieval": ms(timings["retrieval"]),
                     "tools": ms(timings["tools"]),
@@ -1345,7 +1347,7 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             schema_room = max(0, policy.input_budget - policy.tool_reserve - core_cost - 512)
             schema_budget = min(
                 schema_room,
-                max(policy.input_budget // 3, tool_definition_cost([*pinned, SEARCH_TOOL_DEF])),
+                max(policy.schema_allowance, tool_definition_cost([*pinned, SEARCH_TOOL_DEF])),
             )
             if context_defs and needs_catalog(context_defs, schema_budget):
                 tool_catalog = ToolCatalog(

@@ -2,7 +2,7 @@ import { useId, useRef, useState } from "react";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import { localizeError } from "../i18n/workspace";
-import { CONTEXT_WINDOW_MAX, CONTEXT_WINDOW_MIN, detectedWindow, detectionRequest, sameDetection } from "../lib/modelDiscovery";
+import { CONTEXT_WINDOW_MAX, CONTEXT_WINDOW_MIN, TARGET_INPUT_MIN, detectedWindow, detectionRequest, effectiveTarget, parseTargetInput, sameDetection, validTargetInput } from "../lib/modelDiscovery";
 import type { ModelCfg, ModelDiscovery, ModelInput, ModelProtocol } from "../types";
 
 interface Props {
@@ -25,6 +25,7 @@ export function AddModelModal({ isFirst, model, onClose, onAdd }: Props) {
     api_key: "",
     max_tokens: model?.max_tokens ?? 4096,
     context_window: model?.context_window ?? 32768,
+    target_input_tokens: model?.target_input_tokens ?? null,
     is_default: model?.is_default ?? isFirst,
   });
   const [busy, setBusy] = useState(false);
@@ -92,6 +93,9 @@ export function AddModelModal({ isFirst, model, onClose, onAdd }: Props) {
     if (payload.context_window - payload.max_tokens - Math.max(512, Math.floor(payload.context_window / 20)) < 1024) {
       setError(t("扣除回答预留和预算余量后，须至少保留 1024 的输入空间。", "Context window must exceed the answer reserve plus headroom by at least 1024.")); return;
     }
+    if (!validTargetInput(payload.target_input_tokens, payload.context_window)) {
+      setError(t("单次请求目标应为 16384 到上下文窗口之间的整数；留空则自动。", "The request size target must be an integer between 16384 and the context window; leave it blank for automatic.")); return;
+    }
     setBusy(true);
     try { await onAdd(payload); onClose(); }
     catch (cause) { setError(cause instanceof Error ? cause.message : t("保存失败，请重试。", "Could not save. Please try again.")); }
@@ -124,6 +128,11 @@ export function AddModelModal({ isFirst, model, onClose, onAdd }: Props) {
           <label htmlFor={`${id}-tokens`}>{form.protocol === "anthropic" ? t("最大输出长度（tokens）", "Max output tokens") : t("回答预留（tokens）", "Answer reserve (tokens)")}</label>
           <input id={`${id}-tokens`} type="number" min={1} max={131072} step={1} value={form.max_tokens || ""} onChange={event => setForm(current => ({ ...current, max_tokens: Number(event.target.value) }))} disabled={busy} />
           {form.protocol === "openai" && <div className="hint">{t("用于本地输入预算；实际输出长度由服务商控制。", "Used for the local input budget; actual output length is controlled by the provider.")}</div>}
+        </div>
+        <div className="field">
+          <label htmlFor={`${id}-target`}>{t("单次请求目标（tokens）", "Request size target (tokens)")}</label>
+          <input id={`${id}-target`} type="number" min={TARGET_INPUT_MIN} max={form.context_window || CONTEXT_WINDOW_MAX} step={1} placeholder={t("自动：{tokens}", "Automatic: {tokens}", { tokens: effectiveTarget(null, form.context_window || CONTEXT_WINDOW_MAX) })} value={form.target_input_tokens ?? ""} onChange={event => setForm(current => ({ ...current, target_input_tokens: parseTargetInput(event.target.value) }))} disabled={busy} />
+          <div className="hint">{t("一次提问的输入超过这个大小时，先压缩较早的历史，窗口很大时也能控制每次的用量；工具结果和必须保留的内容仍可用到整个窗口。留空则自动使用 131072 与窗口中的较小值。", "Older history is compacted once a question's input would exceed this size, which keeps each request affordable on very large windows; tool results and required content may still use the whole window. Leave blank to use 131072 or the window, whichever is smaller.")}</div>
         </div>
       </details>
       {error && <div className="test-bad" role="alert">{localizeError(error, locale)}</div>}

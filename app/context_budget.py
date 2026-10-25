@@ -45,6 +45,11 @@ class ContextBudgetExceeded(ValueError):
         super().__init__(message)
 
 
+# Automatic soft target for one request's input: large windows do not make every
+# question carry hundreds of thousands of tokens. A model setting can raise or lower it.
+AUTO_TARGET_TOKENS = 131_072
+
+
 @dataclass(frozen=True)
 class ContextPolicy:
     window_tokens: int = 32768
@@ -53,6 +58,9 @@ class ContextPolicy:
     calibration: float = 1.0
     # Share of the input budget at which history is compacted (Settings.context_compaction_ratio).
     compaction_ratio: float = 0.6
+    # Soft target for one request's input in tokens (ModelConfig.target_input_tokens);
+    # None means AUTO_TARGET_TOKENS. A target at or above the window sets no cap.
+    target_tokens: int | None = None
 
     @property
     def raw_input_budget(self) -> int:
@@ -67,10 +75,31 @@ class ContextPolicy:
         return int(raw / self.calibration) if self.calibration > 1 else raw
 
     @property
+    def effective_target_tokens(self) -> int:
+        """The soft target in tokens as configured or automatic, capped at the window."""
+        target = AUTO_TARGET_TOKENS if self.target_tokens is None else self.target_tokens
+        return min(target, self.window_tokens)
+
+    @property
+    def target_budget(self) -> int:
+        """The soft target in estimate units: the same calibration as the hard budget,
+        never above it. Only compaction and tool-schema room follow it; fit_request keeps
+        enforcing input_budget, so a request is never refused for exceeding the target."""
+        target = self.effective_target_tokens
+        units = int(target / self.calibration) if self.calibration > 1 else target
+        return min(self.input_budget, units)
+
+    @property
     def compaction_budget(self) -> int:
-        # Compaction starts here so tool results and follow-ups keep room below
-        # the hard budget, which fit_request still enforces on every request.
-        return int(self.input_budget * self.compaction_ratio)
+        # Compaction starts at the lower of the ratio share of the hard budget and the
+        # soft target, so tool results and follow-ups keep room and large windows stay
+        # affordable; fit_request still enforces the hard budget on every request.
+        return min(int(self.input_budget * self.compaction_ratio), self.target_budget)
+
+    @property
+    def schema_allowance(self) -> int:
+        """Room for tool definitions before the on-demand catalog takes over."""
+        return self.target_budget // 3
 
     @property
     def tool_reserve(self) -> int:
@@ -83,6 +112,7 @@ class ContextPolicy:
             spec.max_tokens,
             getattr(spec, "calibration", 1.0),
             settings.context_compaction_ratio,
+            getattr(spec, "target_input_tokens", None),
         )
 
 

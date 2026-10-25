@@ -14,6 +14,8 @@ class ModelConfigIn(BaseModel):
     protocol: Literal["openai", "anthropic"] = "openai"
     max_tokens: int = Field(default=4096, ge=1, le=131072)
     context_window: int = Field(default=32768, ge=8192, le=2097152)
+    # Soft target for one request's input; None = automatic. Compaction starts at it.
+    target_input_tokens: int | None = Field(default=None, ge=16384, le=2097152)
     is_default: bool = False
 
     @model_validator(mode="after")
@@ -23,6 +25,8 @@ class ModelConfigIn(BaseModel):
             raise ValueError(
                 "context_window must leave at least 1024 input units after answer reserve and headroom"
             )
+        if self.target_input_tokens is not None and self.target_input_tokens > self.context_window:
+            raise ValueError("target_input_tokens must not exceed context_window")
         return self
 
 
@@ -50,6 +54,7 @@ class ModelConfigOut(BaseModel):
     protocol: Literal["openai", "anthropic"] = "openai"
     max_tokens: int = 4096
     context_window: int = 32768
+    target_input_tokens: int | None = None
     is_default: bool
 
 

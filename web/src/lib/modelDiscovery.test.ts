@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ModelDiscovery } from "../types";
+import { AUTO_TARGET_INPUT, TARGET_INPUT_MIN, effectiveTarget, parseTargetInput, validTargetInput } from "./modelDiscovery";
 import { detectedWindow, detectionRequest, sameDetection } from "./modelDiscovery";
 
 const result = (context_window: number | null): ModelDiscovery => ({ context_window, max_output_tokens: null, source: "provider", note: "已从服务商获取该模型的上限。" });
@@ -26,5 +27,29 @@ describe("context window detection", () => {
     expect(sameDetection(asked, detectionRequest({ ...form, protocol: "anthropic" }))).toBe(false);
     expect(sameDetection(asked, detectionRequest({ ...form, base_url: "https://other.example/v1" }))).toBe(false);
     expect(sameDetection(asked, detectionRequest({ ...form, api_key: "sk-new" }))).toBe(false);
+  });
+});
+
+describe("request size target", () => {
+  it("reads a blank field as the automatic target", () => {
+    expect(parseTargetInput("")).toBeNull();
+    expect(parseTargetInput("  ")).toBeNull();
+    expect(parseTargetInput("65536")).toBe(65536);
+  });
+
+  it("accepts the automatic target or a whole number from the minimum up to the window", () => {
+    expect(validTargetInput(null, 32768)).toBe(true);
+    expect(validTargetInput(TARGET_INPUT_MIN, 32768)).toBe(true);
+    expect(validTargetInput(32768, 32768)).toBe(true);
+    expect(validTargetInput(TARGET_INPUT_MIN - 1, 32768)).toBe(false);
+    expect(validTargetInput(32769, 32768)).toBe(false);
+    expect(validTargetInput(65536.5, 1048576)).toBe(false);
+    expect(validTargetInput(Number.NaN, 1048576)).toBe(false);
+  });
+
+  it("shows what the automatic target means for the window being edited", () => {
+    expect(effectiveTarget(null, 1048576)).toBe(AUTO_TARGET_INPUT);
+    expect(effectiveTarget(null, 32768)).toBe(32768);
+    expect(effectiveTarget(65536, 1048576)).toBe(65536);
   });
 });

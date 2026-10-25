@@ -75,6 +75,7 @@ _ADDED_COLUMNS = {
         "protocol": "TEXT NOT NULL DEFAULT 'openai'",
         "max_tokens": "INTEGER NOT NULL DEFAULT 4096",
         "context_window": "INTEGER NOT NULL DEFAULT 32768",
+        "target_input_tokens": "INTEGER",  # Nullable: existing models use the automatic target.
     },
     "node": {
         "kind": "TEXT NOT NULL DEFAULT 'followup'",
