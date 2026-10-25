@@ -14,6 +14,7 @@ Run commands from the repository root with uv and Node.js 24 installed.
 | `uv run python scripts/manage.py e2e` | UI checks with a temporary database, random local port and lexical retrieval. |
 | `uv run python scripts/prepare_retrieval.py --smoke` | With optional dependencies installed, prepare/download weights and verify real inference on synthetic Chinese/English examples; fails if dependencies or models are unavailable. |
 | `uv run python scripts/evaluate_retrieval.py --database branch_learning.db` | Measure the token estimator, memory retrieval and topic search on a temporary copy of the database; never changes the original, calls no model and downloads nothing. Writes ids, counts, proxy scores and timings to `artifacts/`; `--synthetic` uses a built-in fixture. See [offline retrieval evaluation](retrieval-evaluation.md). |
+| `uv run python scripts/label_retrieval.py --database branch_learning.db` | Grade, in the terminal, which memory facts are relevant to your own questions (2, 1 or 0) on a temporary copy; saves ids, grades and text hashes to `artifacts/retrieval-labels.json`, which `evaluate_retrieval.py --labels` scores against. See [grading relevance yourself](retrieval-evaluation.md#grading-relevance-yourself). |
 
 An occupied port is not forcibly freed. Ctrl+C stops the app. Use one backend per database; the standard launcher guards its port, but cannot police custom commands on other ports.
 
