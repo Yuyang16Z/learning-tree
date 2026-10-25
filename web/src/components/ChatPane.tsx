@@ -11,7 +11,7 @@ import { copyText } from "../lib/clipboard";
 import { hasManagedWebSearch, selectedChatTools } from "../lib/chatTools";
 import { matchesDeletedWorkspace, onWorkspaceDeletion, type WorkspaceDeletion } from "../lib/workspace";
 import { fullResultSource, toolStepLabel, type FullResultSource } from "../lib/toolSteps";
-import { diagnosticsText } from "../lib/answerDiagnostics";
+import { diagnosticsText, roundLines } from "../lib/answerDiagnostics";
 import { sourceLink, type SourceView } from "../lib/sourceLinks";
 import { locatePassage } from "../lib/passage";
 import { DocumentCards } from "./DocumentCards";
@@ -209,9 +209,11 @@ function DiagnosticsBlock({ data }: { data?: AnswerDiagnostics | null }) {
   const n = (value: number | null | undefined) => value == null ? "–" : value.toLocaleString(locale === "en" ? "en-US" : "zh-CN");
   // Context is one request's input; with tool rounds the sum over requests is a line of its own.
   const { summary, total } = diagnosticsText(data, t, n);
+  const rounds = roundLines(data, t, n);
   const timing = (label: string, ms: number | undefined) => `${label} ${((ms ?? 0) / 1000).toFixed(2)} s`;
   return <details className="chat-reasoning chat-diagnostics"><summary>{summary}</summary><div>
     {total && <>{total}{"\n"}</>}
+    {rounds.map((line, index) => <span key={index}>{line}{"\n"}</span>)}
     {t("输出 {tokens} tokens", "Output {tokens} tokens", { tokens: n(data.output_tokens) })} · {data.compacted ? t("历史已压缩", "History compacted") : t("历史完整", "Full history")} · {t("校准系数 {ratio}", "Calibration ratio {ratio}", { ratio: (data.calibration_ratio ?? 1).toFixed(2) })}{typeof data.target_input_tokens === "number" ? t(" · 单次目标 {tokens} tokens", " · Request target {tokens} tokens", { tokens: n(data.target_input_tokens) }) : ""}{data.summary_blocks === 1 ? t(" · 历史摘要 1 段", " · 1 history summary") : data.summary_blocks ? t(" · 历史摘要 {count} 段", " · {count} history summaries", { count: data.summary_blocks }) : ""}{"\n"}
     {[timing(t("检索", "Retrieval"), data.timings_ms.retrieval), timing(t("整理", "Summary"), data.timings_ms.summary), timing(t("模型", "Model"), data.timings_ms.model), timing(t("工具", "Tools"), data.timings_ms.tools), timing(t("总计", "Total"), data.timings_ms.total)].join(" · ")}
   </div></details>;

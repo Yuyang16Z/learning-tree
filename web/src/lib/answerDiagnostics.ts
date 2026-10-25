@@ -46,3 +46,26 @@ export function diagnosticsText(data: AnswerDiagnostics, t: Translate, n: Count)
   const summary = [context ?? sum, toolRounds, budgetStopLabel(data.tool_budget_stop, t), seconds].filter(Boolean).join(" · ");
   return { summary, total: context ? sum : null };
 }
+
+/**
+ * One line per provider request, in order, for an answer that made several (tool rounds and
+ * the final answer): its input, output, whether it had to be trimmed to fit the budget, and
+ * the tool calls it led to with their running time. Older answers have no rounds.
+ */
+export function roundLines(data: AnswerDiagnostics, t: Translate, n: Count): string[] {
+  const rounds = Array.isArray(data.rounds) ? data.rounds : [];
+  if (rounds.length < 2) return [];
+  return rounds.flatMap((round, index) => {
+    const source = figures(round);
+    if (!source) return [];
+    const parts = [t("第 {n} 轮：{figures}", "Round {n}: {figures}", { n: index + 1, figures: tokens(source, t, n) })];
+    const output = finite((round as { output_tokens?: unknown }).output_tokens);
+    if (output != null) parts.push(t("输出 {tokens}", "output {tokens}", { tokens: n(output) }));
+    if ((round as { trimmed?: unknown }).trimmed === true) parts.push(t("已裁剪", "trimmed to fit"));
+    const calls = finite((round as { tool_calls?: unknown }).tool_calls) ?? 0;
+    const seconds = `${((finite((round as { tool_ms?: unknown }).tool_ms) ?? 0) / 1000).toFixed(2)} s`;
+    if (calls === 1) parts.push(t("工具 1 次，{seconds}", "1 tool call, {seconds}", { seconds }));
+    else if (calls > 1) parts.push(t("工具 {calls} 次，{seconds}", "{calls} tool calls, {seconds}", { calls, seconds }));
+    return [parts.join(" · ")];
+  });
+}
