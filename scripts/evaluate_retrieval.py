@@ -13,11 +13,13 @@ written next to the source, and the copy is deleted afterwards. No model API is
 called and no weights are downloaded (--hybrid only loads cached local models).
 The JSON report holds ids, counts, scores and timings: no absolute paths and,
 unless --include-text is given, no question, answer, fact, note or title text.
-Relevance labels are structural proxies, not human judgments. See
+Relevance labels are structural proxies, not human judgments, unless --labels
+names a file of your own grades (scripts/label_retrieval.py writes one). See
 docs/retrieval-evaluation.md.
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -40,6 +42,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 DEFAULT_OUTPUT = ROOT / "artifacts" / "retrieval-evaluation.json"
+# Human relevance labels (scripts/label_retrieval.py): ids, grades and text hashes only.
+LABELS_FORMAT = "learning-tree-retrieval-labels"
+LABELS_VERSION = 1
+GRADES = (0, 1, 2)  # Not relevant, related, directly useful.
 WORKSPACE_PREFIX = "learning-tree-eval-"
 # Scope name -> (include_siblings, include_other_trees), as saved in RetrievalSettings.
 SCOPES = {"path": (False, False), "tree": (True, False), "all": (True, True)}
@@ -1237,6 +1243,139 @@ def _label(ranked: list[str], relevant: set[str], k: int) -> dict:
     return {"relevant": len(relevant), "found": sum(item in relevant for item in top), "rank": rank}
 
 
+# ---------- Human relevance labels ----------
+
+
+def text_digest(text: str) -> str:
+    """SHA-256 of a question or fact text: labels notice an edit without storing the text."""
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
+
+
+def _unusable(reason: str) -> EvaluationError:
+    return EvaluationError(f"The labels file is not usable: {reason}.")
+
+
+def read_labels(path: Path) -> dict[int, dict]:
+    """Grades by question message id: {"question_sha256", "facts": {memory id: {...}}}."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        raise _unusable("it cannot be read as JSON") from None
+    if not isinstance(data, dict) or data.get("format") != LABELS_FORMAT:
+        raise _unusable("it is not a LearningTree labels file")
+    if data.get("version") != LABELS_VERSION or not isinstance(data.get("questions"), dict):
+        raise _unusable(f"only version {LABELS_VERSION} is supported")
+    labels = {}
+    for key, entry in data["questions"].items():
+        if (
+            not key.isdigit()
+            or not isinstance(entry, dict)
+            or not isinstance(entry.get("question_sha256"), str)
+            or not isinstance(entry.get("facts"), dict)
+        ):
+            raise _unusable("a question entry is malformed")
+        facts = {}
+        for fact_key, judged in entry["facts"].items():
+            if (
+                not fact_key.isdigit()
+                or not isinstance(judged, dict)
+                or type(judged.get("grade")) is not int
+                or judged["grade"] not in GRADES
+                or not isinstance(judged.get("fact_sha256"), str)
+            ):
+                raise _unusable("a grade is malformed (grades are 0, 1 or 2)")
+            facts[int(fact_key)] = {"grade": judged["grade"], "fact_sha256": judged["fact_sha256"]}
+        labels[int(key)] = {"question_sha256": entry["question_sha256"], "facts": facts}
+    return labels
+
+
+def write_labels(labels: dict[int, dict], path: Path) -> None:
+    """Write the grades privately and atomically, as reports are written."""
+    payload = {
+        "format": LABELS_FORMAT,
+        "version": LABELS_VERSION,
+        "questions": {
+            str(message_id): {
+                "question_sha256": entry["question_sha256"],
+                "facts": {
+                    str(memory_id): judged for memory_id, judged in sorted(entry["facts"].items())
+                },
+            }
+            for message_id, entry in sorted(labels.items())
+        },
+    }
+    _write_report(payload, path)
+
+
+def current_grades(labels: dict[int, dict], snapshot: _Snapshot) -> tuple[dict, int, int]:
+    """Grades whose question and fact texts still match their hashes, by message id.
+
+    A labelled question that is no longer replayed (edited, deleted, or without a
+    completed answer) is stale, and so is a grade whose fact was edited or deleted.
+    """
+    questions = {question.message_id: question for question in snapshot.questions}
+    facts = {fact.id: fact for fact in snapshot.facts}
+    grades, stale_questions, stale_facts = {}, 0, 0
+    for message_id, entry in labels.items():
+        question = questions.get(message_id)
+        if question is None or text_digest(question.text) != entry["question_sha256"]:
+            stale_questions += 1
+            continue
+        current = {}
+        for memory_id, judged in entry["facts"].items():
+            fact = facts.get(memory_id)
+            if fact is None or text_digest(fact.content) != judged["fact_sha256"]:
+                stale_facts += 1
+            else:
+                current[memory_id] = judged["grade"]
+        grades[message_id] = current
+    return grades, stale_questions, stale_facts
+
+
+def _dcg(gains) -> float:
+    return sum((2**gain - 1) / math.log2(rank + 1) for rank, gain in enumerate(gains, 1))
+
+
+def _graded(ranked: list[str], grades: dict[str, int], k: int) -> dict:
+    """One question's top k against human grades of fact texts; an unjudged text gains 0."""
+    top = ranked[:k]
+    relevant = {text for text, grade in grades.items() if grade > 0}
+    first = next((rank for rank, text in enumerate(top, 1) if text in relevant), None)
+    ideal = _dcg(sorted((grade for grade in grades.values() if grade > 0), reverse=True)[:k])
+    return {
+        "returned": len(top),
+        "judged": sum(text in grades for text in top),
+        "relevant": len(relevant),
+        "found": sum(text in relevant for text in top),
+        "rank": first,
+        "ndcg": round(_dcg([grades.get(text, 0) for text in top]) / ideal, 4) if ideal else None,
+    }
+
+
+def _labelled(entries: list[dict], k: int, *, stale_questions: int, stale_facts: int) -> dict:
+    """Means over the labelled questions with a relevant fact; judged share over all."""
+    scored = [entry for entry in entries if entry["relevant"]]
+    returned = sum(entry["returned"] for entry in entries)
+
+    def mean(values) -> float | None:
+        values = list(values)
+        return round(sum(values) / len(values), 4) if values else None
+
+    return {
+        "questions": len(entries),
+        "with_relevant": len(scored),
+        "precision_at_k": mean(entry["found"] / k for entry in scored),
+        "recall_at_k": mean(entry["found"] / min(entry["relevant"], k) for entry in scored),
+        "mrr_at_k": mean(1 / entry["rank"] if entry["rank"] else 0 for entry in scored),
+        "ndcg_at_k": mean(entry["ndcg"] for entry in scored),
+        "judged_at_k": (
+            round(sum(entry["judged"] for entry in entries) / returned, 4) if returned else None
+        ),
+        "stale_questions": stale_questions,
+        "stale_facts": stale_facts,
+    }
+
+
 def _read_scope_row(engine):
     from sqlmodel import Session
 
@@ -1268,7 +1407,14 @@ def _write_scope_row(engine, values) -> None:
 
 
 def measure_retrieval(
-    engine, snapshot: _Snapshot, scopes: list[str], k: int, backend, include_text: bool
+    engine,
+    snapshot: _Snapshot,
+    scopes: list[str],
+    k: int,
+    backend,
+    include_text: bool,
+    grades: dict[int, dict[int, int]] | None = None,
+    stale: tuple[int, int] = (0, 0),
 ) -> dict:
     from sqlmodel import Session
 
@@ -1290,7 +1436,9 @@ def measure_retrieval(
         if source is not None and source.id in valid_nodes and source.tree_id == fact.tree_id:
             by_node.setdefault(fact.source_node_id, []).append(fact)
     fact_types = {fact.id: fact.fact_type for fact in snapshot.facts}
+    fact_texts = {fact.id: fact.content for fact in snapshot.facts}
     timeline = FactTimeline(engine, snapshot.facts)
+    graded_texts: dict[int, dict[str, int]] = {}
     saved_scope = _read_scope_row(engine)
     labels: dict[int, tuple[list, tuple | None]] = {}
     cases, summaries = [], {}
@@ -1314,6 +1462,18 @@ def measure_retrieval(
                 texts.add(content)
         return node_id, texts, in_prompt
 
+    def text_grades(message_id: int, existing: str) -> dict[str, int]:
+        """A question's human grades by normalized text, compared as its proxy labels are:
+        the best grade of each text, leaving out facts that did not exist yet or whose
+        text the prompt already holds, since retrieval never returns those."""
+        result: dict[str, int] = {}
+        for memory_id, grade in grades[message_id].items():
+            content = _normalized(fact_texts.get(memory_id, ""))
+            if not content or not timeline.visible(memory_id) or (existing and content in existing):
+                continue
+            result[content] = max(grade, result.get(content, 0))
+        return result
+
     def run(session, question, config):
         return retrieve_memory(
             session,
@@ -1333,7 +1493,7 @@ def measure_retrieval(
             timeline.reset()
             warmed = False
             latencies, returned, modes, types = [], Counter(), Counter(), Counter()
-            sizes, self_entries, parent_entries = [], [], []
+            sizes, self_entries, parent_entries, labelled_entries = [], [], [], []
             reranked = eligible = fallbacks = rerank_calls = rerank_fallbacks = 0
             self_in_prompt = parent_in_prompt = 0
             for question in snapshot.questions:
@@ -1345,6 +1505,10 @@ def measure_retrieval(
                     if question.parent_id is not None:
                         parent = label(question.parent_id, existing)
                     labels[question.message_id] = (thread, parent)
+                    if grades and question.message_id in grades:
+                        graded_texts[question.message_id] = text_grades(
+                            question.message_id, existing
+                        )
                 thread, parent = labels[question.message_id]
                 with Session(engine) as session:
                     # The same settings read and config that service.fetch_memory_note uses.
@@ -1410,6 +1574,10 @@ def measure_retrieval(
                             "in_prompt": in_prompt,
                         }
                         parent_entries.append((score["found"], score["relevant"], score["rank"]))
+                if question.message_id in graded_texts:
+                    score = _graded(texts, graded_texts[question.message_id], k)
+                    case_["labelled"] = score
+                    labelled_entries.append(score)
                 if include_text:
                     case_["question"] = question.text
                     case_["facts"] = [item.content for item in result.facts]
@@ -1436,6 +1604,10 @@ def measure_retrieval(
                 "self_recall": _proxy(self_entries, k, self_in_prompt),
                 "parent_recall": _proxy(parent_entries, k, parent_in_prompt),
             }
+            if grades is not None:
+                summaries[scope]["labelled"] = _labelled(
+                    labelled_entries, k, stale_questions=stale[0], stale_facts=stale[1]
+                )
     finally:
         timeline.restore()
         _write_scope_row(engine, saved_scope)
@@ -1455,7 +1627,13 @@ def measure_retrieval(
             "min(k, relevant); "
             "hit_rate_at_k = share with at least one in the top k; mrr_at_k = mean of 1/rank "
             "of the first relevant fact within the top k. Latency times the retrieve_memory "
-            "call after one untimed warm-up per scope."
+            "call after one untimed warm-up per scope. With a labels file, labelled scores "
+            "the questions you graded (0 not relevant, 1 related, 2 directly useful) by "
+            "normalized text in the same way: precision_at_k = relevant in the top k / k, "
+            "recall_at_k as above, mrr_at_k, and ndcg_at_k with gain 2^grade - 1 and "
+            "discount log2(rank + 1) against the ideal order of the graded facts, each "
+            "averaged over graded questions with a relevant fact; judged_at_k = graded "
+            "texts among all returned in the top k. Unjudged facts count as not relevant."
         ),
         "k": k,
         "scopes": summaries,
@@ -1492,7 +1670,9 @@ def _database_counts(engine, snapshot: _Snapshot) -> dict:
     }
 
 
-def evaluate(database: Path, args, backend, status: dict, preloaded: bool) -> dict:
+def evaluate(
+    database: Path, args, backend, status: dict, preloaded: bool, labels: dict | None = None
+) -> dict:
     """All measurements, on the copy at `database`."""
     from app.config import settings
 
@@ -1501,13 +1681,16 @@ def evaluate(database: Path, args, backend, status: dict, preloaded: bool) -> di
     try:
         prepare_copy(engine)
         snapshot = load_snapshot(engine)
+        grades, stale = None, (0, 0)
+        if labels is not None:
+            grades, *stale = current_grades(labels, snapshot)
         started = time.perf_counter()
         estimator = measure_estimator(snapshot, settings.context_compaction_ratio)
         search_started = time.perf_counter()
         search = measure_search(engine, snapshot, args.include_text)
         retrieval_started = time.perf_counter()
         retrieval = measure_retrieval(
-            engine, snapshot, args.scopes, args.k, backend, args.include_text
+            engine, snapshot, args.scopes, args.k, backend, args.include_text, grades, tuple(stale)
         )
         finished = time.perf_counter()
         counts = _database_counts(engine, snapshot)
@@ -1530,11 +1713,17 @@ def evaluate(database: Path, args, backend, status: dict, preloaded: bool) -> di
         # Both models ran for at least one question and no retrieval fell back from either.
         "achieved": bool(args.hybrid and ready and attempts and not fallbacks),
     }
-    return {
+    if grades is None:
+        relevance = "Relevance labels are structural proxies, not human judgments"
+    else:
+        relevance = (
+            f"Human relevance labels from a labels file score {len(grades)} of the replayed "
+            "questions, beside the structural proxies"
+        )
+    report = {
         "scope": (
-            "Offline evaluation on a temporary copy that was deleted afterwards. Relevance "
-            "labels are structural proxies, not human judgments; no model API was called and "
-            "nothing was downloaded."
+            f"Offline evaluation on a temporary copy that was deleted afterwards. {relevance}; "
+            "no model API was called and nothing was downloaded."
         ),
         "source": "synthetic fixture" if args.synthetic else "copy of a user database",
         "settings": {
@@ -1559,6 +1748,14 @@ def evaluate(database: Path, args, backend, status: dict, preloaded: bool) -> di
         "full_text_search": search,
         "memory_retrieval": retrieval,
     }
+    if grades is not None:
+        report["labels"] = {
+            "questions": len(grades),
+            "graded_facts": sum(len(facts) for facts in grades.values()),
+            "stale_questions": stale[0],
+            "stale_facts": stale[1],
+        }
+    return report
 
 
 def _same_file(first: Path, second: Path) -> bool:
@@ -1646,6 +1843,12 @@ def parse_args(argv: list[str] | None):
         help="also write questions, search terms and returned fact text (private output)",
     )
     parser.add_argument(
+        "--labels",
+        type=Path,
+        metavar="FILE",
+        help="score retrieval against your own grades too (written by scripts/label_retrieval.py)",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT,
@@ -1670,6 +1873,16 @@ def main(argv: list[str] | None = None) -> int:
     if output.is_dir():
         print("--output names a directory; give a file path.", file=sys.stderr)
         return 1
+    labels = None
+    if args.labels is not None:
+        if not args.labels.expanduser().is_file():
+            print("Labels file not found.", file=sys.stderr)
+            return 1
+        try:
+            labels = read_labels(args.labels.expanduser())
+        except EvaluationError as exc:
+            print(exc, file=sys.stderr)
+            return 1
     preloaded = any(name == "app" or name.startswith("app.") for name in sys.modules)
     try:
         with workspace() as directory:
@@ -1682,7 +1895,7 @@ def main(argv: list[str] | None = None) -> int:
                 backend, status = semantic_backend(args.hybrid)
                 if args.synthetic:
                     build_synthetic(database)
-                report = evaluate(database, args, backend, status, preloaded)
+                report = evaluate(database, args, backend, status, preloaded, labels)
             finally:
                 restore_environment(previous)
     except HybridUnavailable as exc:
@@ -1699,7 +1912,11 @@ def main(argv: list[str] | None = None) -> int:
         f"{report['estimator']['paths']} learning paths, scopes {','.join(args.scopes)}, "
         f"{report['settings']['retrieval_mode']} retrieval."
     )
-    print(f"Report: {_display(output)} (proxy labels, not human relevance judgments).")
+    if "labels" in report:
+        graded = report["labels"]["questions"]
+        print(f"Report: {_display(output)} (your grades for {graded} questions, and proxy labels).")
+    else:
+        print(f"Report: {_display(output)} (proxy labels, not human relevance judgments).")
     semantic = report["semantic"]
     if args.hybrid and not semantic["achieved"]:
         if not semantic["semantic_attempts"]:

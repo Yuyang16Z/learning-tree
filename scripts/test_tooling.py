@@ -1,6 +1,7 @@
 """Safety boundaries of the developer launcher and optional MCP wrappers."""
 
 import json
+import math
 import os
 import re
 import sqlite3
@@ -1064,3 +1065,222 @@ def test_demo_recording_doubles_take_the_calls_the_app_makes(tmp_path, monkeypat
             generation.stop.set()
         nodes._GENERATIONS.clear()
         engine.dispose()
+
+
+# ---------- Human relevance labels (scripts/label_retrieval.py, --labels) ----------
+
+
+def _fixture_rows(tmp_path):
+    """Questions and facts of the synthetic fixture, as the labelling and the evaluation see them."""
+    evaluate = load("scripts/evaluate_retrieval.py")
+    fixture = tmp_path / "rows" / "fixture.db"
+    fixture.parent.mkdir()
+    evaluate.build_synthetic(fixture)
+    with closing(sqlite3.connect(fixture)) as connection:
+        # Questions the replay scores: non-empty, answered by a completed answer (the
+        # fixture writes each answer right after its question).
+        questions = connection.execute(
+            "SELECT m.id, m.content, m.node_id, n.tree_id FROM message m "
+            "JOIN node n ON n.id = m.node_id "
+            "JOIN message a ON a.id = m.id + 1 AND a.node_id = m.node_id "
+            "WHERE m.role = 'user' AND a.role = 'assistant' AND a.status = 'complete' "
+            "AND trim(m.content) != '' ORDER BY m.id"
+        ).fetchall()
+        facts = connection.execute(
+            "SELECT id, content, source_node_id, tree_id FROM memory WHERE kind = 'fact'"
+        ).fetchall()
+    return evaluate, questions, facts
+
+
+def _digest(text):
+    import hashlib
+
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
+
+
+def _scripted(monkeypatch, answers):
+    """Answer the labelling prompts in order; record each prompt."""
+    replies, prompts = iter(answers), []
+
+    def ask(prompt=""):
+        prompts.append(prompt)
+        return next(replies)
+
+    monkeypatch.setattr("builtins.input", ask)
+    return prompts
+
+
+def _prompted_questions(output):
+    return [int(match) for match in re.findall(r"Question (\d+):", output)]
+
+
+def test_labelling_saves_ids_grades_and_text_hashes_only(tmp_path, monkeypatch, capsys):
+    label = load("scripts/label_retrieval.py")
+    _, questions, facts = _fixture_rows(tmp_path)
+    labels = tmp_path / "labels.json"
+    prompts = _scripted(monkeypatch, ["1=2 2=1", "", "q"])
+    assert label.main(["--synthetic", "--labels", str(labels)]) == 0
+    shown = capsys.readouterr().out
+    first, second = _prompted_questions(shown)[:2]
+    data = json.loads(labels.read_text(encoding="utf-8"))
+    assert (data["format"], data["version"]) == ("learning-tree-retrieval-labels", 1)
+    assert set(data["questions"]) == {str(first), str(second)}, "q saves and stops"
+    texts = {row[0]: row[1] for row in questions}
+    entry = data["questions"][str(first)]
+    assert entry["question_sha256"] == _digest(texts[first])
+    grades = sorted(fact["grade"] for fact in entry["facts"].values())
+    assert grades[-2:] == [1, 2] and set(grades[:-2]) <= {0}, "unlisted candidates are 0"
+    fact_texts = {row[0]: row[1] for row in facts}
+    for memory_id, fact in entry["facts"].items():
+        assert fact["fact_sha256"] == _digest(fact_texts[int(memory_id)])
+    assert all(fact["grade"] == 0 for fact in data["questions"][str(second)]["facts"].values())
+    # Candidate texts are shown in the terminal only, never written to the file.
+    raw = labels.read_text(encoding="utf-8")
+    assert not re.search("[㐀-鿿]", raw)
+    assert [text for text in fact_texts.values() if text in raw] == []
+    _assert_private(raw, tmp_path, ROOT, Path.home())
+    assert stat.S_IMODE(labels.stat().st_mode) == 0o600
+    assert re.search(r"Grades for facts 1-\d+", prompts[0])
+
+
+def test_labelling_asks_only_for_facts_without_a_current_grade(tmp_path, monkeypatch, capsys):
+    label = load("scripts/label_retrieval.py")
+    labels = tmp_path / "labels.json"
+    _scripted(monkeypatch, ["", "q"])
+    assert label.main(["--synthetic", "--labels", str(labels)]) == 0
+    first = _prompted_questions(capsys.readouterr().out)[0]
+    # The judged question is not asked again.
+    _scripted(monkeypatch, ["q"])
+    assert label.main(["--synthetic", "--labels", str(labels)]) == 0
+    assert _prompted_questions(capsys.readouterr().out)[0] != first
+    # An edited fact (here: a changed text hash) makes only that fact unjudged again.
+    data = json.loads(labels.read_text(encoding="utf-8"))
+    judged = data["questions"][str(first)]["facts"]
+    edited = sorted(judged, key=int)[0]
+    judged[edited]["fact_sha256"] = "0" * 64
+    labels.write_text(json.dumps(data), encoding="utf-8")
+    prompts = _scripted(monkeypatch, ["q"])
+    assert label.main(["--synthetic", "--labels", str(labels)]) == 0
+    assert _prompted_questions(capsys.readouterr().out)[0] == first
+    assert "Grades for facts 1-1 " in prompts[0]
+
+
+def test_labelling_status_reports_coverage_without_asking(tmp_path, monkeypatch, capsys):
+    label = load("scripts/label_retrieval.py")
+    labels = tmp_path / "labels.json"
+    monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("--status never asks"))
+    assert label.main(["--synthetic", "--labels", str(labels), "--status"]) == 0
+    status = capsys.readouterr().out
+    assert "questions with candidates" in status and "judged 0" in status
+    assert not labels.exists(), "--status writes nothing"
+
+
+def test_labelling_rejects_bad_answers_and_label_files(tmp_path, monkeypatch, capsys):
+    label = load("scripts/label_retrieval.py")
+    labels = tmp_path / "labels.json"
+    prompts = _scripted(monkeypatch, ["99", "1=3", "x", "q"])
+    assert label.main(["--synthetic", "--labels", str(labels)]) == 0
+    assert len(prompts) == 4, "each invalid answer is asked again"
+    assert not labels.exists(), "nothing was graded"
+    labels.write_text("{not json", encoding="utf-8")
+    assert label.main(["--synthetic", "--labels", str(labels)]) == 1
+    assert "labels file" in capsys.readouterr().err
+
+
+def test_graded_metrics_follow_their_definitions():
+    evaluate = load("scripts/evaluate_retrieval.py")
+    # Gains 2^grade - 1 discounted by log2(rank + 1): 3/1 + 0 + 1/2 against the ideal 2, 2, 1.
+    ideal = 3 + 3 / math.log2(3) + 1 / 2
+    score = evaluate._graded(["a", "b", "c"], {"a": 2, "c": 1, "d": 2}, 3)
+    assert score == {
+        "returned": 3,
+        "judged": 2,
+        "relevant": 3,
+        "found": 2,
+        "rank": 1,
+        "ndcg": round(3.5 / ideal, 4),
+    }
+    summary = evaluate._labelled([score], 3, stale_questions=0, stale_facts=0)
+    assert summary["precision_at_k"] == round(2 / 3, 4)
+    assert summary["recall_at_k"] == round(2 / 3, 4)
+    assert summary["mrr_at_k"] == 1.0
+    assert summary["ndcg_at_k"] == round(3.5 / ideal, 4)
+    assert summary["judged_at_k"] == round(2 / 3, 4)
+    nothing = evaluate._graded([], {"a": 0}, 3)
+    assert evaluate._labelled([nothing], 3, stale_questions=0, stale_facts=0) == {
+        "questions": 1,
+        "with_relevant": 0,
+        "precision_at_k": None,
+        "recall_at_k": None,
+        "mrr_at_k": None,
+        "ndcg_at_k": None,
+        "judged_at_k": None,
+        "stale_questions": 0,
+        "stale_facts": 0,
+    }
+
+
+def test_retrieval_evaluation_scores_human_labels(tmp_path):
+    evaluate, questions, facts = _fixture_rows(tmp_path)
+    labelled = {}
+    for message_id, text, node_id, tree_id in questions:
+        grades = {
+            str(fact_id): {"grade": 2 if source == node_id else 0, "fact_sha256": _digest(content)}
+            for fact_id, content, source, fact_tree in facts
+            if fact_tree == tree_id
+        }
+        labelled[str(message_id)] = {"question_sha256": _digest(text), "facts": grades}
+    stale_question, stale_fact_question = list(labelled)[:2]
+    labelled[stale_question]["question_sha256"] = "0" * 64
+    some_fact = next(iter(labelled[stale_fact_question]["facts"]))
+    labelled[stale_fact_question]["facts"][some_fact]["fact_sha256"] = "0" * 64
+    labels = tmp_path / "labels.json"
+    payload = {"format": "learning-tree-retrieval-labels", "version": 1, "questions": labelled}
+    labels.write_text(json.dumps(payload), encoding="utf-8")
+    output = tmp_path / "report.json"
+    assert evaluate.main(["--synthetic", "--labels", str(labels), "--output", str(output)]) == 0
+    raw = output.read_text(encoding="utf-8")
+    _assert_private(raw, tmp_path, ROOT, Path.home())
+    report = json.loads(raw)
+    replayed = report["database"]["completed_questions"]
+    assert report["labels"]["stale_questions"] == 1 and report["labels"]["stale_facts"] == 1
+    assert 0 < report["labels"]["questions"] < replayed
+    for summary in report["memory_retrieval"]["scopes"].values():
+        scored = summary["labelled"]
+        assert scored["questions"] == report["labels"]["questions"]
+        for key in ("precision_at_k", "recall_at_k", "mrr_at_k", "ndcg_at_k", "judged_at_k"):
+            assert scored[key] is None or 0 <= scored[key] <= 1
+    assert report["memory_retrieval"]["scopes"]["path"]["labelled"]["mrr_at_k"] > 0
+    cases = report["memory_retrieval"]["cases"]
+    assert all(
+        ("labelled" in case) == (str(case["question_message_id"]) in labelled)
+        for case in cases
+        if str(case["question_message_id"]) != stale_question
+    )
+    assert not any(
+        "labelled" in case for case in cases if str(case["question_message_id"]) == stale_question
+    )
+    assert "human relevance labels" in report["scope"].lower()
+
+
+@pytest.mark.parametrize(
+    "content,message",
+    [
+        (None, "Labels file not found"),
+        ("{not json", "labels file"),
+        ('{"format": "other", "version": 1, "questions": {}}', "labels file"),
+        (
+            '{"format": "learning-tree-retrieval-labels", "version": 1, "questions": {"1": {"question_sha256": "x", "facts": {"2": {"grade": 5, "fact_sha256": "y"}}}}}',
+            "labels file",
+        ),
+    ],
+)
+def test_retrieval_evaluation_refuses_unusable_labels(tmp_path, capsys, content, message):
+    evaluate = load("scripts/evaluate_retrieval.py")
+    labels = tmp_path / "labels.json"
+    if content is not None:
+        labels.write_text(content, encoding="utf-8")
+    output = tmp_path / "report.json"
+    assert evaluate.main(["--synthetic", "--labels", str(labels), "--output", str(output)]) == 1
+    assert message in capsys.readouterr().err
+    assert not output.exists()

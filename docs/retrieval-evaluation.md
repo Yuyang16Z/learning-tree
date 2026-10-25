@@ -6,7 +6,9 @@ count, what memory retrieval returns for the questions you actually asked, and
 whether topic search finds their nodes through text other than the question
 itself. It never changes your database, calls no model API and downloads
 nothing. A deterministic synthetic fixture exercises the same code
-for tests and for trying the script without personal data.
+for tests and for trying the script without personal data. Its relevance labels
+are structural proxies; `scripts/label_retrieval.py` lets you grade the facts
+yourself, and `--labels` then scores retrieval against your grades too.
 
 ## Running it
 
@@ -29,6 +31,7 @@ copied, nothing is evaluated and the script asks you to retry.
 | `--scopes path,tree,all` | Retrieval scopes to replay (default: all three). |
 | `--k 5` | Cut-off for the proxy metrics (default 5). |
 | `--include-text` | Also write questions, search terms and returned fact text. Off by default. |
+| `--labels FILE` | Also score retrieval against your own grades from `scripts/label_retrieval.py` (see [Grading relevance yourself](#grading-relevance-yourself)). The file must exist and be valid, or nothing is evaluated (status 1). |
 | `--output FILE` | Report path (default `artifacts/retrieval-evaluation.json` in the repository). It may not be the database, under any spelling or alias of its path, or a file beside it whose name starts with the database's name, such as its `-wal` file. |
 
 Exit status 0 means the report was written. Status 1 means the source or the
@@ -145,6 +148,60 @@ that the script works; they are not quality claims. Use the numbers to compare
 settings or versions on the same data, and read the cases behind surprising
 results.
 
+## Grading relevance yourself
+
+Proxy labels cannot tell a relevant fact from a merely nearby one. To measure
+that, grade the candidates yourself, once, and reuse the grades for every later
+run, for example before and after changing retrieval:
+
+```sh
+uv run python scripts/label_retrieval.py --database branch_learning.db
+uv run python scripts/evaluate_retrieval.py --database branch_learning.db --labels artifacts/retrieval-labels.json
+```
+
+`label_retrieval.py` reads a temporary copy exactly as the evaluation does and
+replays every completed question against the facts that existed when it was
+asked. Its candidates are pooled, so that the grades are not limited to what
+today's ranking returns: the facts of the question's own node, its follow-up
+thread and its parent, then the ranked lists of keyword retrieval (and, with
+`--hybrid`, the local semantic models) in each scope of `--scopes`, `--depth`
+deep (default 10), interleaved by rank, one fact per normalized text and at
+most `--pool` facts (default 12). Facts whose text the question's quote or
+note already holds are left out, since retrieval never returns them.
+
+Each question with ungraded candidates is shown in the terminal with them,
+numbered. Grade each fact **2** (directly useful for answering), **1** (related)
+or **0** (not relevant): type the numbers of the relevant facts, each graded 2
+unless written `n=1` (or `n=0`); facts not listed get 0, so Enter alone means
+none is relevant. `s` skips a question and `q` saves and stops. Grades are saved
+after every question to `artifacts/retrieval-labels.json` (`--labels` names
+another file) and a later run asks only about candidates without a current
+grade. A grade belongs to a question and fact by id together with SHA-256
+hashes of both texts, so editing a question makes all its grades stale and
+editing a fact makes its grade stale: the labelling asks again, and the
+evaluation counts them (`stale_questions`, `stale_facts`) and ignores them.
+`--status` reports how much is graded without asking anything.
+
+With `--labels`, each scope gains `labelled` beside the proxies, and every case
+of a graded question carries its own `labelled` entry. Facts are compared by
+normalized text as the proxies are, with the best grade of each text:
+
+- `precision_at_k`: relevant (grade 1 or 2) texts in the top k, divided by k;
+- `recall_at_k`: relevant texts in the top k, divided by min(k, relevant
+  texts), as for the proxies;
+- `mrr_at_k`: 1 / rank of the first relevant text within the top k, or 0;
+- `ndcg_at_k`: discounted cumulative gain (gain 2^grade − 1, discount
+  log2(rank + 1)) of the top k, divided by that of the ideal order of the
+  graded texts;
+- `judged_at_k`: graded texts among everything returned in the top k, over all
+  graded questions. A low share means that retrieval now returns facts nobody
+  graded, which count as not relevant: run the labelling again.
+
+The first four are averaged over graded questions with at least one relevant
+fact; a question with none still counts in `questions` and `judged_at_k`.
+Grades are your judgment on the facts as they exist now, under the same replay
+limits as the proxies below; compare runs on the same data and grades.
+
 ## Privacy
 
 The report contains record ids, counts, scores, timings and settings: no
@@ -153,7 +210,10 @@ question, answer, fact, note or title text. It is written with owner-only
 permissions to `artifacts/`, which Git ignores and `scripts/check_release.py`
 refuses to publish. A report with `--include-text` holds your own words; keep it
 private and delete it when you are done. Only reports from the synthetic fixture
-may be published as evidence. The temporary copy holds everything in the
+may be published as evidence. The labels file holds question and fact ids,
+grades and SHA-256 hashes of their texts, never the texts, and is written the
+same way; a hash can still confirm a guessed text, so keep it private too.
+The labelling shows your questions and facts in the terminal only. The temporary copy holds everything in the
 database, including model keys, and is deleted at exit; if the process is
 killed, remove any leftover `learning-tree-eval-*` directory from the system
 temporary location.
@@ -210,8 +270,24 @@ UTF-8 字节计数、回放真实问题的记忆检索、检查主题全文搜�
   之间比较。
 - **耗时**：检索（分范围）和搜索给出 p50/p90/p95/p99 等毫秒分位数；每个范围先做一次不计时的
   预热。结果依赖机器和数据规模，只在同一台机器上比较。
+- **自己标注相关性**：`uv run python scripts/label_retrieval.py --database branch_learning.db`
+  在同样的临时副本上回放每个已完成问题（只看提问时已存在的事实），把候选事实汇集起来：本节点、
+  追问链和父节点的事实，加上关键词检索（加 `--hybrid` 时再加本地语义模型）在各范围、前
+  `--depth`（默认 10）名的结果，按名次交替合并，同一规范化文本只保留一条，每题最多 `--pool`
+  （默认 12）条；文本已在引用或笔记中的事实不列出。终端里逐题显示问题和编号的候选：输入相关事实的
+  编号即评 2 分（直接有用），写成 `n=1` 为 1 分（相关）、`n=0` 为 0 分，未列出的都是 0 分，直接回车
+  表示都不相关；`s` 跳过，`q` 保存并退出。每题评完就保存到 `artifacts/retrieval-labels.json`
+  （`--labels` 可换文件），文件只含问题和事实的编号、分数及原文的 SHA-256 哈希，不含原文；之后
+  再运行只问还没有有效评分的候选。问题或事实被修改后哈希不再一致，对应评分作废：标注时重新询问，
+  评估时计入 `stale_questions`/`stale_facts` 并忽略。`--status` 只报告进度、不提问。
+  评估时加 `--labels artifacts/retrieval-labels.json`，每个范围多出 `labelled`：precision@k
+  （前 k 中相关文本数 ÷ k）、recall@k（÷ min(k, 相关数)，与代理标签相同）、MRR@k、nDCG@k
+  （增益 2^分数 − 1、折扣 log2(名次 + 1)，除以评分事实理想排序的值），以上四项对至少有一条相关
+  事实的已评问题取平均；judged@k 为前 k 结果中已评分文本的比例，偏低说明检索开始返回没人评过的
+  事实（按不相关计），应再标注一轮。评分代表你对现有事实的判断，回放局限与代理标签相同；只在同一
+  数据和同一份评分之间比较。评分文件同样请私下保管：哈希仍可用来确认猜到的原文。
 - **局限**：代理标签假设同一追问链或父节点的事实与后续问题相关，这常常成立但并不总是成立；其他
-  位置的事实从不标为相关，因此不衡量精确率、扩大范围的价值或回答质量。追问的父节点同时也是最近
+  位置的事实从不标为相关，因此不衡量精确率、扩大范围的价值或回答质量（自己标注后可以衡量前两项）。追问的父节点同时也是最近
   的前一轮，两类标签有重叠。回放使用事实、笔记、标题和引用的当前内容，不恢复已删除的事实。合成
   数据上的分数只说明脚本可用，不代表质量。
 - **隐私**：报告只含记录编号、计数、分数、耗时和设置，没有绝对路径和文件名；不加
