@@ -109,6 +109,7 @@ _ADDED_COLUMNS = {
         "updated_at": "DATETIME",
         # Existing facts may carry unrecorded hand edits; they are never superseded.
         "origin": "TEXT NOT NULL DEFAULT 'legacy'",
+        "muted": "BOOLEAN NOT NULL DEFAULT 0",  # Existing facts stay in use.
     },
     "mcpserver": {
         "transport": "TEXT NOT NULL DEFAULT 'stdio'",

@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Annotated, Literal, get_args
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
 
 class ModelConfigIn(BaseModel):
@@ -327,6 +327,14 @@ class FactOut(MemoryOut):
     created_at: datetime
     fact_type: str = "conclusion"
     superseded_by: int | None = None
+    # The learner stopped this fact from being used in answers.
+    muted: bool = False
+
+
+class FactUseIn(BaseModel):
+    """Stop a fact from being used in answers (true), or use it again (false)."""
+
+    muted: StrictBool
 
 
 class FactTopicOut(BaseModel):

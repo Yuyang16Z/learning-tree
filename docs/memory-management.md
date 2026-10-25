@@ -85,6 +85,26 @@ the original conversation. Relevance retrieval still uses valid sources on the
 current learning path unless you widen it below: Settings search itself does not
 make sibling branches eligible.
 
+### Stopping a memory from being used
+
+**Stop using** on a fact (or **×** next to its entry in an answer's **Referenced**
+line) keeps it out of every later answer: memory recall in every scope and the
+model's history search skip it. It is not deleted: it stays listed with a
+**Not used** tag, the map search still finds it, its source conversation is
+untouched and answers that already used it keep their Referenced entry, which now
+reads *not used*. **Use again** (or **Use again** on that entry) reverses it. Use
+it for a fact that is correct but keeps coming up where it does not help, or one
+you want to keep for yourself without the tutor relying on it; edit or delete a
+fact that is wrong.
+
+A fact is also not stored twice. Extraction skips a new fact whose text matches
+one already recorded, compared as recall compares facts (ignoring case, width and
+spacing): any fact of the same node, superseded ones included, and the current or
+muted facts of the learning path above it. A restatement in a follow-up is
+therefore not added again, and a muted fact does not come back by being extracted
+again. A sibling branch keeps its own copy, since it is a separate learning
+context.
+
 ### Structured facts
 
 Each extracted fact carries a type shown as a small tag: definition, condition,
@@ -286,6 +306,14 @@ backups include them, learning-tree exports exclude `sources`.
   为当前事实；如果新事实本身也已被更正，旧事实仍显示「已更新」，改由留下的那条更正替代，
   不会和最新的更正一起回到回答中。用户手动编辑过的事实，以及升级前保存的事实（旧版本不记录
   手动编辑，可能含有用户自己的修正）都不会被自动替代。
+- **停用记忆**：在记忆页对某条事实点「停用」，或点回答下方「参考了」里该条目旁的「×」，以后的
+  回答（各检索范围的记忆召回和模型的历史检索）都不再使用它。它不会被删除：仍显示在列表中并带
+  「已停用」标签，学习树搜索仍能找到，来源对话不变，已经用过它的回答仍保留「参考了」条目并显示
+  「已停用」；点「恢复使用」（或条目旁的「恢复」）即可撤销。适合正确但总在不相关处出现、或只想
+  自己留着的事实；内容错误的事实请编辑或删除。同一事实不会重复保存：提炼时若新事实与已有事实
+  文本相同（与召回一样忽略大小写、全半角和空白），即同一节点的任何事实（包括已被更新的）或其上方
+  学习路径的当前或已停用事实，就不再保存，所以追问里的重复表述不会再加一条，停用的事实也不会因为
+  再次提炼而回来；兄弟分支是独立的学习情境，保留各自的副本。
 - **参考了哪些记忆**：每条回答下方列出实际进入提示的记忆编号及来源节点，来自其他分支或
   主题的会标注；点击可跳到来源节点。已打开的对话里，来源主题或节点随后被删除的条目显示删除线且不能打开；列表显示后才被删除的来源会在点击时核对，提示「这条来源已删除」并留在当前对话；格式不完整的条目会被跳过。被压缩掉的记忆不会列出。该列表随回答保存，但不随
   学习树导出。保存的只有记录编号和范围，主题名称在显示时读取；记忆、来源节点或主题已删除

@@ -18,7 +18,10 @@ export function parseSources(value: unknown): AnswerSource[] | null {
     if (!isId(memory_id) || seen.has(memory_id as number) || !isOptionalId(source_node_id) || !isOptionalId(tree_id)) continue;
     if (typeof tree_title !== "string" || !SCOPES.includes(scope)) continue;
     seen.add(memory_id as number);
-    sources.push({ memory_id: memory_id as number, source_node_id: source_node_id as number | null, tree_id: tree_id as number | null, tree_title, scope: scope as AnswerSource["scope"] });
+    const source: AnswerSource = { memory_id: memory_id as number, source_node_id: source_node_id as number | null, tree_id: tree_id as number | null, tree_title, scope: scope as AnswerSource["scope"] };
+    const { muted } = item as { muted?: unknown };
+    if (typeof muted === "boolean") source.muted = muted;
+    sources.push(source);
   }
   return sources.length ? sources : null;
 }

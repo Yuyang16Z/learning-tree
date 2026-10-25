@@ -10,6 +10,7 @@ from .db import engine
 from .llm import FACT_TYPES, LLMSpec, extract_memories
 from .memory_preferences import begin_memory_write
 from .models import KnowledgeTree, McpServer, Memory, Message, ModelConfig, Node, PreferenceProfile
+from .text_relevance import normalized
 from .tools import TOOL_DEFS, ToolText, execute_tool, mcp_tool_def
 
 
@@ -408,17 +409,30 @@ def extract_and_save(
                 known.add(identity)
         # Topic facts continue even when automatic preference learning is off or
         # a concurrent preference edit invalidated the preference snapshot.
+        path_ids = set(_path_node_ids(s, source))
+        # A fact already recorded is not stored again, compared as recall compares facts:
+        # any fact of this node (superseded ones too, so a corrected statement cannot
+        # return), and the current or muted facts of the learning path above it, so a
+        # restatement in a follow-up is skipped and a muted fact does not come back.
+        # Other branches keep their own copy.
         existing = {
-            memory.content
+            normalized(memory.content)
             for memory in s.exec(
-                select(Memory).where(Memory.kind == "fact", Memory.source_node_id == node_id)
+                select(Memory).where(
+                    Memory.kind == "fact",
+                    (Memory.source_node_id == node_id)
+                    | (
+                        (Memory.tree_id == tree_id)
+                        & Memory.source_node_id.in_(path_ids)
+                        & Memory.superseded_by.is_(None)
+                    ),
+                )
             ).all()
         }
-        path_ids = set(_path_node_ids(s, source))
         replaceable = {row["id"] for row in existing_facts}
         for fact in facts[:3]:
             record = _fact_record(fact)
-            if record is None or record["text"] in existing:
+            if record is None or normalized(record["text"]) in existing:
                 continue
             memory = Memory(
                 kind="fact",
@@ -431,7 +445,7 @@ def extract_and_save(
             )
             s.add(memory)
             s.flush()
-            existing.add(record["text"])
+            existing.add(normalized(record["text"]))
             old = (
                 s.get(Memory, record["supersedes"]) if record["supersedes"] in replaceable else None
             )

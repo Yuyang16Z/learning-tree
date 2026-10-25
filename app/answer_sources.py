@@ -69,14 +69,14 @@ def resolve_sources(session: Session, stored: Sequence) -> list[list[dict] | Non
     memory_ids = {item["memory_id"] for item in entries}
     node_ids = {item["source_node_id"] for item in entries if item["source_node_id"] is not None}
     tree_ids = {item["tree_id"] for item in entries}
-    memories = {
-        memory_id: (node_id, tree_id)
-        for memory_id, node_id, tree_id in session.exec(
-            select(Memory.id, Memory.source_node_id, Memory.tree_id).where(
-                Memory.id.in_(memory_ids)
-            )
+    memories, muted = {}, {}
+    for memory_id, node_id, tree_id, is_muted in session.exec(
+        select(Memory.id, Memory.source_node_id, Memory.tree_id, Memory.muted).where(
+            Memory.id.in_(memory_ids)
         )
-    }
+    ):
+        memories[memory_id] = (node_id, tree_id)
+        muted[memory_id] = bool(is_muted)
     nodes = (
         dict(session.exec(select(Node.id, Node.tree_id).where(Node.id.in_(node_ids))).all())
         if node_ids
@@ -96,8 +96,17 @@ def resolve_sources(session: Session, stored: Sequence) -> list[list[dict] | Non
             and tree_id in titles
         )
 
+    # `muted` is read live: whether the learner has since stopped using that memory.
     return [
-        [{**item, "tree_title": _title(titles[item["tree_id"]])} for item in items if live(item)]
+        [
+            {
+                **item,
+                "tree_title": _title(titles[item["tree_id"]]),
+                "muted": muted[item["memory_id"]],
+            }
+            for item in items
+            if live(item)
+        ]
         or None
         for items in lists
     ]
@@ -107,7 +116,8 @@ def sources_for_storage(session: Session, sources) -> list[dict] | None:
     """What an answer stores: the entries whose records still exist, without titles."""
     (current,) = resolve_sources(session, [sources])
     return [
-        {key: item[key] for key in item if key != "tree_title"} for item in current or []
+        {key: item[key] for key in item if key not in ("tree_title", "muted")}
+        for item in current or []
     ] or None
 
 

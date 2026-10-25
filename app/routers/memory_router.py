@@ -28,6 +28,7 @@ from ..schemas import (
     FactPageOut,
     FactPatch,
     FactTopicOut,
+    FactUseIn,
     MemoryOut,
     PreferenceLearningIn,
     PreferenceLearningOut,
@@ -168,6 +169,7 @@ def _fact_out(memory: Memory, title: str | None) -> FactOut:
         created_at=memory.created_at,
         fact_type=memory.fact_type,
         superseded_by=memory.superseded_by,
+        muted=bool(memory.muted),
     )
 
 
@@ -301,6 +303,23 @@ def edit_fact(memory_id: int, body: FactPatch, session: Session = Depends(get_se
     if changed.rowcount != 1:
         raise HTTPException(409, "记忆已在其他窗口更新，请重新载入后再保存。")
     session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == memory_id))
+    session.commit()
+    session.refresh(memory)
+    tree = session.get(KnowledgeTree, memory.tree_id) if memory.tree_id is not None else None
+    return _fact_out(memory, tree.title if tree else None)
+
+
+@router.put("/{memory_id}/use", response_model=FactOut)
+def use_fact(memory_id: int, body: FactUseIn, session: Session = Depends(get_session)) -> FactOut:
+    """Stop a fact from being used in answers, or use it again; it stays listed either way."""
+    begin_memory_write(session)
+    memory = session.get(Memory, memory_id)
+    if memory is None:
+        raise HTTPException(404, "记忆不存在")
+    if memory.kind != "fact":
+        raise HTTPException(422, "只有知识记忆可以停用。")
+    memory.muted = body.muted
+    session.add(memory)
     session.commit()
     session.refresh(memory)
     tree = session.get(KnowledgeTree, memory.tree_id) if memory.tree_id is not None else None

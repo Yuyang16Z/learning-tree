@@ -501,7 +501,13 @@ def _history_result(
         message_id = message.id
     elif hit.kind == "memory":
         memory = session.get(Memory, hit.ref_id)
-        if memory is None or memory.kind != "fact" or memory.superseded_by is not None:
+        # A fact the learner stopped using stays searchable on the map, not for answers.
+        if (
+            memory is None
+            or memory.kind != "fact"
+            or memory.superseded_by is not None
+            or memory.muted
+        ):
             return None
         node = session.get(Node, memory.source_node_id) if memory.source_node_id else None
         if node is None or node.status in _INVALID_NODE_STATES or node.tree_id != memory.tree_id:

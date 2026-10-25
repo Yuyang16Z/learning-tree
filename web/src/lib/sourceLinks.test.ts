@@ -63,6 +63,12 @@ describe("reading stored or streamed sources", () => {
     expect(parsed).toEqual([valid, { memory_id: 13, source_node_id: null, tree_id: null, tree_title: "", scope: "other" }]);
   });
 
+  it("keeps whether the learner has stopped using a memory, and only as a boolean", () => {
+    expect(parseSources([{ ...valid, muted: true }])).toEqual([{ ...valid, muted: true }]);
+    expect(parseSources([{ ...valid, muted: false }])).toEqual([{ ...valid, muted: false }]);
+    expect(parseSources([{ ...valid, muted: "yes" }])).toEqual([valid]);
+  });
+
   it("gives nothing when no entry survives or the value is not a list", () => {
     for (const value of [[null], [{ memory_id: "x" }], [], "sources", null, undefined, { 0: valid }]) expect(parseSources(value)).toBeNull();
   });
