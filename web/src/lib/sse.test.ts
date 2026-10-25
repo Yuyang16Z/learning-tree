@@ -35,6 +35,32 @@ describe('stream recovery boundaries', () => {
     expect(await api.ask(1, { question: '问题', config_id: 1 }, { onDelta() {} })).toMatchObject({ node_id: 2 });
     expect(body.locked).toBe(false);
   });
+  it('dispatches approval requests and their outcome without treating them as answer content', async () => {
+    const events = [
+      { started: true, node_id: 9 },
+      { tool_start: { name: 'mcp_1_write_file', args: { path: 'a.md' } } },
+      { tool_confirm: { index: 1, name: 'mcp_1_write_file', args: { path: 'a.md' } } },
+      { tool_confirm: { index: 'one', name: 'broken' } },
+      { tool_confirm_done: { index: 1, outcome: 'allowed' } },
+      { tool_confirm_done: { index: 'one' } },
+      { tool_end: { name: 'mcp_1_write_file', result: 'written', confirmation: 'allowed' } },
+      { done: true, node_id: 9 },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(stream(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')))));
+    const received: unknown[] = [];
+    const result = await api.ask(1, { question: '问题', config_id: 1 }, {
+      onDelta() {},
+      onToolConfirm: request => received.push(['ask', request]),
+      onToolConfirmDone: index => received.push(['done', index]),
+      onToolEnd: (name, value, reference) => received.push(['end', reference]),
+    });
+    expect(received).toEqual([
+      ['ask', { index: 1, name: 'mcp_1_write_file', args: { path: 'a.md' } }],
+      ['done', 1],
+      ['end', { confirmation: 'allowed' }],
+    ]);
+    expect(result).not.toHaveProperty('tool_confirm');
+  });
   it('dispatches only valid context states in order without treating them as answer content', async () => {
     const events = [
       { started: true, node_id: 9 },

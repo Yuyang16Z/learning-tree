@@ -1,7 +1,7 @@
 import { useId, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { localizeError } from "../i18n/workspace";
-import type { McpInput, McpServer, McpTransport } from "../types";
+import type { McpConfirmPolicy, McpInput, McpServer, McpTransport } from "../types";
 import { parseMcpArgs } from "../lib/mcpArgs";
 import { headerPayload, headerRows, headersChanged, remoteUrl, type McpHeaderRow } from "../lib/mcpRemote";
 
@@ -26,6 +26,7 @@ export function McpConfigModal({ server, onClose, onAdd, onUpdate, onDelete, onT
     headers: headerRows(server?.header_names),
     allowPrivate: server?.allow_private ?? false,
     enabled: server?.enabled ?? true,
+    confirmTools: (server?.confirm_tools ?? "writes") as McpConfirmPolicy,
   });
   const [busy, setBusy] = useState<"save" | "test" | "delete" | null>(null);
   const busyRef = useRef(false);
@@ -36,15 +37,17 @@ export function McpConfigModal({ server, onClose, onAdd, onUpdate, onDelete, onT
     form.label !== server.label || form.transport !== (server.transport ?? "stdio") ||
     form.command !== server.command || form.args !== JSON.stringify(server.args ?? [], null, 2) ||
     form.url !== (server.url ?? "") || form.allowPrivate !== (server.allow_private ?? false) ||
-    headersChanged(form.headers, server.header_names) || form.enabled !== server.enabled
+    headersChanged(form.headers, server.header_names) || form.enabled !== server.enabled ||
+    form.confirmTools !== (server.confirm_tools ?? "writes")
   );
 
   const payload = (): McpInput => remote
     ? {
       label: form.label.trim(), transport: "http", command: "", args: [], url: remoteUrl(form.url),
       headers: headerPayload(form.headers), allow_private: form.allowPrivate, enabled: form.enabled,
+      confirm_tools: form.confirmTools,
     }
-    : { label: form.label.trim(), transport: "stdio", command: form.command.trim(), args: parseMcpArgs(form.args), enabled: form.enabled };
+    : { label: form.label.trim(), transport: "stdio", command: form.command.trim(), args: parseMcpArgs(form.args), enabled: form.enabled, confirm_tools: form.confirmTools };
 
   function close() {
     if (!busyRef.current) onClose();
@@ -170,6 +173,15 @@ export function McpConfigModal({ server, onClose, onAdd, onUpdate, onDelete, onT
           </label>
           {form.allowPrivate && <div className="hint mcp-warning" role="note">{t("仅用于你信任的本机开发服务：开启后可连接本机、局域网和 Tailscale 地址，学习树会把问题相关内容发送给它。", "Only for a development server you trust on this computer: this allows loopback, local-network and Tailscale addresses, and LearningTree sends it question-related content.")}</div>}
         </>}
+        <div className="field">
+          <label htmlFor={`${fieldId}-confirm`}>{t("运行工具前确认", "Ask before running tools")}</label>
+          <select id={`${fieldId}-confirm`} value={form.confirmTools} disabled={!!busy} onChange={(e) => update({ confirmTools: e.target.value as McpConfirmPolicy })}>
+            <option value="writes">{t("服务未标为只读的工具先问我", "Ask for tools the server does not mark read-only")}</option>
+            <option value="always">{t("每次都先问我", "Always ask")}</option>
+            <option value="never">{t("直接运行，不问我", "Never ask")}</option>
+          </select>
+          <div className="hint">{t("需要确认时，回答会暂停并显示要运行的工具和参数；不允许或超时（默认 2 分钟）没有回应时，这次调用不会执行。", "When approval is needed, the answer pauses and shows the tool and its arguments; if you decline, or do not answer in time (2 minutes by default), that call does not run.")}</div>
+        </div>
         <label className="hint">
           <input type="checkbox" checked={form.enabled} disabled={!!busy} onChange={(e) => update({ enabled: e.target.checked })} style={{ marginRight: 6 }} />
           {t("启用", "Enabled")}

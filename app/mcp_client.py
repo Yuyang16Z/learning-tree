@@ -533,6 +533,8 @@ class _SessionWorker:
                     "name": tool.name,
                     "description": tool.description or "",
                     "schema": tool.inputSchema or {"type": "object"},
+                    # The server's own hint; unmarked tools may change things (MCP default).
+                    "read_only": bool(tool.annotations and tool.annotations.readOnlyHint),
                 }
                 for tool in response.tools
             )

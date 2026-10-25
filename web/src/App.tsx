@@ -10,6 +10,7 @@ import type {
   ModelCfg,
   ModelInput,
   ThreadNode,
+  ToolConfirmation,
   ToolStep,
   Tree,
   TreeNode,
@@ -60,6 +61,8 @@ export default function App() {
   const [liveReasoning, setLiveReasoning] = useState("");
   const [liveSteps, setLiveSteps] = useState<ToolStep[]>([]);
   const [liveDiagnostics, setLiveDiagnostics] = useState<AnswerDiagnostics | null>(null);
+  // The tool call of the running answer that waits for the learner's approval.
+  const [liveConfirmation, setLiveConfirmation] = useState<ToolConfirmation | null>(null);
   const [liveSources, setLiveSources] = useState<AnswerSource[]>([]);
   const [contextStatus, setContextStatus] = useState<ContextStatus | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
@@ -476,7 +479,7 @@ export default function App() {
     const topicPreset = trees.find(tree => tree.id === treeId)?.learning_preset ?? null;
     setSendingPreset(retry ? nodeQuestionPreset(threadRef.current, fromId) : requestedPreset(topicPreset, learningPresets));
     setPendingQuestion(payload.question); setSendingImages(payload.images ?? []); setSendingDocuments(payload.documents ?? []);
-    setLive(''); setLiveReasoning(''); setLiveSteps([]); setLiveDiagnostics(null); setLiveSources([]); setContextStatus(null);
+    setLive(''); setLiveReasoning(''); setLiveSteps([]); setLiveDiagnostics(null); setLiveSources([]); setContextStatus(null); setLiveConfirmation(null);
     setStreaming(true); setStreamFromId(origin); setErr(null);
     let succeeded = false;
     let accepted = false;
@@ -495,6 +498,8 @@ export default function App() {
       },
       onToolStart: name => setLiveSteps(s => startToolStep(s, name)),
       onToolEnd: (name, result, reference) => setLiveSteps(s => finishToolStep(s, name, result, reference)),
+      onToolConfirm: request => setLiveConfirmation(request),
+      onToolConfirmDone: index => setLiveConfirmation(current => current?.index === index ? null : current),
       onDiagnostics: setLiveDiagnostics,
       onSources: sources => setLiveSources(sources),
     };
@@ -558,9 +563,17 @@ export default function App() {
       }
       abortRef.current = null; requestRef.current = null; streamTargetRef.current = null;
       setStreaming(false); setStreamFromId(null); setLive(''); setLiveReasoning('');
-      setLiveSteps([]); setLiveDiagnostics(null); setLiveSources([]); setPendingQuestion(null); setSendingImages([]); setSendingDocuments([]); setSendingPreset(null);
+      setLiveSteps([]); setLiveDiagnostics(null); setLiveSources([]); setLiveConfirmation(null); setPendingQuestion(null); setSendingImages([]); setSendingDocuments([]); setSendingPreset(null);
     }
     return succeeded;
+  }
+
+  /** The learner's answer to the approval request of the running answer; the stream reports the outcome. */
+  async function onConfirmTool(index: number, allow: boolean): Promise<void> {
+    const req = requestRef.current;
+    const nodeId = streamTargetRef.current ?? req?.from;
+    if (!req || nodeId == null) return;
+    await api.confirmTool(nodeId, req.requestId, index, allow);
   }
 
   async function onStop() {
@@ -778,6 +791,8 @@ export default function App() {
         liveReasoning={liveReasoning}
         liveSteps={liveSteps}
         liveDiagnostics={liveDiagnostics}
+        liveConfirmation={liveConfirmation}
+        onConfirmTool={onConfirmTool}
         liveSources={liveSources}
         onOpenSource={(treeId, nodeId) => void openMemorySource(treeId, nodeId)}
         topicIds={topicIds}

@@ -199,6 +199,8 @@ class McpServerIn(BaseModel):
     headers: dict[str, str] | None = None
     allow_private: bool = False
     enabled: bool = True
+    # Which calls wait for approval: tools not marked read-only, every tool, or none.
+    confirm_tools: Literal["writes", "always", "never"] = "writes"
 
     @model_validator(mode="after")
     def validate_transport(self):
@@ -241,6 +243,7 @@ class McpServerOut(BaseModel):
     header_names: list[str] = []
     allow_private: bool = False
     enabled: bool
+    confirm_tools: Literal["writes", "always", "never"] = "writes"
 
 
 class McpTestOut(BaseModel):
@@ -366,6 +369,14 @@ class NodePatch(BaseModel):
 
 class StopIn(BaseModel):
     request_id: str | None = Field(default=None, max_length=100)
+
+
+class ToolConfirmIn(BaseModel):
+    """The learner's decision on the tool call an answer is waiting for."""
+
+    request_id: str = Field(min_length=1, max_length=100)
+    index: int = Field(ge=1)
+    allow: bool
 
 
 class TitleIn(BaseModel):

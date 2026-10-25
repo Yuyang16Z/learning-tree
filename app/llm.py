@@ -461,6 +461,7 @@ def run_agent(
     cache_prefix: str | None = None,
     time_limit_seconds: float | None = None,
     tool_token_budget: int | None = None,
+    waited: Callable[[], float] | None = None,
 ) -> Iterator[dict]:
     """Yield events: {"type":"tool_start"|"tool_end"|"reasoning"|"delta", ...}.
 
@@ -483,6 +484,8 @@ def run_agent(
     run that long, or its tool results reach that many estimated tokens, the next round
     is the final no-tool round. They are checked between rounds, so a call in progress
     is never interrupted; diagnostics["tool_budget_stop"] names the budget that stopped.
+    waited() returns the seconds `execute` has spent waiting for the learner (approving a
+    tool call), which the time limit does not count.
     Once an OpenAI-compatible endpoint streams reasoning_content (thinking models such
     as DeepSeek's), each tool-call message passes its reasoning back and every other
     assistant message in later requests carries the field empty, as those endpoints
@@ -608,7 +611,7 @@ def run_agent(
                 tool_tokens += _tool_message_cost(tool_message)
             # Budgets apply between rounds; only an otherwise-allowed tool round is skipped.
             if round_index + 1 < max_rounds:
-                elapsed = time.monotonic() - started
+                elapsed = time.monotonic() - started - (waited() if waited else 0.0)
                 if time_limit_seconds is not None and elapsed >= time_limit_seconds:
                     budget_stop = "time"
                 elif tool_token_budget is not None and tool_tokens >= tool_token_budget:

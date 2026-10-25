@@ -40,7 +40,12 @@ export interface TreeNode extends LearningFields {
 export interface ToolStep {
   tool: string; result: string | null;
   call_index?: number; truncated?: boolean; request_id?: string; node_id?: number;
+  /** The learner's decision when the call needed approval (declined and expired calls did not run). */
+  confirmation?: ToolConfirmationOutcome;
 }
+export type ToolConfirmationOutcome = 'allowed' | 'declined' | 'expired';
+/** A tool call of the running answer that waits for the learner's approval. */
+export interface ToolConfirmation { index: number; name: string; args: unknown }
 /** One page of a stored complete tool result. */
 export interface ToolResultPage {
   node_id: number; request_id: string; call_index: number; tool: string; truncated: boolean;
@@ -74,7 +79,8 @@ export interface AnswerDiagnostics {
   target_input_tokens?: number;
   /** Model summaries of older history the prompt carried; absent from older diagnostics. */
   summary_blocks?: number;
-  timings_ms: { retrieval: number; tools: number; summary: number; model: number; total: number };
+  /** approval: time tool calls waited for the learner's decision; absent from older diagnostics. */
+  timings_ms: { retrieval: number; tools: number; summary: number; approval?: number; model: number; total: number };
 }
 /** A memory record an answer was given; ids and titles only, never memory text. */
 export interface AnswerSource {
@@ -162,15 +168,19 @@ export interface ModelDiscovery {
   source: 'provider' | 'catalog' | 'unknown'; note: string;
 }
 export type McpTransport = 'stdio' | 'http';
+/** Which of a server's tool calls wait for approval: not marked read-only, every one, or none. */
+export type McpConfirmPolicy = 'writes' | 'always' | 'never';
 /** A configured MCP server. Remote (http) servers list their header names only, never values. */
 export interface McpServer {
   id: number; label: string; command: string; args?: string[]; enabled: boolean;
   transport?: McpTransport; url?: string | null; header_names?: string[]; allow_private?: boolean;
+  confirm_tools?: McpConfirmPolicy;
 }
 /** A blank header value keeps the stored value of that header; omitted headers keep every stored one. */
 export interface McpInput {
   label: string; command: string; args: string[]; enabled: boolean;
   transport?: McpTransport; url?: string; headers?: Record<string, string>; allow_private?: boolean;
+  confirm_tools?: McpConfirmPolicy;
 }
 export interface Memory { id: number; kind: string; content: string; tree_id: number | null }
 export interface PreferenceProfile { content: string; revision: string; managed: boolean }

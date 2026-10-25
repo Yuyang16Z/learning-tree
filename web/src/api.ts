@@ -1,5 +1,5 @@
 import { readSSE } from "./lib/sse";
-import { toolReference, type ToolReference } from "./lib/toolSteps";
+import { confirmationRequest, toolReference, type ToolReference } from "./lib/toolSteps";
 import { parseSources } from "./lib/sourceLinks";
 import { reportPairingRequired } from "./lib/phonePairing";
 import { getLocale, translate } from "./i18n";
@@ -27,6 +27,7 @@ import type {
   ReturnSummary,
   SearchHit,
   ThreadNode,
+  ToolConfirmation,
   ToolResultPage,
   Tree,
   TreeNode,
@@ -107,6 +108,9 @@ async function relay(res: Response, on: AskHandlers, start: AskMeta, signal?: Ab
       if (obj.context_status === 'summarizing' || obj.context_status === 'ready') on.onContextStatus?.(obj.context_status);
       if (obj.tool_start) on.onToolStart?.(obj.tool_start.name, obj.tool_start.args);
       if (obj.tool_end) on.onToolEnd?.(obj.tool_end.name, obj.tool_end.result, toolReference(obj.tool_end, obj));
+      const confirmation = confirmationRequest(obj.tool_confirm);
+      if (confirmation) on.onToolConfirm?.(confirmation);
+      if (obj.tool_confirm_done && Number.isInteger(obj.tool_confirm_done.index)) on.onToolConfirmDone?.(obj.tool_confirm_done.index);
       if (obj.diagnostics && typeof obj.diagnostics === 'object' && !Array.isArray(obj.diagnostics)) on.onDiagnostics?.(obj.diagnostics as AnswerDiagnostics);
       // Memory provenance is dispatched, never merged into the completion metadata.
       const sources = parseSources(obj.sources);
@@ -147,6 +151,9 @@ export interface AskHandlers {
   onToolStart?: (name: string, args: unknown) => void;
   /** `reference` points at the call's stored complete result when the preview is shorter. */
   onToolEnd?: (name: string, result: string, reference: ToolReference) => void;
+  /** A tool call waits for approval; onToolConfirmDone names the call once it was decided. */
+  onToolConfirm?: (request: ToolConfirmation) => void;
+  onToolConfirmDone?: (index: number) => void;
   /** Numeric request/usage/timing summary, sent once before the answer ends. */
   onDiagnostics?: (diagnostics: AnswerDiagnostics) => void;
   onSources?: (sources: AnswerSource[]) => void;
@@ -269,6 +276,9 @@ export const api = {
   exportTree: (id: number) => fetch(`${API}/trees/${id}/export`).then(j<Record<string, unknown>>),
   importTree: (body: unknown) => jsonPost(`${API}/trees/import`, body).then(j<Tree>),
   stop: (id: number, request_id?: string) => jsonPost(`${API}/nodes/${id}/stop`, { request_id }).then(j<{node_id: number; status: string}>),
+  /** Allow or decline the tool call an answer is waiting for. */
+  confirmTool: (id: number, request_id: string, index: number, allow: boolean) =>
+    jsonPost(`${API}/nodes/${id}/tool-confirm`, { request_id, index, allow }).then(j<{ node_id: number; index: number; allow: boolean }>),
   explain: (id: number, text: string, config_id: number | null, source_message_id?: number | null) =>
     jsonPost(`${API}/nodes/${id}/explain`, { text, config_id, source_message_id, locale: getLocale() }).then(j<{ explanation: string }>),
   saveNote: (id: number, learning_note: string) => fetch(`${API}/nodes/${id}`, {

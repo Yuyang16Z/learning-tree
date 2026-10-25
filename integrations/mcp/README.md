@@ -65,6 +65,18 @@ Besides local programs, **Settings → MCP tools → Add MCP** can connect a rem
 
 除本机程序外，「设置 → MCP 工具 → 添加 MCP」还可以选择「远程 HTTP」，通过 Streamable HTTP 连接远程 MCP 服务：填写服务地址（如 `https://example.com/mcp`），需要时添加 `Authorization: Bearer <token>` 之类的请求头。请求头的值与模型密钥一样只保存在本机 SQLite 中（未加密），接口和设置页只显示名称；编辑时留空即保留原值。凭据请放在请求头里，不要写进地址。连接前会检查地址：只接受不含用户名和密码的 http(s) 地址，主机解析出的每个地址都必须是公网地址；本机、内网、链路本地和 Tailscale 等地址会被拒绝，除非勾选「允许内网地址」（仅用于这台电脑上的开发服务）。不会跟随重定向；连接时会再次解析域名，因此无法防止检查之后的 DNS 重绑定。「测试连接」只显示固定提示，不会回显原始错误或请求头；工具调用失败时同样只返回固定提示，但请求发出后超时或连接中断时，模型收到的是「执行结果未确认」（服务可能已经执行），而不是「无法连接」，以免直接重复调用有副作用的工具。已建立的会话过期或中断时，列出工具会重连一次，工具调用不会重复执行；新连接收到重定向或客户端错误（地址上没有 MCP 服务、凭据被拒）时直接报告，不再重试。每个服务的工具清单缓存 60 秒；服务发出 `notifications/tools/list_changed` 后下一次提问会重新获取，「测试连接」总是重新获取。远程服务会收到模型调用它时的参数，其中可能包含问题内容，请只配置可信的服务。
 
+## Approval before tools run / 运行前确认
+
+Each MCP server has **Ask before running tools** in its settings:
+
+- **Ask for tools the server does not mark read-only** (the default, also for servers added before this setting existed): a call waits for you unless the server marks the tool `readOnlyHint`. The bundled presets mark their tools, so web search and reading, file listing and reading, memory lookups and step-by-step thinking run at once, while writing, editing or moving files and changing the knowledge memory ask first. A server that marks nothing asks before every call; choose **Never ask** for one you trust.
+- **Always ask**: every call of this server waits for you, whatever the server claims.
+- **Never ask**: the model runs this server's tools directly, as before.
+
+A waiting call pauses the answer: the label reads **Waiting for your approval**, and a card shows the tool and the arguments it would run with, with **Allow** and **Don't allow**. The card appears in the window that asked, and comes back when that window reconnects after a dropped connection (a phone that locked, say); a reloaded page or another device only shows the answer as running. A declined call, or one not answered within `TOOL_CONFIRM_TIMEOUT_SECONDS` (default 120, `.env`), does not run: the model is told so and continues without it, and the tool step reads *Not allowed, not run* or *Not confirmed in time, not run*. **Stop** ends the answer without running the call. Time spent waiting is reported as its own phase in the answer diagnostics and never counts against `AGENT_TIME_LIMIT_SECONDS`. The read-only mark comes from the server itself: a server that mislabels a tool bypasses the default, so use **Always ask** for servers you do not fully trust. The app's own readers and the built-in web tools only read and never ask.
+
+每个 MCP 服务的设置里都有「运行工具前确认」：默认「服务未标为只读的工具先问我」（升级前已添加的服务也是这个默认值）——服务没有用 `readOnlyHint` 标为只读的工具要等你确认才运行。内置预设都标注了自己的工具，所以联网搜索和读取网页、列出和读取文件、查询知识记忆、分步思考直接运行，写入、编辑、移动文件和修改知识记忆会先问你；完全不做标注的服务每次调用都会问，信任它时可改为「直接运行，不问我」。「每次都先问我」不管服务如何声明都会询问。需要确认时回答暂停，状态显示「等待你确认」，卡片列出工具和将要使用的参数，提供「允许运行」和「不允许」。卡片出现在提问的窗口里，连接中断后重新连上（例如手机锁屏后解锁）会再次出现；刷新后的页面或其他设备只显示回答正在进行。不允许或在 `TOOL_CONFIRM_TIMEOUT_SECONDS`（默认 120 秒）内没有回应时，这次调用不执行，模型会被告知并继续回答，工具步骤显示「未允许，没有运行」或「确认超时，没有运行」；按「停止」会结束回答且不执行该调用。等待时间在回答诊断里单独列出，不计入 `AGENT_TIME_LIMIT_SECONDS`。只读标记由服务自己提供，标错的服务可以绕过默认设置，不完全信任的服务请选「每次都先问我」。应用自带的回读工具和内置联网工具只读取，不会询问。
+
 ## Data and process boundaries / 数据与会话
 
 - **Learning files:** the project's `learning-materials/` directory is exposed for reading and writing. An existing legacy `学习资料/` directory remains accessible in place; files are never moved, merged or overwritten during this transition. Both libraries are excluded from Git except the public `learning-materials/README.md`. A symlink replacing either library root is rejected. Restart the app after upgrading to refresh cached MCP sessions.

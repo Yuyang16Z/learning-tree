@@ -18,7 +18,7 @@ import { DocumentCards } from "./DocumentCards";
 import { ChatTurnNavigator, turnKey } from "./ChatTurnNavigator";
 import { markTarget, toggleUnderstanding, UNDERSTANDING_LEVELS, UNDERSTANDING_TEXT } from "../lib/understanding";
 import { followReturnTrip, hasReturnContent, returnTitle, type ReturnTrip } from "../lib/returnTrip";
-import type { AnswerDiagnostics, AnswerSource, DocumentSummary, LearningPresetList, McpServer, ModelCfg, ReturnExcerptCategory, ReturnSummary, ThreadNode, ToolStep, Understanding } from "../types";
+import type { AnswerDiagnostics, AnswerSource, DocumentSummary, LearningPresetList, McpServer, ModelCfg, ReturnExcerptCategory, ReturnSummary, ThreadNode, ToolConfirmation, ToolStep, Understanding } from "../types";
 import { LearningStyleMenu, LearningStyleTag } from "./LearningStyle";
 import "./ChatPane.css";
 
@@ -36,6 +36,9 @@ interface Props {
   live: string;
   liveReasoning: string;
   liveSteps: ToolStep[];
+  /** A tool call of the running answer waiting for approval, and how to answer it. */
+  liveConfirmation?: ToolConfirmation | null;
+  onConfirmTool?: (index: number, allow: boolean) => Promise<void>;
   liveDiagnostics?: AnswerDiagnostics | null;
   /** Memory records the running answer was given; shown as a compact "Referenced" line. */
   liveSources?: AnswerSource[];
@@ -162,10 +165,42 @@ function FullToolResult({ preview, source }: { preview: string; source: FullResu
 }
 function ToolSteps({ steps, mcpServers, nodeId }: { steps: ToolStep[]; mcpServers: McpServer[]; nodeId?: number | null }) {
   const { t } = useI18n();
+  const status = (step: ToolStep) => step.result === null ? t(" · 进行中", " · Running")
+    : step.confirmation === "declined" ? t(" · 未允许，没有运行", " · Not allowed, not run")
+    : step.confirmation === "expired" ? t(" · 确认超时，没有运行", " · Not confirmed in time, not run")
+    : step.confirmation === "allowed" ? t(" · 已允许 · 已完成", " · Allowed · Done")
+    : t(" · 已完成", " · Done");
   return <>{steps.map((step, i) => {
     const source = fullResultSource(step, nodeId);
-    return <details className="chat-reasoning" key={i}><summary>{toolStepLabel(step.tool, t, mcpServers)}{step.result === null ? t(" · 进行中", " · Running") : t(" · 已完成", " · Done")}</summary>{step.result !== null && (source ? <FullToolResult preview={step.result} source={source} /> : <div>{step.result}</div>)}</details>;
+    return <details className="chat-reasoning" key={i}><summary>{toolStepLabel(step.tool, t, mcpServers)}{status(step)}</summary>{step.result !== null && (source ? <FullToolResult preview={step.result} source={source} /> : <div>{step.result}</div>)}</details>;
   })}</>;
+}
+/** Arguments of a call waiting for approval, as readable JSON (shortened when long). */
+function confirmationArgs(args: unknown): string {
+  if (args == null || (typeof args === "object" && !Array.isArray(args) && !Object.keys(args).length)) return "";
+  let text: string;
+  try { text = JSON.stringify(args, null, 2) ?? ""; } catch { text = String(args); }
+  return text.length > 1200 ? text.slice(0, 1200) + "…" : text;
+}
+/** The tool call the running answer waits on: what would run, and the learner's decision. */
+function ToolConfirmCard({ request, mcpServers, onDecide }: { request: ToolConfirmation; mcpServers: McpServer[]; onDecide?: (index: number, allow: boolean) => Promise<void> }) {
+  const { t } = useI18n();
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => { setBusy(false); setFailed(false); }, [request.index]);
+  const args = confirmationArgs(request.args);
+  async function decide(allow: boolean) {
+    if (busy || !onDecide) return;
+    setBusy(true); setFailed(false);
+    // On success the stream's outcome closes the card; a failed send can be retried.
+    try { await onDecide(request.index, allow); } catch { setFailed(true); setBusy(false); }
+  }
+  return <div className="chat-confirm" role="group" aria-label={t("工具运行确认", "Tool approval")}>
+    <div className="chat-confirm-title">{t("这个回答要运行「{tool}」，允许吗？", "This answer wants to run “{tool}”. Allow it?", { tool: toolStepLabel(request.name, t, mcpServers) })}</div>
+    {args && <pre className="chat-confirm-args">{args}</pre>}
+    {failed && <div className="test-bad" role="alert">{t("没有送达，请重试。", "Not delivered. Please try again.")}</div>}
+    <div className="chat-confirm-actions"><button type="button" className="btn btn-primary" onClick={() => void decide(true)} disabled={busy}>{t("允许运行", "Allow")}</button><button type="button" className="btn" onClick={() => void decide(false)} disabled={busy}>{t("不允许", "Don't allow")}</button></div>
+  </div>;
 }
 /** Numbers only, collapsed by default: how the requests were budgeted and what the provider reported. */
 function DiagnosticsBlock({ data }: { data?: AnswerDiagnostics | null }) {
@@ -300,7 +335,7 @@ export function ChatPane(props: Props) {
   const { locale, t } = useI18n();
   const translationRef = useRef(t);
   translationRef.current = t;
-  const { thread, treeTitle, hasNode, loading = false, activeNodeId, activeTreeId, focusedSeed, live, liveReasoning, liveSteps, liveDiagnostics = null, liveSources = [], onOpenSource, topicIds = NO_IDS, mapNodeIds = NO_IDS, contextStatus, reconnecting = false, pendingQuestion, sendingImages, sendingDocuments, streaming, showStream, err, models, activeModelId, onModelChange, onOpenSettings, onAsk, onStop, onStopNode, onUnderstandingChange, onBranch, onNavigate, navigationAnchor, rightOpen, onToggleRight, onAddMock, mcpServers, onExport, onNew, learningPresets = null, learningPresetsFailed = false, topicPreset = null, onLearningPresetChange, onReloadPresets, sendingPreset = null } = props;
+  const { thread, treeTitle, hasNode, loading = false, activeNodeId, activeTreeId, focusedSeed, live, liveReasoning, liveSteps, liveDiagnostics = null, liveConfirmation = null, onConfirmTool, liveSources = [], onOpenSource, topicIds = NO_IDS, mapNodeIds = NO_IDS, contextStatus, reconnecting = false, pendingQuestion, sendingImages, sendingDocuments, streaming, showStream, err, models, activeModelId, onModelChange, onOpenSettings, onAsk, onStop, onStopNode, onUnderstandingChange, onBranch, onNavigate, navigationAnchor, rightOpen, onToggleRight, onAddMock, mcpServers, onExport, onNew, learningPresets = null, learningPresetsFailed = false, topicPreset = null, onLearningPresetChange, onReloadPresets, sendingPreset = null } = props;
   const openSource = (id: number) => void onNavigate(id);
   const sourceView: SourceView = { activeTreeId, topicIds, nodeIds: mapNodeIds, canOpenTopics: !!onOpenSource };
   const nearestBranch = [...thread].reverse().find(node => node.seed_text && (node.source_node_id ?? node.parent_id) != null);
@@ -820,7 +855,7 @@ export function ChatPane(props: Props) {
               {!!node.attempts?.length && <details className="chat-reasoning chat-prior-attempts"><summary>{t("之前的未完成回答（{count}）", "Previous incomplete responses ({count})", { count: node.attempts.length })}</summary>{node.attempts.map(attempt => <div className="chat-markdown" data-answer-node={node.node_id} data-message-id={attempt.message_id} key={attempt.message_id}><Markdown text={attempt.content || t("未收到内容", "No content received")} /></div>)}</details>}
               {(node.status === "error" || node.status === "interrupted") && <div className="chat-retry"><span>{node.status === "interrupted" ? t("回答已停止", "Response stopped") : t("这次回答未完成", "This response is incomplete")}</span><button onClick={() => void send(node)} disabled={streaming || noModel}>{t("重试", "Retry")}</button>{node.error && <details><summary>{t("详情", "Details")}</summary><p>{localizeError(node.error, locale)}</p></details>}</div>}
             </section>)}
-            {showStream && <section className="chat-turn chat-live"><div className="chat-question"><LearningStyleTag id={sendingPreset} presets={learningPresets} /><ImageStrip images={sendingImages} /><DocumentCards documents={sendingDocuments} /><div>{pendingQuestion}</div></div><div className="chat-answer"><div className="chat-answer-label" role="status"><span className="chat-answer-dot is-loading" />{reconnecting ? t("连接中断，正在重新连接…", "Connection lost. Reconnecting…") : contextStatus === "summarizing" && !live ? t("正在整理上下文…", "Organizing context…") : t("正在回答", "Responding")}</div><ReasoningBlock text={liveReasoning} /><ToolSteps steps={liveSteps} mcpServers={mcpServers} /><div className="chat-markdown" aria-live="polite" aria-busy="true">{live ? <Markdown text={live} /> : <span className="chat-typing">•••</span>}</div><SourcesLine sources={liveSources} view={sourceView} onNavigate={openSource} onOpenSource={onOpenSource} /><DiagnosticsBlock data={liveDiagnostics} /></div></section>}
+            {showStream && <section className="chat-turn chat-live"><div className="chat-question"><LearningStyleTag id={sendingPreset} presets={learningPresets} /><ImageStrip images={sendingImages} /><DocumentCards documents={sendingDocuments} /><div>{pendingQuestion}</div></div><div className="chat-answer"><div className="chat-answer-label" role="status"><span className="chat-answer-dot is-loading" />{reconnecting ? t("连接中断，正在重新连接…", "Connection lost. Reconnecting…") : liveConfirmation ? t("等待你确认", "Waiting for your approval") : contextStatus === "summarizing" && !live ? t("正在整理上下文…", "Organizing context…") : t("正在回答", "Responding")}</div><ReasoningBlock text={liveReasoning} /><ToolSteps steps={liveSteps} mcpServers={mcpServers} />{liveConfirmation && <ToolConfirmCard request={liveConfirmation} mcpServers={mcpServers} onDecide={onConfirmTool} />}<div className="chat-markdown" aria-live="polite" aria-busy="true">{live ? <Markdown text={live} /> : <span className="chat-typing">•••</span>}</div><SourcesLine sources={liveSources} view={sourceView} onNavigate={openSource} onOpenSource={onOpenSource} /><DiagnosticsBlock data={liveDiagnostics} /></div></section>}
           </div>
         </div>
         <ChatTurnNavigator turns={visibleThread} scrollRef={scrollRef} scopeKey={scrollKey} onJump={() => { stickToBottom.current = false; setAwayFromBottom(true); setSelection(null); selectionRequestRef.current++; }} />

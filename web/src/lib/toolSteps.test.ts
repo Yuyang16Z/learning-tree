@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { McpServer } from "../types";
-import { finishToolStep, fullResultSource, startToolStep, toolReference, toolStepLabel } from "./toolSteps";
+import { confirmationRequest, finishToolStep, fullResultSource, startToolStep, toolReference, toolStepLabel } from "./toolSteps";
 
 const zh = (text: string) => text;
 const en = (_zh: string, text: string) => text;
@@ -23,6 +23,19 @@ describe("tool steps and their stored complete results", () => {
     expect(toolReference({ truncated: false }, { request_id: "r", node_id: 3 })).toEqual({ truncated: false });
     expect(toolReference({ call_index: "2", truncated: "yes" }, { request_id: 5, node_id: "3" })).toEqual({});
     expect(toolReference({ call_index: 0 }, {})).toEqual({});
+  });
+
+  it("keeps the learner's decision on a call that needed approval", () => {
+    expect(toolReference({ confirmation: "declined" }, {})).toEqual({ confirmation: "declined" });
+    expect(toolReference({ confirmation: "allowed", call_index: 1 }, { request_id: "r", node_id: 2 })).toEqual({ confirmation: "allowed", call_index: 1, request_id: "r", node_id: 2 });
+    expect(toolReference({ confirmation: "maybe" }, {})).toEqual({});
+  });
+
+  it("reads approval requests and drops malformed ones", () => {
+    expect(confirmationRequest({ index: 2, name: "mcp_1_write_file", args: { path: "a.md" } })).toEqual({ index: 2, name: "mcp_1_write_file", args: { path: "a.md" } });
+    expect(confirmationRequest({ index: 1, name: "mcp_1_x" })).toEqual({ index: 1, name: "mcp_1_x", args: null });
+    for (const bad of [null, "x", [], { index: 0, name: "t" }, { index: 1.5, name: "t" }, { index: 1, name: "" }, { index: 1, name: 3 }])
+      expect(confirmationRequest(bad)).toBeNull();
   });
 
   it("offers the complete text only for truncated steps with a stored reference", () => {
