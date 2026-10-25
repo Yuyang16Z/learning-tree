@@ -5,6 +5,7 @@ import copy
 import json
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from uuid import uuid4
 
@@ -15,6 +16,7 @@ from sqlalchemy.orm import defer
 from sqlmodel import Session, select
 
 from ..answer_sources import resolve_sources, scrub_sources, sources_for_storage
+from ..answer_trace import answer_report
 from ..calibration import calibration_sample, record_usage
 from ..config import settings
 from ..context import BASE_SYSTEM, build_context, context_messages, make_content
@@ -166,6 +168,185 @@ class Generation:
                 loop.call_soon_threadsafe(ready.set)
             except RuntimeError:  # That viewer's event loop has already closed.
                 pass
+
+
+class ToolRunner:
+    """Stage: the tool calls of one answer, called by the agent loop one at a time.
+
+    The answer's read-only readers run here; every other call goes to `execute`. A call
+    whose server asks for approval waits for the learner first (approval time and tool
+    time are timed apart). Decisions and complete result texts are kept by call index,
+    which the answer's event loop sets on each tool_start.
+    """
+
+    def __init__(
+        self,
+        generation: Generation,
+        router: dict,
+        execute,
+        readers: dict,
+        *,
+        call: dict,
+        timings: dict,
+        decisions: dict[int, str],
+        complete_texts: dict[int, str],
+    ) -> None:
+        self.generation, self.router, self.execute = generation, router, execute
+        self.readers = {name: reader for name, reader in readers.items() if reader is not None}
+        self.call, self.timings = call, timings
+        self.decisions, self.complete_texts = decisions, complete_texts
+
+    def __call__(self, name: str, arguments: dict) -> str:
+        if self.generation.stop.is_set():
+            raise RuntimeError("generation cancelled before tool execution")
+        index = self.call["index"]
+        if needs_confirmation(self.router, name):
+            waiting = time.monotonic()
+            try:
+                outcome = self.generation.await_confirmation(
+                    index, name, arguments, settings.tool_confirm_timeout_seconds
+                )
+            finally:
+                self.timings["approval"] += time.monotonic() - waiting
+            if outcome == "stopped":
+                raise RuntimeError("generation cancelled before tool execution")
+            self.decisions[index] = outcome
+            if outcome != "allowed":
+                return TOOL_NOT_RUN[outcome]
+        started = time.monotonic()
+        try:
+            reader = self.readers.get(name)
+            result = reader(arguments) if reader else self.execute(name, arguments)
+        finally:
+            self.timings["tools"] += time.monotonic() - started
+        # The executor may carry the complete text of a bounded MCP result.
+        text = str(result)
+        complete = getattr(result, "full", text)
+        self.complete_texts[index] = complete
+        if len(complete) > len(text):
+            text += _COMPLETE_RESULT_NOTE.format(total=len(complete), index=index)
+        return text
+
+
+def _retrieve_memory(tree_id, source_ids, question, quote, note):
+    """Stage: memory recall for one question, and the scope settings it used.
+
+    Local inference must not hold _REQUEST_LOCK, so Stop and retry stay responsive. The
+    scopes are a snapshot: the history tool keeps this view even if the setting changes
+    while the answer runs. The quote and note are mandatory even after compaction, so
+    recall never repeats them.
+    """
+    with Session(engine) as session:
+        stored = read_retrieval_settings(session)
+        scopes = {
+            "include_siblings": stored.include_siblings,
+            "include_other_trees": stored.include_other_trees,
+        }
+        memory = fetch_memory_note(
+            session,
+            tree_id,
+            source_ids,
+            query=question,
+            quoted_text=quote,
+            existing_text=quote + "\n" + (note or ""),
+            scopes=scopes,
+        )
+    return memory, scopes
+
+
+@dataclass
+class AnswerTools:
+    """What the tools stage chose for one answer."""
+
+    definitions: list[dict]  # Advertised to the model (the catalog's view in catalog mode).
+    router: dict  # Routes of the selected tools, for make_executor.
+    requested: bool  # The learner selected tools; readers alone do not count.
+    readers_off: bool  # The endpoint rejected tools before: no implicit readers.
+    document_reader: Callable | None
+    catalog: ToolCatalog | None
+    schema_budget: int
+
+
+def _answer_tools(
+    spec: LLMSpec,
+    policy: ContextPolicy,
+    requested_tools: list[str],
+    *,
+    documents,
+    document_ids,
+    target_id: int,
+    tree_id: int,
+    is_mock: bool,
+    scopes: dict,
+    protected_system: str,
+    question: str,
+    images,
+) -> AnswerTools:
+    """Stage: the tools one answer may use, and whether they need the on-demand catalog.
+
+    Selected tools are listed (MCP discovery may start a server), then the read-only
+    readers join: the document reader for attached documents, the source reader with
+    any tool, the history search with tools or widened memory scopes, and the stored
+    result reader whenever anything is offered. Demo answers get no readers. A checked
+    group grants availability, not an obligation to attach every server's schema to
+    every request: beyond a stable allowance the definitions go behind the catalog.
+    """
+    with Session(engine) as session:
+        selected, router = assemble_tools(session, requested_tools)
+    # User-selected tools, before the implicit document reader joins them.
+    requested = bool(selected)
+    # An endpoint that rejected tools before gets no implicit readers either.
+    readers_off = not requested and tools_unsupported(spec)
+    document_reader = None
+    if documents and not is_mock and not readers_off:
+        selected = [*selected, DOCUMENT_TOOL_DEF]
+        document_reader = make_document_reader(
+            engine,
+            target_id,
+            tree_id,
+            set(document_ids),
+            max_chars=max(32, min(1200, (policy.tool_reserve - 1024) // 4)),
+        )
+    definitions = selected + ([SOURCE_TOOL_DEF] if selected and not is_mock else [])
+    # The read-only history search joins tool rounds, and is offered on its own when
+    # the user widened memory recall; demo mode never gets it.
+    if (
+        not is_mock
+        and not readers_off
+        and (requested or scopes["include_siblings"] or scopes["include_other_trees"])
+    ):
+        definitions = [*definitions, HISTORY_TOOL_DEF]
+    definitions = _with_result_reader(definitions, is_mock)
+    # Reserve a stable allowance so later discovery cannot crowd out the current question.
+    reader_names = (SOURCE_TOOL_NAME, DOCUMENT_TOOL_NAME, HISTORY_TOOL_NAME, TOOL_RESULT_TOOL_NAME)
+    pinned = [item for item in definitions if item["function"]["name"] in reader_names]
+    core_cost = estimate_request_tokens(
+        protected_system,
+        [{"role": "user", "content": make_content(question, images)}],
+        protocol=spec.protocol,
+    )
+    schema_room = max(0, policy.input_budget - policy.tool_reserve - core_cost - 512)
+    schema_budget = min(
+        schema_room,
+        max(policy.schema_allowance, tool_definition_cost([*pinned, SEARCH_TOOL_DEF])),
+    )
+    catalog = None
+    if definitions and needs_catalog(definitions, schema_budget):
+        catalog = ToolCatalog(
+            definitions,
+            budget=schema_budget,
+            pinned_names=tuple(item["function"]["name"] for item in pinned),
+            query=question,
+            # The catalog never registers the reader's reserved name as a selected
+            # tool; it advertises the agent's own definition instead.
+            owned=tuple(
+                item for item in pinned if item["function"]["name"] == TOOL_RESULT_TOOL_NAME
+            ),
+        )
+        definitions = catalog.definitions
+    return AnswerTools(
+        definitions, router, requested, readers_off, document_reader, catalog, schema_budget
+    )
 
 
 _GENERATIONS: dict[int, Generation] = {}
@@ -1256,6 +1437,11 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
         requested_tools = [] if is_mock else (body.tools or [])
 
     def produce():
+        """Run the answer in stages, emitting events to `generation` as they happen: a
+        preflight budget check, memory retrieval (_retrieve_memory), the tools
+        (_answer_tools), context assembly with model summaries (build_context), the
+        model rounds with tool calls through ToolRunner, then persistence, diagnostics
+        (answer_report) and calibration. Background work follows in run()."""
         stream = None
         title_queued = False
         last_checkpoint = time.monotonic()
@@ -1281,68 +1467,17 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             """Numbers only: never the protected/stable system text held in context_stats."""
             if model_started is None:
                 return
-            now = time.monotonic()
-            rounds = usage.get("rounds") or []
-
-            def total(key: str) -> int | None:
-                # A total some request did not report is unknown: a partial sum would
-                # set an answer-wide estimate against part of its usage.
-                values = [r.get(key) for r in rounds]
-                if not values or any(value is None for value in values):
-                    return None
-                return int(sum(values))
-
-            def largest() -> dict | None:
-                # The request with the largest estimate (the later one on a tie): what a
-                # single request carried, which the summed totals are not.
-                if not rounds:
-                    return None
-                _, peak = max(
-                    enumerate(rounds),
-                    key=lambda item: (item[1].get("estimated_input_tokens") or 0, item[0]),
-                )
-
-                def number(key: str) -> int | None:
-                    value = peak.get(key)
-                    return None if value is None else int(value)
-
-                return {
-                    "estimated_input_tokens": int(peak.get("estimated_input_tokens") or 0),
-                    "actual_input_tokens": number("input_tokens"),
-                    "cached_input_tokens": number("cached_input_tokens"),
-                }
-
-            def ms(seconds: float) -> int:
-                return int(round(max(0.0, seconds) * 1000))
-
-            report = {
-                # Summed over every provider request: each tool round and the final answer.
-                "estimated_input_tokens": total("estimated_input_tokens")
-                or int(context_stats.get("estimated_input_tokens") or 0),
-                "actual_input_tokens": total("input_tokens"),
-                "cached_input_tokens": total("cached_input_tokens"),
-                "output_tokens": total("output_tokens"),
-                "requests": len(rounds),
-                "largest_request": largest(),
-                "compacted": bool(context_stats.get("compacted")),
-                "memory_count": len(kept_sources),
-                "tool_rounds": int(usage.get("tool_rounds") or 0),
-                # "time" or "tokens" when an agent budget ended the tool rounds early.
-                "tool_budget_stop": usage.get("tool_budget_stop"),
-                "calibration_ratio": round(float(spec.calibration), 3),
-                # Model summaries of older history in the prompt (cached or new).
-                "summary_blocks": int(context_stats.get("summary_blocks") or 0),
-                # The soft request target in tokens (configured or automatic).
-                "target_input_tokens": ContextPolicy.from_spec(spec).effective_target_tokens,
-                "timings_ms": {
-                    "retrieval": ms(timings["retrieval"]),
-                    "tools": ms(timings["tools"]),
-                    "summary": ms(timings["summary"]),
-                    "approval": ms(timings["approval"]),
-                    "model": ms(now - model_started - timings["tools"] - timings["approval"]),
-                    "total": ms(now - started_at),
-                },
-            }
+            report = answer_report(
+                usage=usage,
+                context_stats=context_stats,
+                memory_count=len(kept_sources),
+                calibration=spec.calibration,
+                target_tokens=ContextPolicy.from_spec(spec).effective_target_tokens,
+                timings=timings,
+                model_started=model_started,
+                started_at=started_at,
+                now=time.monotonic(),
+            )
             with generation.lock:
                 generation.diagnostics = report
             generation.emit({"diagnostics": report})
@@ -1369,105 +1504,40 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             if generation.stop.is_set():
                 return
             memory = ""
-            # Scope settings are snapshotted now; the history tool keeps this view
-            # even if the user changes the setting while the answer runs.
             scope_snapshot = {"include_siblings": False, "include_other_trees": False}
-            # Local inference must not hold _REQUEST_LOCK: stop/retry remain responsive.
             if not is_mock:
                 retrieval_started = time.monotonic()
-                with Session(engine) as memory_session:
-                    scopes = read_retrieval_settings(memory_session)
-                    scope_snapshot = {
-                        "include_siblings": scopes.include_siblings,
-                        "include_other_trees": scopes.include_other_trees,
-                    }
-                    memory = fetch_memory_note(
-                        memory_session,
-                        tree_id,
-                        memory_source_ids,
-                        query=question_text,
-                        quoted_text=memory_quote,
-                        # These sources are mandatory even after compaction.
-                        existing_text=memory_quote + "\n" + (context_target.learning_note or ""),
-                        # The same snapshot binds the history tool below.
-                        scopes=scope_snapshot,
-                    )
+                memory, scope_snapshot = _retrieve_memory(
+                    tree_id,
+                    memory_source_ids,
+                    question_text,
+                    memory_quote,
+                    context_target.learning_note,
+                )
                 timings["retrieval"] = time.monotonic() - retrieval_started
             # Test doubles return plain strings; provenance is optional.
             memory_sources = list(getattr(memory, "sources", None) or [])
             if generation.stop.is_set():
                 return
-            with Session(engine) as tool_session:
-                tool_defs, tool_router = assemble_tools(tool_session, requested_tools)
-            # User-selected tools, before the implicit document reader joins them.
-            tools_requested = bool(tool_defs)
-            # An endpoint that rejected tools before gets no implicit readers either.
-            readers_off = not tools_requested and tools_unsupported(spec)
-            document_reader = None
-            if context_documents and not is_mock and not readers_off:
-                tool_defs = [*tool_defs, DOCUMENT_TOOL_DEF]
-                document_reader = make_document_reader(
-                    engine,
-                    target_id,
-                    tree_id,
-                    set(document_ids),
-                    max_chars=max(32, min(1200, (policy.tool_reserve - 1024) // 4)),
-                )
+            tools = _answer_tools(
+                spec,
+                policy,
+                requested_tools,
+                documents=context_documents,
+                document_ids=document_ids,
+                target_id=target_id,
+                tree_id=tree_id,
+                is_mock=is_mock,
+                scopes=scope_snapshot,
+                protected_system=preflight_stats["protected_system"],
+                question=question_text,
+                images=question_images,
+            )
             if generation.stop.is_set():
                 return
-            context_defs = tool_defs + ([SOURCE_TOOL_DEF] if tool_defs and not is_mock else [])
-            # The read-only history search joins tool rounds, and is offered on its
-            # own when the user widened memory recall; demo mode never gets it.
-            history_wanted = (
-                not is_mock
-                and not readers_off
-                and (
-                    tools_requested
-                    or scope_snapshot["include_siblings"]
-                    or scope_snapshot["include_other_trees"]
-                )
-            )
-            if history_wanted:
-                context_defs = [*context_defs, HISTORY_TOOL_DEF]
-            context_defs = _with_result_reader(context_defs, is_mock)
-            tool_catalog = None
-            # A checked group grants availability, not an obligation to attach
-            # every server's schema to every request. Reserve a stable allowance
-            # so later discovery cannot crowd out the current question.
-            reader_names = (
-                SOURCE_TOOL_NAME,
-                DOCUMENT_TOOL_NAME,
-                HISTORY_TOOL_NAME,
-                TOOL_RESULT_TOOL_NAME,
-            )
-            pinned = [
-                definition
-                for definition in context_defs
-                if definition["function"]["name"] in reader_names
-            ]
-            core_cost = estimate_request_tokens(
-                preflight_stats["protected_system"],
-                [{"role": "user", "content": make_content(question_text, question_images)}],
-                protocol=spec.protocol,
-            )
-            schema_room = max(0, policy.input_budget - policy.tool_reserve - core_cost - 512)
-            schema_budget = min(
-                schema_room,
-                max(policy.schema_allowance, tool_definition_cost([*pinned, SEARCH_TOOL_DEF])),
-            )
-            if context_defs and needs_catalog(context_defs, schema_budget):
-                tool_catalog = ToolCatalog(
-                    context_defs,
-                    budget=schema_budget,
-                    pinned_names=tuple(item["function"]["name"] for item in pinned),
-                    query=question_text,
-                    # The catalog never registers the reader's reserved name as a
-                    # selected tool; it advertises the agent's own definition instead.
-                    owned=tuple(
-                        item for item in pinned if item["function"]["name"] == TOOL_RESULT_TOOL_NAME
-                    ),
-                )
-                context_defs = tool_catalog.definitions
+            context_defs, tool_router, tool_catalog = tools.definitions, tools.router, tools.catalog
+            tools_requested, readers_off = tools.requested, tools.readers_off
+            document_reader, schema_budget = tools.document_reader, tools.schema_budget
             request_system, llm_messages = build_context(
                 ancestors,
                 context_target,
@@ -1621,59 +1691,27 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
 
             tool_defs = context_defs
             if tool_defs:
-                execute = make_executor(tool_router)
-
-                def run_tool(name, arguments):
-                    if name == SOURCE_TOOL_NAME and source_reader is not None:
-                        return source_reader(arguments)
-                    if name == DOCUMENT_TOOL_NAME and document_reader is not None:
-                        return document_reader(arguments)
-                    if name == HISTORY_TOOL_NAME and history_search is not None:
-                        return history_search(arguments)
-                    if name == TOOL_RESULT_TOOL_NAME and tool_result_reader is not None:
-                        return tool_result_reader(arguments)
-                    return execute(name, arguments)
-
-                def guarded_execute(name, arguments):
-                    if generation.stop.is_set():
-                        raise RuntimeError("generation cancelled before tool execution")
-                    if needs_confirmation(tool_router, name):
-                        waiting = time.monotonic()
-                        try:
-                            outcome = generation.await_confirmation(
-                                call["index"],
-                                name,
-                                arguments,
-                                settings.tool_confirm_timeout_seconds,
-                            )
-                        finally:
-                            timings["approval"] += time.monotonic() - waiting
-                        if outcome == "stopped":
-                            raise RuntimeError("generation cancelled before tool execution")
-                        decisions[call["index"]] = outcome
-                        if outcome != "allowed":
-                            return TOOL_NOT_RUN[outcome]
-                    tool_started = time.monotonic()
-                    try:
-                        result = run_tool(name, arguments)
-                    finally:
-                        timings["tools"] += time.monotonic() - tool_started
-                    # The executor may carry the complete text of a bounded MCP result.
-                    text = str(result)
-                    complete = getattr(result, "full", text)
-                    complete_texts[call["index"]] = complete
-                    if len(complete) > len(text):
-                        text += _COMPLETE_RESULT_NOTE.format(
-                            total=len(complete), index=call["index"]
-                        )
-                    return text
-
+                runner = ToolRunner(
+                    generation,
+                    tool_router,
+                    make_executor(tool_router),
+                    {
+                        SOURCE_TOOL_NAME: source_reader,
+                        DOCUMENT_TOOL_NAME: document_reader,
+                        HISTORY_TOOL_NAME: history_search,
+                        TOOL_RESULT_TOOL_NAME: tool_result_reader,
+                    },
+                    call=call,
+                    timings=timings,
+                    decisions=decisions,
+                    complete_texts=complete_texts,
+                )
                 stream = run_agent(
                     spec,
                     request_system,
                     llm_messages,
                     tool_defs,
-                    guarded_execute,
+                    runner,
                     protected_system=context_stats["protected_system"],
                     diagnostics=usage,
                     cache_prefix=context_stats.get("stable_system"),

@@ -57,6 +57,15 @@ export interface RequestInput {
   actual_input_tokens: number | null;
   cached_input_tokens: number | null;
 }
+/** One provider request of an answer in order, with what it reported and the tool calls it led to. */
+export interface RoundTrace extends RequestInput {
+  output_tokens: number | null;
+  /** The request had to be trimmed to fit the hard budget. */
+  trimmed: boolean;
+  tool_calls: number;
+  /** Running time of those calls; waits for approval are left out. */
+  tool_ms: number;
+}
 /** Numbers only: how an answer's requests were budgeted, what the provider reported and how long each phase took. */
 export interface AnswerDiagnostics {
   /** Summed over every provider request of the answer (each tool round and the final answer); a reported total is null when any request left that count out. */
@@ -68,6 +77,8 @@ export interface AnswerDiagnostics {
   requests?: number;
   /** The request with the largest estimate: the context a single request carried. */
   largest_request?: RequestInput | null;
+  /** Every provider request in order; absent from older diagnostics. */
+  rounds?: RoundTrace[];
   compacted: boolean;
   /** Memory records that reached the prompt, counted when the answer was produced; the "Referenced" line shows those that still exist, so it can list fewer after a deletion. Absent from older diagnostics. */
   memory_count?: number;

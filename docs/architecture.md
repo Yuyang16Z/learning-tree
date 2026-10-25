@@ -115,6 +115,15 @@ Relevance recall searches built-in `Memory` records. Separately, `app/search_ind
 
 ## Generation and recovery
 
+`POST /nodes/{id}/ask` stores the question and a pending node under the request lock, snapshots everything the answer needs (path, current node, history, documents, model, summary model) and returns the event stream at once; a worker thread then runs the answer in stages, each checking Stop before it starts:
+
+1. **Preflight**: `build_context` without memory or tools, so input that cannot fit fails before any discovery or model call.
+2. **Memory** (`_retrieve_memory`): recall with a snapshot of the scope settings, outside the request lock.
+3. **Tools** (`_answer_tools`, returning `AnswerTools`): the selected tools are listed, the read-only readers join, and definitions beyond the schema allowance go behind the on-demand catalog.
+4. **Context**: `build_context` with memory and tools; compacted history gets model summaries (cached ones in background mode).
+5. **Model rounds**: `stream_chat`, or `run_agent` with `ToolRunner` running each call (readers, approval, timing, complete results by call index).
+6. **Finish**: persistence, diagnostics (`answer_trace.answer_report`, numbers only, with one `rounds` entry per provider request: input as estimated and reported, output, whether `fit_request` had to trim it, and the tool calls it led to with their running time), calibration, then background work (context summaries, memory extraction, branch titles).
+
 The backend persists a pending turn before streaming and uses request IDs to avoid duplicate submission. After acceptance, the composer clears the submitted text; an unaccepted failure retains it. New typing during generation survives automatic navigation.
 
 Server-sent events carry updates. An answer runs in a server worker, not in the request that started it: closing the page, reloading or a phone locking only disconnects that viewer. Every event is kept in order for the running answer, so `GET /nodes/{id}/stream?request_id=…&after=N` reattaches and replays only events after `N`; once the answer has ended it reports the stored outcome instead. The browser reattaches automatically after a dropped connection while the page is visible, keeping the text it already shows. Only **Stop**, deleting the node or stopping the server ends an answer. Memory extraction runs after completion even when nobody is connected.

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { formatMessage, type MessageParams } from "../i18n/locale";
 import type { AnswerDiagnostics } from "../types";
-import { budgetStopLabel, diagnosticsText } from "./answerDiagnostics";
+import { budgetStopLabel, diagnosticsText, roundLines } from "./answerDiagnostics";
 
 const zh = (text: string) => text;
 const en = (_zh: string, text: string) => text;
@@ -61,5 +61,26 @@ describe("answer diagnostics labels", () => {
     expect(diagnosticsText(plain, enT, count).summary).toBe("Context: est. 90,000 · actual 89,400 tokens (cached 58,000) · 12.3 s");
     const malformed = { ...toolAnswer, largest_request: "not an object" } as unknown as AnswerDiagnostics;
     expect(diagnosticsText(malformed, enT, count).summary.startsWith("Input across 3 requests")).toBe(true);
+  });
+
+  it("lists every provider request of a multi-request answer in order", () => {
+    const rounds = [
+      { estimated_input_tokens: 12000, actual_input_tokens: 11000, cached_input_tokens: 9000, output_tokens: 300, trimmed: false, tool_calls: 2, tool_ms: 1250 },
+      { estimated_input_tokens: 15000, actual_input_tokens: null, cached_input_tokens: null, output_tokens: 420, trimmed: true, tool_calls: 1, tool_ms: 400 },
+      { estimated_input_tokens: 16000, actual_input_tokens: 15800, cached_input_tokens: 0, output_tokens: 90, trimmed: false, tool_calls: 0, tool_ms: 0 },
+    ];
+    expect(roundLines({ ...toolAnswer, rounds }, enT, count)).toEqual([
+      "Round 1: est. 12,000 · actual 11,000 tokens (cached 9,000) · output 300 · 2 tool calls, 1.25 s",
+      "Round 2: est. 15,000 tokens · output 420 · trimmed to fit · 1 tool call, 0.40 s",
+      "Round 3: est. 16,000 · actual 15,800 tokens · output 90",
+    ]);
+    expect(roundLines({ ...toolAnswer, rounds }, zhT, count)[1]).toBe("第 2 轮：估算 15,000 tokens · 输出 420 · 已裁剪 · 工具 1 次，0.40 s");
+  });
+
+  it("lists no rounds for single-request or older answers and skips malformed entries", () => {
+    expect(roundLines({ ...toolAnswer, rounds: [{ estimated_input_tokens: 5, actual_input_tokens: 5, cached_input_tokens: 0, output_tokens: 1, trimmed: false, tool_calls: 0, tool_ms: 0 }] }, enT, count)).toEqual([]);
+    expect(roundLines(toolAnswer, enT, count)).toEqual([]);
+    const broken = { ...toolAnswer, rounds: [null, "x", { estimated_input_tokens: 3, actual_input_tokens: null, cached_input_tokens: null, output_tokens: null, trimmed: false, tool_calls: 0, tool_ms: 0 }] } as unknown as AnswerDiagnostics;
+    expect(roundLines(broken, enT, count)).toEqual(["Round 3: est. 3 tokens"]);
   });
 });

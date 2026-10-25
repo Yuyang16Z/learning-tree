@@ -129,12 +129,14 @@ async function api(route, body) {
     await send({ delta: 'Synthetic answer content' });
     await expectLabel('Responding');
     // Totals add up every provider request of the answer; the context is its largest single request.
-    await send({ diagnostics: { estimated_input_tokens: 3600, actual_input_tokens: 3300, cached_input_tokens: 2000, output_tokens: 42, requests: 3, largest_request: { estimated_input_tokens: 1234, actual_input_tokens: 1100, cached_input_tokens: 800 }, compacted: false, tool_rounds: 2, calibration_ratio: 1, target_input_tokens: 131072, summary_blocks: 2, timings_ms: { retrieval: 10, tools: 20, summary: 0, model: 4000, total: 4200 } } });
+    await send({ diagnostics: { estimated_input_tokens: 3600, actual_input_tokens: 3300, cached_input_tokens: 2000, output_tokens: 42, requests: 3, largest_request: { estimated_input_tokens: 1234, actual_input_tokens: 1100, cached_input_tokens: 800 }, rounds: [{ estimated_input_tokens: 1000, actual_input_tokens: 900, cached_input_tokens: 600, output_tokens: 12, trimmed: false, tool_calls: 1, tool_ms: 500 }, { estimated_input_tokens: 1234, actual_input_tokens: 1100, cached_input_tokens: 800, output_tokens: 10, trimmed: true, tool_calls: 1, tool_ms: 250 }, { estimated_input_tokens: 1366, actual_input_tokens: 1300, cached_input_tokens: 600, output_tokens: 20, trimmed: false, tool_calls: 0, tool_ms: 0 }], compacted: false, tool_rounds: 2, calibration_ratio: 1, target_input_tokens: 131072, summary_blocks: 2, timings_ms: { retrieval: 10, tools: 20, summary: 0, model: 4000, total: 4200 } } });
     const diagnosticsSummary = page.locator('.chat-live details.chat-diagnostics summary');
     await diagnosticsSummary.waitFor();
     assert.equal(await diagnosticsSummary.innerText(), 'Context: est. 1,234 · actual 1,100 tokens (cached 800) · 2 tool rounds · 4.2 s');
     assert.match(await page.locator('.chat-live details.chat-diagnostics > div').textContent(), /^Input across 3 requests: est\. 3,600 · actual 3,300 tokens \(cached 2,000\)\n/);
     assert.match(await page.locator('.chat-live details.chat-diagnostics > div').textContent(), /Calibration ratio 1\.00 · Request target 131,072 tokens · 2 history summaries\n/);
+    // Every provider request of the answer gets a line of its own, in order.
+    assert.match(await page.locator('.chat-live details.chat-diagnostics > div').textContent(), /\nRound 1: est\. 1,000 · actual 900 tokens \(cached 600\) · output 12 · 1 tool call, 0\.50 s\nRound 2: est\. 1,234 · actual 1,100 tokens \(cached 800\) · output 10 · trimmed to fit · 1 tool call, 0\.25 s\nRound 3: est\. 1,366 · actual 1,300 tokens \(cached 600\) · output 20\n/);
     await expectLabel('Responding');
     assert.equal(await page.locator('.notice').count(), 0);
     await finish();

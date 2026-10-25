@@ -141,6 +141,8 @@ def _record_round(diagnostics: dict | None, prepared: BudgetedRequest, usage: di
             "cached_input_tokens": usage["cached_input_tokens"] if usage else None,
             "output_tokens": usage["output_tokens"] if usage else None,
             "has_images": has_images(prepared.messages),
+            # The request had to be trimmed to fit the hard budget (fit_request).
+            "compressed": prepared.compressed,
         }
     )
 
@@ -581,6 +583,11 @@ def run_agent(
                     ],
                 }
             )
+            # This round's record (appended above) also notes its calls and their time.
+            record = (
+                diagnostics["rounds"][-1] if diagnostics and diagnostics.get("rounds") else None
+            )
+            tool_seconds = 0.0
             for tc in r["tool_calls"]:
                 yield {"type": "tool_start", "name": tc["name"], "args": tc["args"]}
                 if tc["name"] not in available:
@@ -604,11 +611,19 @@ def run_agent(
                 elif tool_catalog and tc["name"] == SEARCH_TOOL_NAME:
                     result = tool_catalog.search(tc["args"])
                 else:
+                    paused = waited() if waited else 0.0
+                    call_started = time.monotonic()
                     result = execute(tc["name"], tc["args"])
+                    # Time spent waiting for the learner's approval is not tool time.
+                    tool_seconds += time.monotonic() - call_started
+                    tool_seconds -= (waited() if waited else 0.0) - paused
                 yield {"type": "tool_end", "name": tc["name"], "result": result}
                 tool_message = {"role": "tool", "tool_call_id": tc["id"], "content": result}
                 convo.append(tool_message)
                 tool_tokens += _tool_message_cost(tool_message)
+            if record is not None:
+                record["tool_calls"] = len(r["tool_calls"])
+                record["tool_ms"] = int(round(max(0.0, tool_seconds) * 1000))
             # Budgets apply between rounds; only an otherwise-allowed tool round is skipped.
             if round_index + 1 < max_rounds:
                 elapsed = time.monotonic() - started - (waited() if waited else 0.0)
