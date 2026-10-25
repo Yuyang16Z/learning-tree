@@ -105,7 +105,7 @@ uv run python scripts/manage.py retrieval
 | Anthropic | 原生 Messages，支持流式输出、图片和工具。官方地址 `https://api.anthropic.com`，最大输出默认 4,096 tokens。 |
 | 编辑模型密钥 | 留空保留原密钥。 |
 | 上下文预算 | 在模型「高级设置」填写实际窗口和回答预留，或点「检测」向服务商查询（查不到时用内置近似目录）；可选的「单次请求目标」（自动为 131,072 与窗口中的较小值）让超大窗口的模型每次提问也只带必要的量；长对话使用已缓存的摘要，缺少的在回答结束后补上（可指定更便宜的模型），回答不再等待摘要，失败回退本地摘录，无需下载模型。 |
-| MCP 工具 | 按 [MCP 说明](integrations/mcp/README.md) 安装、注册六个可选预设，或自行添加本机命令或远程 HTTP 服务。 |
+| MCP 工具 | 按 [MCP 说明](integrations/mcp/README.md) 安装、注册六个可选预设，或自行添加本机命令或远程 HTTP 服务。服务未标为只读的工具运行前会先请你确认。 |
 | 联网搜索 | 默认 DDGS，配置 `TAVILY_API_KEY` 时使用 Tavily，失败明确提示。 |
 | 记忆检索 | 基础安装使用关键词检索；可选本地向量与重排增强语义检索。`MEMORY_RETRIEVAL_MODE=lexical` 可停用语义模型。 |
 

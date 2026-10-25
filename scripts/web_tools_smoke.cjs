@@ -198,11 +198,15 @@ async function poll(callback, label) {
     await add.getByRole('textbox', { name: 'Header name', exact: true }).fill('Authorization');
     await add.getByLabel('Header value', { exact: true }).fill('Bearer fixture-token');
     await add.getByRole('checkbox', { name: 'Enabled', exact: true }).uncheck();
+    // New servers ask before tools they do not mark read-only unless another policy is chosen.
+    const askPolicy = add.getByLabel('Ask before running tools', { exact: true });
+    assert.equal(await askPolicy.inputValue(), 'writes');
+    await askPolicy.selectOption('always');
     await add.getByRole('button', { name: 'Add', exact: true }).click();
     await add.waitFor({ state: 'hidden' });
     assert.deepEqual(remoteBodies, [{
       label: 'Fixture remote docs', transport: 'http', command: '', args: [], url: 'https://docs.example/mcp',
-      headers: { Authorization: 'Bearer fixture-token' }, allow_private: false, enabled: false,
+      headers: { Authorization: 'Bearer fixture-token' }, allow_private: false, enabled: false, confirm_tools: 'always',
     }]);
     const remoteRow = settingsDialog.getByRole('button', { name: 'Fixture remote docs, disabled, edit configuration', exact: true });
     assert.equal(await remoteRow.locator('.k').innerText(), 'docs.example');
@@ -213,11 +217,12 @@ async function poll(callback, label) {
     const storedValue = edit.getByLabel('Header value', { exact: true });
     assert.equal(await storedValue.inputValue(), '', 'A stored header value is never sent back to the page');
     assert.equal(await storedValue.getAttribute('placeholder'), 'Leave blank to keep');
+    assert.equal(await edit.getByLabel('Ask before running tools', { exact: true }).inputValue(), 'always');
     await edit.getByRole('button', { name: 'Cancel', exact: true }).click();
     await edit.waitFor({ state: 'hidden' });
     await settingsDialog.getByRole('button', { name: 'Close', exact: true }).click();
     await settingsDialog.waitFor({ state: 'hidden' });
-    checks.push('A remote HTTP server is added through the same dialog: its header value is posted once, shown afterwards only as a name, and no connection test runs');
+    checks.push('A remote HTTP server is added through the same dialog: its header value is posted once, shown afterwards only as a name, its approval policy is kept, and no connection test runs');
 
     await setCombinedEnabled(true);
     await closeTools();

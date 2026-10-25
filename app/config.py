@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     # AGENT_TIME_LIMIT_SECONDS / AGENT_TOOL_TOKEN_BUDGET in .env.
     agent_time_limit_seconds: float = Field(default=180, gt=0)
     agent_tool_token_budget: int = Field(default=60000, gt=0)
+    # How long a tool call that needs the learner's approval waits for it before it is
+    # skipped (not run). The wait never counts against the agent's time limit.
+    # TOOL_CONFIRM_TIMEOUT_SECONDS in .env.
+    tool_confirm_timeout_seconds: float = Field(default=120, gt=0, le=3600)
     # The learner's own teaching styles, one Markdown file each (app/learning_presets.py);
     # a relative path starts at the project root. The Docker image uses
     # /data/learning-presets in its volume. LEARNING_PRESETS_DIR in .env.

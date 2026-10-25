@@ -56,7 +56,16 @@ from ..models import (
 )
 from ..retrieval import read_retrieval_settings
 from ..return_summary import build_return_summary
-from ..schemas import UNDERSTANDING_LEVELS, AskIn, BranchIn, ExplainIn, NodePatch, StopIn, TitleIn
+from ..schemas import (
+    UNDERSTANDING_LEVELS,
+    AskIn,
+    BranchIn,
+    ExplainIn,
+    NodePatch,
+    StopIn,
+    TitleIn,
+    ToolConfirmIn,
+)
 from ..search_index import HISTORY_TOOL_DEF, HISTORY_TOOL_NAME, make_history_search
 from ..service import (
     assemble_tools,
@@ -66,6 +75,7 @@ from ..service import (
     get_messages,
     get_thread,
     make_executor,
+    needs_confirmation,
     resolve_config,
     summary_spec,
     to_spec,
@@ -114,6 +124,33 @@ class Generation:
     # Viewers waiting for new events, as (event loop, asyncio.Event) pairs. The producer
     # thread wakes them instead of each viewer polling the log on a timer.
     waiters: set = field(default_factory=set)
+    # The tool call waiting for the learner's decision ({"index", "name", "args"}), the
+    # decision, and the event that wakes the wait (a decision, or Stop).
+    confirmation: dict | None = None
+    decision: bool | None = None
+    decided: threading.Event = field(default_factory=threading.Event)
+
+    def await_confirmation(self, index: int, name: str, args, timeout: float) -> str:
+        """Ask whether call `index` may run: "allowed", "declined", "expired" or "stopped"."""
+        with self.lock:
+            self.confirmation = {"index": index, "name": name, "args": args}
+            self.decision = None
+            self.decided.clear()
+            if self.stop.is_set():
+                self.decided.set()  # Stop came first; its wake-up must not be lost.
+        self.emit({"tool_confirm": {"index": index, "name": name, "args": args}})
+        self.decided.wait(timeout)
+        with self.lock:
+            # Read under the lock: a decision accepted just at the deadline still counts.
+            if self.stop.is_set():
+                outcome = "stopped"
+            elif not self.decided.is_set():
+                outcome = "expired"
+            else:
+                outcome = "allowed" if self.decision else "declined"
+            self.confirmation = None
+        self.emit({"tool_confirm_done": {"index": index, "outcome": outcome}})
+        return outcome
 
     def emit(self, event: dict) -> None:
         with self.lock:
@@ -138,6 +175,13 @@ _STREAM_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 _COMPLETE_RESULT_NOTE = (
     "\n[完整结果共 {total} 字，已保存；可调用 read_tool_result(call_index={index}) 分页阅读。]"
 )
+# Model-facing results of a call the learner did not approve; nothing was run.
+TOOL_NOT_RUN = {
+    "declined": "用户没有允许运行这个工具，它没有执行。不要假设它的结果；"
+    "需要时请说明想用它做什么，由用户决定。",
+    "expired": "等待用户确认超时，这个工具没有执行。不要假设它的结果；"
+    "需要时请说明想用它做什么，由用户决定。",
+}
 # The endpoint rejected tools the user selected; retrying the same request cannot help.
 TOOLS_REJECTED_ERROR = (
     "模型接口拒绝了本次请求中的工具（可能不支持工具调用）。"
@@ -904,6 +948,7 @@ def stop(
         if generation:
             with generation.lock:
                 generation.stop.set()
+                generation.decided.set()  # A tool call waiting for approval stops waiting.
                 generation.wake()
                 generation.status = "interrupted"
                 generation.error = "已停止，可重试。"
@@ -914,6 +959,23 @@ def stop(
         if generation:
             _persist(node_id, generation, generation.label)
     return {"node_id": node_id, "status": "interrupted" if generation else node.status}
+
+
+@router.post("/{node_id}/tool-confirm")
+def confirm_tool(node_id: int, body: ToolConfirmIn) -> dict:
+    """Allow or decline the tool call an answer is waiting for; the decision is final."""
+    with _REQUEST_LOCK:
+        generation = _GENERATIONS.get(node_id)
+        if generation is None or generation.request_id != body.request_id:
+            raise HTTPException(409, "这个回答已经结束，不在等待确认。")
+        with generation.lock:
+            # Under the answer's lock, so the wait reads a decision accepted here.
+            pending = generation.confirmation
+            if pending is None or pending["index"] != body.index or generation.decided.is_set():
+                raise HTTPException(409, "这个工具调用已经不在等待确认。")
+            generation.decision = body.allow
+            generation.decided.set()
+    return {"node_id": node_id, "index": body.index, "allow": body.allow}
 
 
 @router.get("/{node_id}/stream")
@@ -1199,7 +1261,10 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
         last_checkpoint = time.monotonic()
         started_at = time.monotonic()
         model_started: float | None = None
-        timings = {"retrieval": 0.0, "tools": 0.0, "summary": 0.0}
+        # approval: time tool calls waited for the learner's decision.
+        timings = {"retrieval": 0.0, "tools": 0.0, "summary": 0.0, "approval": 0.0}
+        # The learner's decision on calls that needed approval, by call index.
+        decisions: dict[int, str] = {}
         # Provider rounds (estimates, reported usage) collected by stream_chat/run_agent.
         usage: dict = {}
         context_stats: dict = {}
@@ -1273,7 +1338,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     "retrieval": ms(timings["retrieval"]),
                     "tools": ms(timings["tools"]),
                     "summary": ms(timings["summary"]),
-                    "model": ms(now - model_started - timings["tools"]),
+                    "approval": ms(timings["approval"]),
+                    "model": ms(now - model_started - timings["tools"] - timings["approval"]),
                     "total": ms(now - started_at),
                 },
             }
@@ -1571,6 +1637,22 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 def guarded_execute(name, arguments):
                     if generation.stop.is_set():
                         raise RuntimeError("generation cancelled before tool execution")
+                    if needs_confirmation(tool_router, name):
+                        waiting = time.monotonic()
+                        try:
+                            outcome = generation.await_confirmation(
+                                call["index"],
+                                name,
+                                arguments,
+                                settings.tool_confirm_timeout_seconds,
+                            )
+                        finally:
+                            timings["approval"] += time.monotonic() - waiting
+                        if outcome == "stopped":
+                            raise RuntimeError("generation cancelled before tool execution")
+                        decisions[call["index"]] = outcome
+                        if outcome != "allowed":
+                            return TOOL_NOT_RUN[outcome]
                     tool_started = time.monotonic()
                     try:
                         result = run_tool(name, arguments)
@@ -1597,6 +1679,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     cache_prefix=context_stats.get("stable_system"),
                     time_limit_seconds=settings.agent_time_limit_seconds,
                     tool_token_budget=settings.agent_tool_token_budget,
+                    # Waiting for the learner's approval is not the agent's time.
+                    waited=lambda: timings["approval"],
                     **({"tool_catalog": tool_catalog, "max_rounds": 6} if tool_catalog else {}),
                     **({"deep": True} if body.deep_think else {}),
                 )
@@ -1635,6 +1719,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     reference = {"truncated": len(complete) > len(preview)}
                     if stored:
                         reference["call_index"] = call["index"]
+                    if call["index"] in decisions:
+                        reference["confirmation"] = decisions[call["index"]]
                 with generation.lock:
                     if kind == "tool_start":
                         outgoing = {"tool_start": {"name": event["name"], "args": event["args"]}}

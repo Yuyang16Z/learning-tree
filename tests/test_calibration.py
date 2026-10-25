@@ -206,7 +206,14 @@ def test_diagnostics_are_emitted_once_persisted_listed_and_never_exported(worksp
     assert report["cached_input_tokens"] == 800 and report["output_tokens"] == 55
     assert report["compacted"] is False and report["tool_rounds"] == 0
     assert report["calibration_ratio"] == 1.0
-    assert set(report["timings_ms"]) == {"retrieval", "tools", "summary", "model", "total"}
+    assert set(report["timings_ms"]) == {
+        "retrieval",
+        "tools",
+        "summary",
+        "approval",
+        "model",
+        "total",
+    }
     assert all(isinstance(value, (int, float, bool, type(None))) for value in leaves(report))
     assert BASE_PROMPT not in json.dumps(events, ensure_ascii=False)
     with Session(engine) as session:
@@ -680,6 +687,7 @@ def test_a_stopped_attempt_keeps_its_diagnostics_when_a_retry_starts_first(works
         "retrieval",
         "tools",
         "summary",
+        "approval",
         "model",
         "total",
     }

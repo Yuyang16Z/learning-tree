@@ -166,6 +166,11 @@ class McpServer(SQLModel, table=True):
     headers: dict | None = Field(default=None, sa_column=Column(JSON))  # Name -> value.
     # Opt-in for loopback, private, link-local and CGNAT addresses (a local dev server).
     allow_private: bool = False
+    # Which calls wait for the learner's approval: "writes" (tools the server does not
+    # mark read-only), "always" or "never".
+    confirm_tools: Literal["writes", "always", "never"] = Field(
+        default="writes", sa_column=Column(String, nullable=False, default="writes")
+    )
 
 
 class KnowledgeTree(SQLModel, table=True):

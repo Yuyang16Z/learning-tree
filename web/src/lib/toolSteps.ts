@@ -1,4 +1,4 @@
-import type { McpServer, ToolStep } from "../types";
+import type { McpServer, ToolConfirmation, ToolConfirmationOutcome, ToolStep } from "../types";
 import { managedMcpPreset } from "./chatTools";
 
 type Translate = (zh: string, en: string) => string;
@@ -27,22 +27,32 @@ export function toolStepLabel(tool: string, t: Translate, servers: readonly McpS
 }
 
 /** A step's pointer to the complete result stored for its call. */
-export type ToolReference = Pick<ToolStep, "call_index" | "truncated" | "request_id" | "node_id">;
+export type ToolReference = Pick<ToolStep, "call_index" | "truncated" | "request_id" | "node_id" | "confirmation">;
+const OUTCOMES = new Set<ToolConfirmationOutcome>(["allowed", "declined", "expired"]);
 export interface FullResultSource { nodeId: number; callIndex: number; requestId: string }
 
 /** Read a tool_end event and its stream envelope; malformed fields are dropped. */
 export function toolReference(
-  event: { call_index?: unknown; truncated?: unknown },
+  event: { call_index?: unknown; truncated?: unknown; confirmation?: unknown },
   envelope: { request_id?: unknown; node_id?: unknown },
 ): ToolReference {
   const reference: ToolReference = {};
   if (typeof event.truncated === "boolean") reference.truncated = event.truncated;
+  if (OUTCOMES.has(event.confirmation as ToolConfirmationOutcome)) reference.confirmation = event.confirmation as ToolConfirmationOutcome;
   if (Number.isInteger(event.call_index) && (event.call_index as number) > 0) {
     reference.call_index = event.call_index as number;
     if (typeof envelope.request_id === "string" && envelope.request_id) reference.request_id = envelope.request_id;
     if (Number.isInteger(envelope.node_id)) reference.node_id = envelope.node_id as number;
   }
   return reference;
+}
+
+/** A tool_confirm event, or null when it is malformed. */
+export function confirmationRequest(value: unknown): ToolConfirmation | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { index, name, args } = value as { index?: unknown; name?: unknown; args?: unknown };
+  if (!Number.isInteger(index) || (index as number) < 1 || typeof name !== "string" || !name) return null;
+  return { index: index as number, name, args: args ?? null };
 }
 
 export function startToolStep(steps: readonly ToolStep[], tool: string): ToolStep[] {

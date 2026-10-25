@@ -105,7 +105,7 @@ No `.env` is needed for normal use. Configure models in Settings. To select anot
 | Anthropic | Native Messages, streaming, images and tool calls. Official base URL: `https://api.anthropic.com`. Output limit defaults to 4,096 tokens. |
 | Editing an API key | Leaving it empty retains the existing key. |
 | Context budget | Set the actual context window and answer reserve in **Advanced**, or use **Detect** to ask the provider (with an approximate built-in catalog as fallback); an optional request size target (automatic: 131,072 tokens or the window) keeps each question affordable on very large windows. Long chats reuse cached summaries and fall back to local excerpts; missing summaries are prepared after an answer, optionally by a cheaper model, so no answer waits for one. No model download is required. |
-| Optional MCP | Follow the [MCP guide](integrations/mcp/README.md) to install and register six presets, or configure your own local command or remote HTTP server. |
+| Optional MCP | Follow the [MCP guide](integrations/mcp/README.md) to install and register six presets, or configure your own local command or remote HTTP server. Tools a server does not mark read-only ask for your approval before they run. |
 | Web search | DDGS by default; `TAVILY_API_KEY` opts into Tavily. Errors are reported explicitly. |
 | Learning memory | Keyword retrieval works in the basic installation. Optional local vectors and reranking add semantic retrieval; `MEMORY_RETRIEVAL_MODE=lexical` disables them. |
 

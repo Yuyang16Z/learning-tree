@@ -25,6 +25,7 @@ def _out(s: McpServer) -> McpServerOut:
         header_names=list(s.headers or {}),
         allow_private=bool(s.allow_private),
         enabled=s.enabled,
+        confirm_tools=s.confirm_tools or "writes",
     )
 
 
@@ -52,6 +53,7 @@ def _apply(srv: McpServer, body: McpServerIn) -> None:
             headers = stored  # Omitted: keep every stored header.
     srv.label = body.label
     srv.enabled = body.enabled
+    srv.confirm_tools = body.confirm_tools
     srv.transport = body.transport
     if body.transport == "stdio":
         # A local program needs no remote address or credentials; drop them.

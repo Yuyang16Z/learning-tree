@@ -87,7 +87,7 @@ def assemble_tools(session: Session, requested: list[str]) -> tuple[list[dict], 
 
     - Built-in tools (fetch/web_search): use their definitions directly.
     - "mcp_server_{id}": connect and list tools; surface connection failures explicitly.
-    Routing table: oai_name -> ("builtin", real) | ("mcp", spec, real).
+    Routing table: oai_name -> ("builtin", real) | ("mcp", spec, real, needs approval).
     """
     defs: list[dict] = []
     router: dict = {}
@@ -104,6 +104,7 @@ def assemble_tools(session: Session, requested: list[str]) -> tuple[list[dict], 
             if not srv or not srv.enabled:
                 continue
             spec = mcp_client.server_spec_for(srv)
+            policy = getattr(srv, "confirm_tools", None) or "writes"
             try:
                 for t in mcp_client.list_tools(spec):
                     oai = f"mcp_{sid}_{t['name']}"
@@ -112,10 +113,17 @@ def assemble_tools(session: Session, requested: list[str]) -> tuple[list[dict], 
                         "function"
                     ].get("description", "")
                     defs.append(definition)
-                    router[oai] = ("mcp", spec, t["name"])
+                    ask = policy == "always" or (policy == "writes" and not t.get("read_only"))
+                    router[oai] = ("mcp", spec, t["name"], ask)
             except Exception as exc:
                 raise RuntimeError(f"MCP「{srv.label}」连接失败，请在设置中测试连接。") from exc
     return defs, router
+
+
+def needs_confirmation(router: dict, name: str) -> bool:
+    """Whether a call waits for the learner's approval: MCP tools, by their server's policy."""
+    route = router.get(name)
+    return bool(route and route[0] == "mcp" and len(route) > 3 and route[3])
 
 
 def make_executor(router: dict) -> Callable[[str, dict], str]:

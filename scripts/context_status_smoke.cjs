@@ -70,6 +70,11 @@ async function api(route, body) {
         send({ started: true, node_id: nodeId, request_id: request.request_id });
         return new Response(body, { headers: { 'Content-Type': 'text/event-stream' } });
       }
+      if (/\/api\/nodes\/\d+\/tool-confirm$/.test(url.pathname)) {
+        const decision = JSON.parse(init.body);
+        (window.__toolDecisions ??= []).push({ node: Number(url.pathname.split('/').at(-2)), ...decision });
+        return Response.json({ node_id: Number(url.pathname.split('/').at(-2)), index: decision.index, allow: decision.allow });
+      }
       if (/\/api\/nodes\/\d+\/stop$/.test(url.pathname)) {
         return new Promise(resolve => {
           window.__resolveContextStop = () => resolve(Response.json({ node_id: window.__contextStreams.at(-1).nodeId, status: 'interrupted' }));
@@ -134,6 +139,33 @@ async function api(route, body) {
     assert.equal(await page.locator('.notice').count(), 0);
     await finish();
     checks.push('Switching topics hides unrelated progress; ready and actual answer text restore Responding; diagnostics stay a collapsed block under the answer');
+
+    await ask('Synthetic tool approval check');
+    const approvalStream = await page.evaluate(() => ({ node: window.__contextStreams.at(-1).nodeId, request: window.__contextStreams.at(-1).request.request_id }));
+    await send({ tool_start: { name: 'mcp_1_write_file', args: { path: 'notes.md' } } });
+    await send({ tool_confirm: { index: 1, name: 'mcp_1_write_file', args: { path: 'notes.md', content: 'Synthetic note' } } });
+    await expectLabel('Waiting for your approval');
+    const approval = page.getByRole('group', { name: 'Tool approval', exact: true });
+    await approval.waitFor();
+    assert((await approval.innerText()).includes('"path": "notes.md"'), 'The arguments that would run are shown');
+    await approval.getByRole('button', { name: 'Allow', exact: true }).click();
+    await page.waitForFunction(() => (window.__toolDecisions ?? []).length === 1);
+    assert.deepEqual(await page.evaluate(() => window.__toolDecisions), [{ node: approvalStream.node, request_id: approvalStream.request, index: 1, allow: true }]);
+    await send({ tool_confirm_done: { index: 1, outcome: 'allowed' } });
+    await approval.waitFor({ state: 'hidden' });
+    await expectLabel('Responding');
+    await send({ tool_end: { name: 'mcp_1_write_file', result: 'written', confirmation: 'allowed' } });
+    await page.locator('.chat-live details.chat-reasoning summary', { hasText: 'Allowed · Done' }).waitFor();
+    await send({ tool_start: { name: 'mcp_1_write_file', args: { path: 'other.md' } } });
+    await send({ tool_confirm: { index: 2, name: 'mcp_1_write_file', args: {} } });
+    await approval.getByRole('button', { name: "Don't allow", exact: true }).click();
+    await page.waitForFunction(() => (window.__toolDecisions ?? []).length === 2);
+    assert.equal(await page.evaluate(() => window.__toolDecisions[1].allow), false);
+    await send({ tool_confirm_done: { index: 2, outcome: 'declined' } });
+    await send({ tool_end: { name: 'mcp_1_write_file', result: 'not run', confirmation: 'declined' } });
+    await page.locator('.chat-live details.chat-reasoning summary', { hasText: 'Not allowed, not run' }).waitFor();
+    await finish();
+    checks.push('A tool call waiting for approval pauses the label, shows its arguments, sends the decision and closes when the outcome arrives; declined calls read as not run');
 
     await ask('Fresh request has no prior context status');
     await send({ context_status: 'summarizing' });

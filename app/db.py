@@ -115,6 +115,8 @@ _ADDED_COLUMNS = {
         "url": "TEXT",
         "headers": "JSON",
         "allow_private": "BOOLEAN NOT NULL DEFAULT 0",
+        # Existing servers ask before tools they do not mark read-only.
+        "confirm_tools": "TEXT NOT NULL DEFAULT 'writes'",
     },
 }
 
