@@ -27,6 +27,7 @@ export function AddModelModal({ isFirst, model, onClose, onAdd }: Props) {
     context_window: model?.context_window ?? 32768,
     target_input_tokens: model?.target_input_tokens ?? null,
     is_default: model?.is_default ?? isFirst,
+    use_for_summaries: model?.use_for_summaries ?? false,
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -134,6 +135,8 @@ export function AddModelModal({ isFirst, model, onClose, onAdd }: Props) {
           <input id={`${id}-target`} type="number" min={TARGET_INPUT_MIN} max={form.context_window || CONTEXT_WINDOW_MAX} step={1} placeholder={t("自动：{tokens}", "Automatic: {tokens}", { tokens: effectiveTarget(null, form.context_window || CONTEXT_WINDOW_MAX) })} value={form.target_input_tokens ?? ""} onChange={event => setForm(current => ({ ...current, target_input_tokens: parseTargetInput(event.target.value) }))} disabled={busy} />
           <div className="hint">{t("一次提问的输入超过这个大小时，先压缩较早的历史，窗口很大时也能控制每次的用量；工具结果和必须保留的内容仍可用到整个窗口。留空则自动使用 131072 与窗口中的较小值。", "Older history is compacted once a question's input would exceed this size, which keeps each request affordable on very large windows; tool results and required content may still use the whole window. Leave blank to use 131072 or the window, whichever is smaller.")}</div>
         </div>
+        <label className="hint model-summary-flag"><input type="checkbox" checked={form.use_for_summaries} onChange={event => setForm(current => ({ ...current, use_for_summaries: event.target.checked }))} disabled={busy} />{t("用这个模型整理长对话摘要", "Use this model for context summaries")}</label>
+        <div className="hint">{t("长对话较早的历史在回答结束后整理成摘要，之后的提问直接使用，可以选一个更便宜的模型。同一时间只有一个模型负责；都不选时由回答所用的模型整理。这些历史会发送给这个模型的服务商。", "Older history of long chats is summarized after an answer, ready for later questions, so a cheaper model can do it. One model at a time does this; with none chosen, the answering model does. That history is sent to this model's provider.")}</div>
       </details>
       {error && <div className="test-bad" role="alert">{localizeError(error, locale)}</div>}
       <div className="modal-foot"><label className="hint"><input type="checkbox" checked={form.is_default} onChange={event => setForm(current => ({ ...current, is_default: event.target.checked }))} disabled={busy} /> {t("设为默认", "Set as default")}</label><div className="model-form-actions"><button type="button" className="btn" onClick={close} disabled={busy}>{t("取消", "Cancel")}</button><button type="submit" className="btn btn-primary" disabled={busy || detecting}>{busy ? t("保存中…", "Saving…") : model ? t("保存", "Save") : t("添加", "Add")}</button></div></div>

@@ -23,6 +23,15 @@ def offline_learning_summaries(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_background_summary_jobs(monkeypatch):
+    """No post-answer summary job outlives its test. Tests of that job run the real one
+    and join its thread (tests/test_context_integration.py)."""
+    from app.routers import nodes
+
+    monkeypatch.setattr(nodes, "_queue_context_summaries", lambda *args, **kwargs: None)
+
+
+@pytest.fixture(autouse=True)
 def isolated_phone_access_token(tmp_path, monkeypatch):
     """No test may create or read the repository's real .runtime/phone-access-token."""
     from app import access_token

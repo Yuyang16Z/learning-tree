@@ -72,6 +72,8 @@ export interface AnswerDiagnostics {
   calibration_ratio: number;
   /** The soft request target the answer was assembled for (configured or automatic); absent from older diagnostics. */
   target_input_tokens?: number;
+  /** Model summaries of older history the prompt carried; absent from older diagnostics. */
+  summary_blocks?: number;
   timings_ms: { retrieval: number; tools: number; summary: number; model: number; total: number };
 }
 /** A memory record an answer was given; ids and titles only, never memory text. */
@@ -150,8 +152,10 @@ export interface ModelCfg {
   protocol: ModelProtocol; max_tokens: number; context_window: number;
   /** Soft target for one request's input; null = automatic. */
   target_input_tokens: number | null;
+  /** This model writes every answer's context summaries (at most one model does). */
+  use_for_summaries: boolean;
 }
-export interface ModelInput { label: string; base_url: string; llm_model: string; api_key: string; is_default: boolean; protocol: ModelProtocol; max_tokens: number; context_window: number; target_input_tokens: number | null }
+export interface ModelInput { label: string; base_url: string; llm_model: string; api_key: string; is_default: boolean; protocol: ModelProtocol; max_tokens: number; context_window: number; target_input_tokens: number | null; use_for_summaries: boolean }
 /** A context-window suggestion from the provider or the approximate built-in catalog; the form keeps the final say. */
 export interface ModelDiscovery {
   context_window: number | null; max_output_tokens: number | null;

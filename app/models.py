@@ -26,6 +26,8 @@ class ModelConfig(SQLModel, table=True):
     # Soft target for one request's input in tokens; None = automatic (ContextPolicy).
     target_input_tokens: int | None = None
     is_default: bool = False
+    # At most one model writes the context summaries of every answer; none = the answer's.
+    use_for_summaries: bool = False
     created_at: datetime = Field(default_factory=_now)
 
 

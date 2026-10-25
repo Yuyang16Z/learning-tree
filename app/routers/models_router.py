@@ -26,7 +26,17 @@ def _out(cfg: ModelConfig) -> ModelConfigOut:
         context_window=cfg.context_window,
         target_input_tokens=cfg.target_input_tokens,
         is_default=cfg.is_default,
+        use_for_summaries=cfg.use_for_summaries,
     )
+
+
+def _release_summaries(session: Session, keep: int | None = None) -> None:
+    """Keep at most one summary model: unmark every other one."""
+    marked = select(ModelConfig).where(ModelConfig.use_for_summaries == True)  # noqa: E712
+    for other in session.exec(marked):
+        if other.id != keep:
+            other.use_for_summaries = False
+            session.add(other)
 
 
 @router.post("", response_model=ModelConfigOut)
@@ -36,6 +46,8 @@ def add_model(body: ModelConfigIn, session: Session = Depends(get_session)) -> M
         for other in session.exec(select(ModelConfig).where(ModelConfig.is_default == True)):  # noqa: E712
             other.is_default = False
             session.add(other)
+    if cfg.use_for_summaries:
+        _release_summaries(session)
     session.add(cfg)
     session.commit()
     session.refresh(cfg)
@@ -55,7 +67,7 @@ def _endpoint(protocol: str, url: str) -> str | None:
 
 def _identity(cfg: ModelConfig) -> tuple:
     """What a calibration ratio is learned for: the protocol, address and model name.
-    Label, key, window, answer reserve and target edits keep the ratio."""
+    Label, key, window, answer reserve, target and summary-flag edits keep the ratio."""
     return (cfg.protocol, _endpoint(cfg.protocol, cfg.base_url), cfg.llm_model.strip())
 
 
@@ -110,6 +122,8 @@ def update_model(
         for other in session.exec(select(ModelConfig).where(ModelConfig.is_default == True)):  # noqa: E712
             other.is_default = False
             session.add(other)
+    if body.use_for_summaries:
+        _release_summaries(session, keep=config_id)
     identity = _identity(cfg)
     for name, value in body.model_dump().items():
         if name == "api_key" and not value.strip():

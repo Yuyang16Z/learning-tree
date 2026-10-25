@@ -35,6 +35,16 @@ def to_spec(cfg: ModelConfig, session: Session | None = None) -> LLMSpec:
     )
 
 
+def summary_spec(session: Session, answer: ModelConfig, answer_spec: LLMSpec) -> LLMSpec:
+    """The model that writes context summaries: the one marked for them, else the answer's."""
+    marked = session.exec(
+        select(ModelConfig).where(ModelConfig.use_for_summaries == True)  # noqa: E712
+    ).first()
+    if marked is None or marked.id == answer.id:
+        return answer_spec
+    return to_spec(marked, session)
+
+
 def resolve_config(session: Session, config_id: int | None) -> ModelConfig | None:
     """Resolve the requested model, otherwise the default or first model; return None if absent."""
     if config_id is not None:

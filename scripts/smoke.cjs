@@ -262,11 +262,25 @@ async function poll(callback) {
     await modelForm.getByText('Advanced', { exact: true }).click();
     assert.equal(await requestTarget.inputValue(), '32768');
     await requestTarget.fill('');
+    // One model may write every answer's context summaries; the list names it.
+    const summaryFlag = modelForm.getByRole('checkbox', { name: 'Use this model for context summaries', exact: true });
+    assert.equal(await summaryFlag.isChecked(), false);
+    await summaryFlag.check();
     await modelForm.getByRole('button', { name: 'Save', exact: true }).click();
     await modelForm.waitFor({ state: 'hidden' });
     assert.equal((await api('/models'))[0].target_input_tokens, null, 'Clearing the field restores the automatic target');
+    assert.equal((await api('/models'))[0].use_for_summaries, true);
+    await page.getByRole('dialog').locator('.model-config-row .tag', { hasText: 'Summaries' }).waitFor();
+    await page.getByRole('dialog').getByRole('button', { name: 'Edit', exact: true }).click();
+    await modelForm.getByText('Advanced', { exact: true }).click();
+    assert.equal(await summaryFlag.isChecked(), true);
+    await summaryFlag.uncheck();
+    await modelForm.getByRole('button', { name: 'Save', exact: true }).click();
+    await modelForm.waitFor({ state: 'hidden' });
+    assert.equal((await api('/models'))[0].use_for_summaries, false);
+    assert.equal(await page.getByRole('dialog').locator('.model-config-row .tag', { hasText: 'Summaries' }).count(), 0);
     await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click();
-    checks.push('Model settings expose context capacity for both protocols, detect windows only on request, reject unusable budgets, keep an optional request size target and persist valid settings');
+    checks.push('Model settings expose context capacity for both protocols, detect windows only on request, reject unusable budgets, keep an optional request size target, mark the summary model and persist valid settings');
     await page.reload();
     await input.waitFor();
     await assertLocale('en');

@@ -25,6 +25,13 @@ class Settings(BaseSettings):
     # Share of the input budget at which older history is compacted; the hard
     # budget still bounds every request. CONTEXT_COMPACTION_RATIO in .env.
     context_compaction_ratio: float = Field(default=0.6, ge=0.1, le=1.0)
+    # When compacted history gets model summaries: "background" answers with the cached
+    # ones and prepares missing ones after the answer, so no answer waits for a summary;
+    # "inline" asks for one before the answer, which waits for it. CONTEXT_SUMMARY_MODE.
+    context_summary_mode: Literal["background", "inline"] = "background"
+    # Model calls spent on new block summaries after each answer in background mode
+    # (inline mode makes at most one). CONTEXT_SUMMARY_BLOCKS in .env.
+    context_summary_blocks: int = Field(default=1, ge=1, le=8)
     # Tool rounds of one answer stop after this many seconds, or once the tool results
     # gathered reach this many estimated tokens; the model then answers from what it
     # has. Checked between rounds, so a running call is never interrupted.

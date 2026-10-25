@@ -42,7 +42,9 @@ def api(tmp_path, monkeypatch):
     SQLModel.metadata.create_all(engine)
     monkeypatch.setattr(nodes, "engine", engine)
     monkeypatch.setattr(service, "engine", engine)
-    calls = {name: [] for name in ("stream", "agent", "memory", "discover", "titles")}
+    calls = {
+        name: [] for name in ("stream", "agent", "memory", "discover", "titles", "summary_jobs")
+    }
 
     def stream(spec, system, messages, **kwargs):
         calls["stream"].append((spec, system, copy.deepcopy(messages)))
@@ -67,6 +69,13 @@ def api(tmp_path, monkeypatch):
     monkeypatch.setattr(nodes, "extract_and_save", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         nodes, "_queue_branch_title", lambda *args, **kwargs: calls["titles"].append(True)
+    )
+    # Post-answer summary preparation is recorded, not run: tests that need it run the
+    # real job through _run_summary_jobs and join its thread.
+    monkeypatch.setattr(
+        nodes,
+        "_queue_context_summaries",
+        lambda *args, **kwargs: calls["summary_jobs"].append((args, kwargs)),
     )
     nodes._GENERATIONS.clear()
     nodes._TITLE_JOBS.clear()
@@ -176,6 +185,7 @@ def test_model_summary_is_only_resolved_once_after_tool_preflight_and_preserves_
     api, monkeypatch
 ):
     client, engine, calls = api
+    monkeypatch.setattr(nodes.settings, "context_summary_mode", "inline")
     _long_summary_history(engine)
     summaries = []
 
@@ -194,6 +204,7 @@ def test_model_summary_is_only_resolved_once_after_tool_preflight_and_preserves_
         "summarizing",
         "ready",
     ]
+    assert calls["summary_jobs"] == [], "inline mode prepares nothing after the answer"
     _, system, messages, tools = calls["agent"][0]
     assert "MODEL_SUMMARY_FIXTURE" in system
     assert "CURRENT_QUOTE_MUST_STAY_EXACT" in system
@@ -211,6 +222,7 @@ def test_model_summary_of_a_two_byte_script_history_is_used_not_discarded(api, m
     the summary resolver follows the history's own density, so the resolver's output,
     which fills that budget, fits the room and the paid model summary reaches the answer."""
     client, engine, calls = api
+    monkeypatch.setattr(nodes.settings, "context_summary_mode", "inline")
     with Session(engine) as session:
         cfg = session.get(ModelConfig, 1)
         cfg.context_window, cfg.max_tokens = 32768, 4096
@@ -264,17 +276,19 @@ def test_optional_summary_failures_keep_the_answer_and_source_access(api, monkey
 
 
 def test_short_question_does_not_request_a_summary(api, monkeypatch):
-    client, _, _ = api
+    client, _, calls = api
     monkeypatch.setattr(
         nodes, "summarize_history", lambda *a, **k: pytest.fail("Unnecessary summary call")
     )
     events = ask(client)
     assert events[-1]["status"] == "complete"
     assert not any("context_status" in event for event in events)
+    assert calls["summary_jobs"] == [], "a history that fits needs no summaries later either"
 
 
 def test_legacy_revision_summarizes_and_reads_its_copied_history(api, monkeypatch):
     client, engine, _ = api
+    monkeypatch.setattr(nodes.settings, "context_summary_mode", "inline")
     _long_summary_history(engine)
     with Session(engine) as session:
         originals = session.exec(select(Message).where(Message.node_id == 1)).all()
@@ -362,6 +376,7 @@ def test_source_mutation_routes_clear_only_dependent_summary_cache(api, operatio
 
 def test_stop_during_summary_does_not_wait_for_provider_or_begin_answer(api, monkeypatch):
     client, engine, calls = api
+    monkeypatch.setattr(nodes.settings, "context_summary_mode", "inline")
     _long_summary_history(engine)
     entered, release, request_done = threading.Event(), threading.Event(), threading.Event()
     errors = []
@@ -396,6 +411,125 @@ def test_stop_during_summary_does_not_wait_for_provider_or_begin_answer(api, mon
     assert not errors and not worker.is_alive()
     assert generation.finished.wait(3)
     assert not calls["stream"] and not calls["agent"]
+
+
+_REAL_QUEUE = nodes._queue_context_summaries
+
+
+def _run_summary_jobs(monkeypatch):
+    """Run the real post-answer preparation; the returned list collects its threads."""
+    threads = []
+
+    def queue(*args, **kwargs):
+        thread = _REAL_QUEUE(*args, **kwargs)
+        threads.append(thread)
+        return thread
+
+    monkeypatch.setattr(nodes, "_queue_context_summaries", queue)
+    return threads
+
+
+def _join(threads):
+    for thread in threads:
+        thread.join(5)
+        assert not thread.is_alive()
+
+
+def _report(events):
+    return next(event["diagnostics"] for event in events if "diagnostics" in event)
+
+
+def test_compacted_answers_never_wait_for_a_summary_and_prepare_one_for_the_next(api, monkeypatch):
+    client, engine, calls = api
+    _long_summary_history(engine)
+    threads = _run_summary_jobs(monkeypatch)
+    written = []
+
+    def provider(spec, payload, max_output_bytes):
+        assert calls["agent"], "The answer request goes out before any summary request"
+        written.append(payload[0]["source_id"])
+        return f"covered:\n- Earlier explanation of the condition. [{payload[0]['source_id']}]"
+
+    monkeypatch.setattr(learning_summaries, "summarize_learning_context", provider)
+    events = ask(client, "Explain the condition again.")
+    assert events[-1]["status"] == "complete", events
+    assert not any("context_status" in event for event in events), "nothing to wait for"
+    assert "模型摘要（node=" not in calls["agent"][0][1]
+    assert _report(events)["summary_blocks"] == 0
+    assert len(threads) == 1, "the completed answer queues one preparation"
+    _join(threads)
+    assert len(written) == 1, "one summary call per answer by default"
+    with Session(engine) as session:
+        assert len(session.exec(select(ContextSummary)).all()) == 1
+    events = ask(client, "And the condition after that?")
+    assert events[-1]["status"] == "complete", events
+    _join(threads)
+    assert "模型摘要（node=1" in calls["agent"][1][1], "the next question uses it at once"
+    assert _report(events)["summary_blocks"] == 1
+    assert len(written) == 2, "and prepares the next block after its own answer"
+
+
+def test_only_completed_real_answers_prepare_summaries(api, monkeypatch):
+    client, engine, calls = api
+    _long_summary_history(engine)
+
+    def failing(*args, **kwargs):
+        raise RuntimeError("synthetic provider failure")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(nodes, "run_agent", failing)
+    assert ask(client)[-1]["status"] == "error"
+    assert calls["summary_jobs"] == []
+
+
+def test_more_blocks_per_answer_when_configured(api, monkeypatch):
+    client, engine, _ = api
+    monkeypatch.setattr(nodes.settings, "context_summary_blocks", 3)
+    _long_summary_history(engine)
+    threads = _run_summary_jobs(monkeypatch)
+    written = []
+
+    def provider(spec, payload, max_output_bytes):
+        written.append(payload[0]["source_id"])
+        return f"covered:\n- Earlier explanation. [{payload[0]['source_id']}]"
+
+    monkeypatch.setattr(learning_summaries, "summarize_learning_context", provider)
+    assert ask(client)[-1]["status"] == "complete"
+    _join(threads)
+    assert len(written) == 3 and len(set(written)) == 3
+
+
+def test_a_model_marked_for_summaries_writes_and_serves_them(api, monkeypatch):
+    client, engine, calls = api
+    _long_summary_history(engine)
+    with Session(engine) as session:
+        session.add(
+            ModelConfig(
+                id=2,
+                label="Cheap summaries",
+                base_url="https://cheap.invalid/v1",
+                llm_model="cheap-model",
+                api_key="synthetic-cheap-key",
+                use_for_summaries=True,
+            )
+        )
+        session.commit()
+    threads = _run_summary_jobs(monkeypatch)
+    writers = []
+
+    def provider(spec, payload, max_output_bytes):
+        writers.append(spec.llm_model)
+        return f"covered:\n- Earlier explanation. [{payload[0]['source_id']}]"
+
+    monkeypatch.setattr(learning_summaries, "summarize_learning_context", provider)
+    assert ask(client)[-1]["status"] == "complete"
+    _join(threads)
+    assert writers == ["cheap-model"]
+    assert calls["agent"][0][0].llm_model == "synthetic", "answers keep the selected model"
+    assert ask(client, "And afterwards?")[-1]["status"] == "complete"
+    _join(threads)
+    assert "模型摘要（node=1" in calls["agent"][1][1]
+    assert writers == ["cheap-model", "cheap-model"]
 
 
 def make_history_long(engine):

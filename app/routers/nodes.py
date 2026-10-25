@@ -29,7 +29,12 @@ from ..document_context import (
 )
 from ..documents import DocumentAttachment, document_summary, resolve_documents
 from ..learning_presets import UNKNOWN_PRESET, preset_catalog
-from ..learning_summaries import invalidate_summaries, summarize_history
+from ..learning_summaries import (
+    SUMMARY_HEADING,
+    invalidate_summaries,
+    prepare_summaries,
+    summarize_history,
+)
 from ..llm import (
     LLMSpec,
     complete,
@@ -62,6 +67,7 @@ from ..service import (
     get_thread,
     make_executor,
     resolve_config,
+    summary_spec,
     to_spec,
 )
 from ..title_generation import fallback_title, summarize_question
@@ -698,6 +704,33 @@ def _queue_branch_title(node_id: int, spec: LLMSpec) -> None:
     threading.Thread(target=generate, daemon=True).start()
 
 
+def _queue_context_summaries(spec: LLMSpec, sources, query: str, budget: int) -> threading.Thread:
+    """Prepare summaries of older history for later questions once an answer is complete.
+
+    The answer that queued this has been saved: it never waits for this work, and a
+    failure here never reaches it. Sources are checked again before every write.
+    """
+    job_engine = engine
+
+    def prepare() -> None:
+        try:
+            prepare_summaries(
+                job_engine,
+                spec,
+                sources,
+                query,
+                budget,
+                limit=settings.context_summary_blocks,
+                mutation_lock=_REQUEST_LOCK,
+            )
+        except Exception:
+            pass  # Optional work; the original records stay authoritative.
+
+    thread = threading.Thread(target=prepare, daemon=True)
+    thread.start()
+    return thread
+
+
 @router.post("/{node_id}/title")
 def generate_branch_title(
     node_id: int, body: TitleIn, session: Session = Depends(get_session)
@@ -967,6 +1000,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             raise HTTPException(400, "请先在设置中添加模型")
         spec = to_spec(cfg, session)
         config_id = cfg.id
+        # Snapshotted with the answer model: the model that writes context summaries.
+        summary_model = summary_spec(session, cfg, spec)
         previous_messages = get_messages(session, node_id)
         if node.status == "pending" or (
             node_id in _GENERATIONS and not _GENERATIONS[node_id].stop.is_set()
@@ -1170,6 +1205,9 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
         context_stats: dict = {}
         # Memory records that survived context assembly (ids and titles only).
         kept_sources: list[dict] = []
+        # The older sources, query and room a compacted answer used, for the summaries
+        # prepared after it in background mode.
+        summary_plan: dict = {}
         # The tool call in progress (numbered from 1) and complete texts by call index.
         call: dict = {"index": 0, "args": None}
         complete_texts: dict[int, str] = {}
@@ -1227,6 +1265,8 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                 # "time" or "tokens" when an agent budget ended the tool rounds early.
                 "tool_budget_stop": usage.get("tool_budget_stop"),
                 "calibration_ratio": round(float(spec.calibration), 3),
+                # Model summaries of older history in the prompt (cached or new).
+                "summary_blocks": int(context_stats.get("summary_blocks") or 0),
                 # The soft request target in tokens (configured or automatic).
                 "target_input_tokens": ContextPolicy.from_spec(spec).effective_target_tokens,
                 "timings_ms": {
@@ -1437,9 +1477,28 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
             if generation.stop.is_set():
                 return
             if context_stats["compacted"] and not is_mock:
-                # Tool selection and source-reader overhead are now final. Only
-                # this pass may generate a summary; preflight never calls a model.
-                generation.emit({"context_status": "summarizing"})
+                # Tool selection and source-reader overhead are now final. Only this
+                # pass may use model summaries; preflight never calls a model. In
+                # background mode it reads cached ones only and the missing ones are
+                # prepared once the answer is complete, so the answer never waits.
+                inline = settings.context_summary_mode == "inline"
+
+                def resolve_summary(sources, query, budget):
+                    if not inline:
+                        summary_plan.update(sources=sources, query=query, budget=budget)
+                    return summarize_history(
+                        engine,
+                        summary_model,
+                        sources,
+                        query,
+                        budget,
+                        stop=generation.stop,
+                        mutation_lock=_REQUEST_LOCK,
+                        generate=inline,
+                    )
+
+                if inline:
+                    generation.emit({"context_status": "summarizing"})
                 summary_started = time.monotonic()
                 try:
                     request_system, llm_messages = build_context(
@@ -1456,19 +1515,13 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                         documents=context_documents,
                         tool_schema_budget=schema_budget if tool_catalog else 0,
                         preset=preset,
-                        summary_resolver=lambda sources, query, budget: summarize_history(
-                            engine,
-                            spec,
-                            sources,
-                            query,
-                            budget,
-                            stop=generation.stop,
-                            mutation_lock=_REQUEST_LOCK,
-                        ),
+                        summary_resolver=resolve_summary,
                     )
                 finally:
                     timings["summary"] = time.monotonic() - summary_started
-                    generation.emit({"context_status": "ready"})
+                    if inline:
+                        generation.emit({"context_status": "ready"})
+                context_stats["summary_blocks"] = request_system.count(SUMMARY_HEADING)
                 if generation.stop.is_set():
                     return
             # Report only the memory records that survived context assembly, so the
@@ -1668,6 +1721,18 @@ def ask(node_id: int, body: AskIn, session: Session = Depends(get_session)) -> S
                     "error",
                     "回答保存失败，请检查磁盘空间后重试。",
                 )
+            if generation.status == "complete" and summary_plan:
+                # Blocks of the question's own node carry its pending state in their
+                # keys and would never be reused; the path above it is what later
+                # questions summarize. Queued before the answer is marked finished.
+                path = [(n, ms) for n, ms in summary_plan["sources"] if n.id != target_id]
+                if path:
+                    try:
+                        _queue_context_summaries(
+                            summary_model, path, summary_plan["query"], summary_plan["budget"]
+                        )
+                    except Exception:
+                        pass  # Optional work never changes a saved answer.
 
     def run():
         # The answer belongs to the server, not to one connection: closing the
